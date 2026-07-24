@@ -3,6 +3,7 @@
 mod args;
 mod invoke;
 mod python;
+mod toolchain;
 
 use std::env;
 use std::process::ExitCode;

@@ -4,7 +4,9 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.1.0";
@@ -36,7 +38,7 @@ fn bridge<const SIZE: usize>(
     arguments: [&OsStr; SIZE],
     input: Option<&[u8]>,
 ) -> Result<String, String> {
-    let mut command = uv();
+    let mut command = toolchain::uv()?;
     command
         .args([
             "run",
@@ -67,9 +69,7 @@ fn bridge<const SIZE: usize>(
     } else {
         command.stdin(Stdio::null());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "uv is unavailable; install it from https://docs.astral.sh/uv/")?;
+    let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
     if let (Some(source), Some(mut destination)) = (input, child.stdin.take()) {
         destination
             .write_all(source)
@@ -85,17 +85,6 @@ fn bridge<const SIZE: usize>(
     } else {
         Err(diagnostic(&output.stderr, "Assistant validation failed"))
     }
-}
-
-fn uv() -> Command {
-    let mut command = Command::new("uv");
-    command
-        .env_remove("UV_DEFAULT_INDEX")
-        .env_remove("UV_INDEX")
-        .env_remove("UV_INDEX_URL")
-        .env_remove("UV_EXTRA_INDEX_URL")
-        .env_remove("UV_FIND_LINKS");
-    command
 }
 
 fn diagnostic(stderr: &[u8], fallback: &str) -> String {
@@ -119,7 +108,7 @@ impl Requirements {
             return Err("pyproject.toml is required".into());
         }
         let requirements = Self::temporary()?;
-        let output = uv()
+        let output = toolchain::uv()?
             .args([
                 "pip",
                 "compile",
@@ -131,7 +120,7 @@ impl Requirements {
             .arg(&requirements.path)
             .args(["--python-version", PYTHON_VERSION, "--quiet", "--no-config"])
             .output()
-            .map_err(|_| "uv is unavailable; install it from https://docs.astral.sh/uv/")?;
+            .map_err(|_| "managed uv cannot run")?;
         if output.status.success() {
             Ok(requirements)
         } else {
