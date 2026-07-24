@@ -1,0 +1,32 @@
+[package]
+name = "shimpz-cli"
+version = "0.1.0"
+description = "Fast local tooling for Shimpz Assistants"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/TheShimpz/shimpz-cli"
+homepage = "https://shimpz.com"
+rust-version = "1.97.1"
+readme = "README.md"
+keywords = ["assistant", "cli", "shimpz"]
+categories = ["command-line-utilities", "development-tools"]
+publish = ["crates-io"]
+
+[[bin]]
+name = "shimpz"
+path = "src/main.rs"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = true
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
