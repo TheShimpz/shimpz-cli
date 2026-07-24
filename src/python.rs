@@ -10,11 +10,25 @@ const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.1.0";
 
 pub(crate) fn contract(project: &Path) -> Result<String, String> {
-    let root = project
-        .canonicalize()
-        .map_err(|_| "Assistant project is unavailable")?;
+    let root = project_root(project)?;
     let requirements = Requirements::compile(&root)?;
     bridge(&requirements, ["contract".as_ref(), root.as_os_str()], None)
+}
+
+pub(crate) fn invoke(project: &Path, power_id: &str, input: &[u8]) -> Result<String, String> {
+    let root = project_root(project)?;
+    let requirements = Requirements::compile(&root)?;
+    bridge(
+        &requirements,
+        ["invoke".as_ref(), root.as_os_str(), power_id.as_ref()],
+        Some(input),
+    )
+}
+
+fn project_root(project: &Path) -> Result<PathBuf, String> {
+    project
+        .canonicalize()
+        .map_err(|_| "Assistant project is unavailable".into())
 }
 
 fn bridge<const SIZE: usize>(
@@ -65,7 +79,9 @@ fn bridge<const SIZE: usize>(
         .wait_with_output()
         .map_err(|_| "Python SDK execution failed")?;
     if output.status.success() {
-        String::from_utf8(output.stdout).map_err(|_| "Python SDK returned invalid output".into())
+        String::from_utf8(output.stdout)
+            .map(|value| value.trim_end().to_owned())
+            .map_err(|_| "Python SDK returned invalid output".into())
     } else {
         Err(diagnostic(&output.stderr, "Assistant validation failed"))
     }
@@ -88,7 +104,7 @@ fn diagnostic(stderr: &[u8], fallback: &str) -> String {
     if trimmed.is_empty() {
         fallback.into()
     } else {
-        trimmed.into()
+        trimmed.strip_prefix("shimpz: ").unwrap_or(trimmed).into()
     }
 }
 

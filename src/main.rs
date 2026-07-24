@@ -1,6 +1,7 @@
 //! Command-line tooling for Shimpz Assistants.
 
 mod args;
+mod invoke;
 mod python;
 
 use std::env;
@@ -31,7 +32,11 @@ fn run(command: &Command) -> ExitCode {
         Command::Check { project } => {
             python::contract(project).map(|_| "Assistant is valid.".to_owned())
         }
-        Command::Test { .. } => Err("test is not available in this build".into()),
+        Command::Test {
+            project,
+            power,
+            input,
+        } => invoke::run(project, power, input),
     };
     match result {
         Ok(message) => {
