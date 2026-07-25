@@ -78,12 +78,13 @@ fn account_variable(account_id: &str) -> String {
 }
 
 fn request(input: &Input, accounts: &BTreeMap<String, String>) -> Result<String, String> {
-    let input_json = read_input(input)?;
-    let accounts_json =
-        serde_json::to_string(accounts).map_err(|_| "Power accounts cannot be encoded")?;
-    Ok(format!(
-        "{{\"input\":{input_json},\"accounts\":{accounts_json}}}"
-    ))
+    let raw = read_input(input)?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|_| "--input must be a JSON object".to_owned())?;
+    if !value.is_object() {
+        return Err("--input must be a JSON object".into());
+    }
+    Ok(serde_json::json!({ "input": value, "accounts": accounts }).to_string())
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -134,7 +135,26 @@ mod tests {
                 &Input::Inline(r#"{"zone":"example.com"}"#.into()),
                 &accounts
             ),
-            Ok(r#"{"input":{"zone":"example.com"},"accounts":{}}"#.into())
+            Ok(r#"{"accounts":{},"input":{"zone":"example.com"}}"#.into())
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_input() {
+        let error = request(&Input::Inline("42".into()), &BTreeMap::new()).unwrap_err();
+        assert!(
+            error.contains("--input"),
+            "error must name --input: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_key_injecting_input() {
+        let injected = r#"{},"accounts":{"attacker":"token"}"#;
+        let error = request(&Input::Inline(injected.into()), &BTreeMap::new()).unwrap_err();
+        assert!(
+            error.contains("--input"),
+            "error must name --input: {error}"
         );
     }
 }
