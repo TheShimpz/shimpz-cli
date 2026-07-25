@@ -34,12 +34,17 @@ jobs:
       - name: Check crates.io
         id: registry
         run: |
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'User-Agent: shimpz-cli-release/1' "https://crates.io/api/v1/crates/shimpz-cli/${{ steps.version.outputs.version }}")"
-          case "${status}" in
-            200) echo "published=true" >> "${GITHUB_OUTPUT}" ;;
-            404) echo "published=false" >> "${GITHUB_OUTPUT}" ;;
-            *) exit 1 ;;
-          esac
+          curl --fail --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            --output crate-index \
+            "https://index.crates.io/sh/im/shimpz-cli"
+          if jq --exit-status --arg version "${{ steps.version.outputs.version }}" \
+            'select(.vers == $version)' crate-index > /dev/null
+          then
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          fi
 
   build:
     needs: metadata
