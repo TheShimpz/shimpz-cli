@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! Verifies one dependency compilation per local Power test.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
