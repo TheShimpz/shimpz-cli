@@ -91,7 +91,15 @@ fn request(input: &Input, accounts: &BTreeMap<String, String>) -> Result<String,
 fn read_input(input: &Input) -> Result<String, String> {
     let bytes = match input {
         Input::Inline(value) => value.as_bytes().to_vec(),
-        Input::File(path) => fs::read(path).map_err(|_| "Power input file is unavailable")?,
+        Input::File(path) => {
+            let mut bytes = Vec::new();
+            fs::File::open(path)
+                .map_err(|_| "Power input file is unavailable")?
+                .take(MAX_INPUT_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "Power input cannot be read")?;
+            bytes
+        }
         Input::Stdin => {
             let mut bytes = Vec::new();
             io::stdin()
@@ -110,6 +118,48 @@ fn read_input(input: &Input) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_oversized_input_file_without_full_read() {
+        use std::io::Write;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let directory =
+            std::env::temp_dir().join(format!("shimpz-input-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let fifo = directory.join("input");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let writer_path = fifo.clone();
+        thread::spawn(move || {
+            let mut writer = fs::File::create(writer_path).unwrap();
+            writer
+                .write_all(&vec![b'a'; usize::try_from(MAX_INPUT_BYTES).unwrap() + 1])
+                .unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            sender.send(read_input(&Input::File(fifo))).unwrap();
+        });
+
+        let result = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("read_input must fail fast without draining an unbounded file");
+        assert_eq!(
+            result,
+            Err("Power input is outside the accepted size".to_owned())
+        );
+    }
 
     #[test]
     fn derives_account_environment_variables() {
