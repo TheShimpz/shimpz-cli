@@ -13,20 +13,33 @@ use crate::toolchain;
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.1.0";
 
-pub(crate) fn contract(project: &Path) -> Result<String, String> {
-    let root = project_root(project)?;
-    let requirements = Requirements::compile(&root)?;
-    bridge(&requirements, ["contract".as_ref(), root.as_os_str()], None)
+pub(crate) struct Assistant {
+    root: PathBuf,
+    requirements: Requirements,
 }
 
-pub(crate) fn invoke(project: &Path, power_id: &str, input: &[u8]) -> Result<String, String> {
-    let root = project_root(project)?;
-    let requirements = Requirements::compile(&root)?;
-    bridge(
-        &requirements,
-        ["invoke".as_ref(), root.as_os_str(), power_id.as_ref()],
-        Some(input),
-    )
+impl Assistant {
+    pub(crate) fn open(project: &Path) -> Result<Self, String> {
+        let root = project_root(project)?;
+        let requirements = Requirements::compile(&root)?;
+        Ok(Self { root, requirements })
+    }
+
+    pub(crate) fn contract(&self) -> Result<String, String> {
+        bridge(
+            &self.requirements,
+            ["contract".as_ref(), self.root.as_os_str()],
+            None,
+        )
+    }
+
+    pub(crate) fn invoke(&self, power_id: &str, input: &[u8]) -> Result<String, String> {
+        bridge(
+            &self.requirements,
+            ["invoke".as_ref(), self.root.as_os_str(), power_id.as_ref()],
+            Some(input),
+        )
+    }
 }
 
 fn project_root(project: &Path) -> Result<PathBuf, String> {

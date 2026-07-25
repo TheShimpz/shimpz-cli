@@ -13,11 +13,12 @@ use crate::python;
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 
 pub(crate) fn run(project: &Path, power_id: &str, input: &Input) -> Result<String, String> {
-    let contract = python::contract(project)?;
+    let assistant = python::Assistant::open(project)?;
+    let contract = assistant.contract()?;
     let account_ids = power_accounts(&contract, power_id)?;
     let accounts = account_tokens(&account_ids)?;
     let request = request(input, &accounts)?;
-    python::invoke(project, power_id, request.as_bytes())
+    assistant.invoke(power_id, request.as_bytes())
 }
 
 fn power_accounts(contract: &str, power_id: &str) -> Result<Vec<String>, String> {

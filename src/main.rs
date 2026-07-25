@@ -30,9 +30,9 @@ fn main() -> ExitCode {
 
 fn run(command: &Command) -> ExitCode {
     let result = match command {
-        Command::Check { project } => {
-            python::contract(project).map(|_| "Assistant is valid.".to_owned())
-        }
+        Command::Check { project } => python::Assistant::open(project)
+            .and_then(|assistant| assistant.contract())
+            .map(|_| "Assistant is valid.".to_owned()),
         Command::Test {
             project,
             power,
