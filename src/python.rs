@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use serde_json::Value;
+
 use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
@@ -105,12 +107,19 @@ fn bridge<const SIZE: usize>(
         .wait_with_output()
         .map_err(|_| "Python SDK execution failed")?;
     if output.status.success() {
-        String::from_utf8(output.stdout)
-            .map(|value| value.trim_end().to_owned())
-            .map_err(|_| "Python SDK returned invalid output".into())
+        decode(output.stdout)
     } else {
         Err(diagnostic(&output.stderr, "Assistant validation failed"))
     }
+}
+
+fn decode(stdout: Vec<u8>) -> Result<String, String> {
+    let text =
+        String::from_utf8(stdout).map_err(|_| "Python SDK returned invalid output".to_owned())?;
+    let trimmed = text.trim_end();
+    serde_json::from_str::<Value>(trimmed)
+        .map_err(|_| "Python SDK returned invalid output".to_owned())?;
+    Ok(trimmed.to_owned())
 }
 
 fn diagnostic(stderr: &[u8], fallback: &str) -> String {
@@ -177,5 +186,28 @@ impl Requirements {
 impl Drop for Requirements {
     fn drop(&mut self) {
         let _result = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+
+    #[test]
+    fn rejects_stdout_with_leading_noise() {
+        assert!(decode(b"junk\n{\"ok\":1}\n".to_vec()).is_err());
+    }
+
+    #[test]
+    fn rejects_stdout_with_trailing_object() {
+        assert!(decode(b"{\"ok\":1}{\"ok\":2}".to_vec()).is_err());
+    }
+
+    #[test]
+    fn accepts_a_single_json_object() {
+        assert_eq!(
+            decode(b"{\"ok\":1}\n".to_vec()),
+            Ok("{\"ok\":1}".to_owned())
+        );
     }
 }
