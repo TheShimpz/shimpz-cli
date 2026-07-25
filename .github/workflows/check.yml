@@ -1,0 +1,42 @@
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo test --all-features --locked --jobs "$(( $(nproc) / 2 ))"
+      - run: cargo package --locked
+      - name: Smoke test without Docker or repository artifacts
+        env:
+          SHIMPZ_CACHE_DIR: ${{ runner.temp }}/shimpz
+        run: |
+          cargo build --locked
+          target/debug/shimpz check --project tests/fixtures/assistant
+          result="$(target/debug/shimpz test greet --project tests/fixtures/assistant --input '{"name":"Ada"}')"
+          test "${result}" = '{"message":"Hello, Ada"}'
+          test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 3
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Test
+        shell: bash
+        run: cargo test --all-features --locked --jobs "$(( $(nproc) / 2 ))"
