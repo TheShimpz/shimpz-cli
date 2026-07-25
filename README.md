@@ -20,7 +20,11 @@ Releases. Both installation paths provide the `shimpz` command.
 ```console
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
+shimpz upgrade
 ```
+
+`shimpz upgrade` checks the latest stable GitHub release and replaces the
+current executable only when a newer version is available.
 
 Account tokens are read from environment variables and never accepted as CLI
 arguments. For example, account `cloudflare` uses

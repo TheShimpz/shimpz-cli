@@ -3,13 +3,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str = "Usage: shimpz <check|test> [options]";
+pub(crate) const USAGE: &str = "Usage: shimpz <check|test|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
 Usage:
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
+  shimpz upgrade
   shimpz --help
   shimpz --version
 ";
@@ -31,6 +32,7 @@ pub(crate) enum Command {
         power: String,
         input: Input,
     },
+    Upgrade,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -53,6 +55,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
         "-V" | "--version" | "version" => Ok(Action::Version),
         "check" => parse_check(rest),
         "test" => parse_test(rest),
+        "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
 }
@@ -109,6 +112,14 @@ fn parse_test(arguments: &[String]) -> Result<Action, String> {
         power: power.clone(),
         input: input.unwrap_or_else(|| Input::Inline("{}".into())),
     }))
+}
+
+fn parse_upgrade(arguments: &[String]) -> Result<Action, String> {
+    match arguments {
+        [] => Ok(Action::Run(Command::Upgrade)),
+        [option] if option == "--help" || option == "-h" => Ok(Action::Help),
+        _ => Err("upgrade accepts no options".into()),
+    }
 }
 
 fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
@@ -186,6 +197,18 @@ mod tests {
         assert_eq!(
             parse(strings(&["test", "CreateDns"])),
             Err("Power id is invalid".into())
+        );
+    }
+
+    #[test]
+    fn parses_upgrade_without_options() {
+        assert_eq!(
+            parse(strings(&["upgrade"])),
+            Ok(Action::Run(Command::Upgrade))
+        );
+        assert_eq!(
+            parse(strings(&["upgrade", "--force"])),
+            Err("upgrade accepts no options".into())
         );
     }
 }

@@ -4,6 +4,7 @@ mod args;
 mod invoke;
 mod python;
 mod toolchain;
+mod upgrade;
 
 use std::env;
 use std::process::ExitCode;
@@ -38,6 +39,7 @@ fn run(command: &Command) -> ExitCode {
             power,
             input,
         } => invoke::run(project, power, input),
+        Command::Upgrade => upgrade::run(),
     };
     match result {
         Ok(message) => {
