@@ -4,8 +4,13 @@ mod args;
 mod invoke;
 mod new_assistant;
 mod python;
+mod source_package;
 mod toolchain;
 mod upgrade;
+mod ustar;
+
+#[cfg(test)]
+mod source_package_tests;
 
 use std::env;
 use std::process::ExitCode;
@@ -33,9 +38,13 @@ fn main() -> ExitCode {
 fn run(command: &Command) -> ExitCode {
     let result = match command {
         Command::NewAssistant { name } => new_assistant::run(name),
-        Command::Check { project } => python::Assistant::open(project)
-            .and_then(|assistant| assistant.contract())
-            .map(|_| "Assistant is valid.".to_owned()),
+        Command::Check { project } => source_package::build(project)
+            .and_then(|package| {
+                python::Assistant::open(project)
+                    .and_then(|assistant| assistant.contract())
+                    .map(|_| package)
+            })
+            .map(source_package::check_summary),
         Command::Test {
             project,
             power,
