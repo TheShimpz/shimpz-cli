@@ -3,11 +3,12 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str = "Usage: shimpz <check|test|upgrade> [options]";
+pub(crate) const USAGE: &str = "Usage: shimpz <new|check|test|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
 Usage:
+  shimpz new assistant <name> [--language python]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
   shimpz upgrade
@@ -24,6 +25,9 @@ pub(crate) enum Action {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Command {
+    NewAssistant {
+        name: String,
+    },
     Check {
         project: PathBuf,
     },
@@ -53,11 +57,62 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(Action::Help),
         "-V" | "--version" | "version" => Ok(Action::Version),
+        "new" => parse_new(rest),
         "check" => parse_check(rest),
         "test" => parse_test(rest),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
+}
+
+fn parse_new(arguments: &[String]) -> Result<Action, String> {
+    match arguments.split_first() {
+        Some((option, _)) if option == "--help" || option == "-h" => Ok(Action::Help),
+        Some((resource, rest)) if resource == "assistant" => parse_new_assistant(rest),
+        Some(_) => Err("new only supports assistant".into()),
+        None => Err("new requires a resource".into()),
+    }
+}
+
+fn parse_new_assistant(arguments: &[String]) -> Result<Action, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Action::Help);
+    }
+    let mut name = None;
+    let mut language = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if let Some(value) = argument.strip_prefix("--language=") {
+            set_language(&mut language, value)?;
+        } else if argument == "--language" {
+            let value = arguments
+                .get(index + 1)
+                .ok_or_else(|| "--language requires a value".to_owned())?;
+            set_language(&mut language, value)?;
+            index += 1;
+        } else if argument.starts_with('-') {
+            return Err(format!("unknown option {argument}"));
+        } else if name.replace(argument.clone()).is_some() {
+            return Err("new assistant accepts one name".into());
+        }
+        index += 1;
+    }
+    let name = name.ok_or_else(|| "new assistant requires a name".to_owned())?;
+    if !valid_assistant_name(&name) {
+        return Err("Assistant name is invalid".into());
+    }
+    Ok(Action::Run(Command::NewAssistant { name }))
+}
+
+fn set_language(language: &mut Option<String>, value: &str) -> Result<(), String> {
+    if language.replace(value.to_owned()).is_some() {
+        return Err("--language was repeated".into());
+    }
+    if value != "python" {
+        return Err("only python is supported".into());
+    }
+    Ok(())
 }
 
 fn parse_check(arguments: &[String]) -> Result<Action, String> {
@@ -147,6 +202,10 @@ fn valid_power_id(value: &str) -> bool {
         && !value.ends_with('-')
 }
 
+fn valid_assistant_name(value: &str) -> bool {
+    valid_power_id(value) && !value.contains("--")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +221,49 @@ mod tests {
             Ok(Action::Run(Command::Check {
                 project: PathBuf::from(".")
             }))
+        );
+    }
+
+    #[test]
+    fn parses_a_new_python_assistant() {
+        assert_eq!(
+            parse(strings(&[
+                "new",
+                "assistant",
+                "hello-assistant",
+                "--language=python"
+            ])),
+            Ok(Action::Run(Command::NewAssistant {
+                name: "hello-assistant".into()
+            }))
+        );
+        assert_eq!(
+            parse(strings(&["new", "assistant", "hello-assistant"])),
+            Ok(Action::Run(Command::NewAssistant {
+                name: "hello-assistant".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_new_assistant_arguments() {
+        assert_eq!(
+            parse(strings(&["new", "assistant", "Hello"])),
+            Err("Assistant name is invalid".into())
+        );
+        assert_eq!(
+            parse(strings(&[
+                "new",
+                "assistant",
+                "hello",
+                "--language",
+                "typescript"
+            ])),
+            Err("only python is supported".into())
+        );
+        assert_eq!(
+            parse(strings(&["new", "assistant", "one", "two"])),
+            Err("new assistant accepts one name".into())
         );
     }
 

@@ -2,6 +2,7 @@
 
 mod args;
 mod invoke;
+mod new_assistant;
 mod python;
 mod toolchain;
 mod upgrade;
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
 
 fn run(command: &Command) -> ExitCode {
     let result = match command {
+        Command::NewAssistant { name } => new_assistant::run(name),
         Command::Check { project } => python::Assistant::open(project)
             .and_then(|assistant| assistant.contract())
             .map(|_| "Assistant is valid.".to_owned()),

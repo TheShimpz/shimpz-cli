@@ -18,10 +18,15 @@ Releases. Both installation paths provide the `shimpz` command.
 ## Use
 
 ```console
+shimpz new assistant hello-assistant
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
 shimpz upgrade
 ```
+
+`shimpz new assistant <name>` creates a minimal Python Assistant with one
+Hello World Power. Python is the default language; it can also be selected
+explicitly with `--language python`.
 
 `shimpz upgrade` checks the latest stable GitHub release and replaces the
 current executable only when a newer version is available.
