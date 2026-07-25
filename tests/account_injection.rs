@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! Exercises real Account injection through the CLI process boundary.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

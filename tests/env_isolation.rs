@@ -1,6 +1,6 @@
-#![cfg(unix)]
-
 //! Verifies the CLI-to-Power environment boundary.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

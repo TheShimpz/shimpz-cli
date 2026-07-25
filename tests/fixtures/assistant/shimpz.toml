@@ -6,3 +6,6 @@ creators = ["@roxygens"]
 github = "https://github.com/TheShimpz/shimpz-cli"
 allowed_hosts = []
 genesis = "Return a deterministic greeting for CLI verification."
+
+[accounts.cloudflare]
+scopes = ["zone.read"]
