@@ -39,6 +39,30 @@ fn bridge<const SIZE: usize>(
     input: Option<&[u8]>,
 ) -> Result<String, String> {
     let mut command = toolchain::uv()?;
+    command.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "PATHEXT",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
     command
         .args([
             "run",
