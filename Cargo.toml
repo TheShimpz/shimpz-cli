@@ -8,9 +8,11 @@ repository = "https://github.com/TheShimpz/shimpz-cli"
 homepage = "https://shimpz.com"
 rust-version = "1.97.1"
 readme = "README.md"
+authors = ["Shimpz Inc"]
 keywords = ["assistant", "cli", "shimpz"]
 categories = ["command-line-utilities", "development-tools"]
 publish = ["crates-io"]
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE"]
 
 [dependencies]
 serde_json = "1"

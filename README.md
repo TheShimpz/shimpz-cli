@@ -4,6 +4,19 @@
 It installs a pinned `uv` in its private cache, manages Python 3.14, and runs
 the public `shimpz` Python SDK from the Assistant's `pyproject.toml`.
 
+## Install
+
+Install with Cargo:
+
+```console
+cargo install shimpz-cli --locked
+```
+
+Prebuilt binaries for Linux, macOS, and Windows are available in GitHub
+Releases. Both installation paths provide the `shimpz` command.
+
+## Use
+
 ```console
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
