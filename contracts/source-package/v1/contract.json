@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "media_type": "application/vnd.shimpz.source.v1+tar",
+  "source_tree": {
+    "required_root_files": [
+      "pyproject.toml",
+      "shimpz.toml"
+    ],
+    "required_direct_power": {
+      "directory": "powers",
+      "minimum_files": 1,
+      "filename_pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*\\.py$"
+    },
+    "optional_roots": [
+      "lib",
+      "tests"
+    ],
+    "author_entry_type": "regular_file",
+    "directory_policy": "synthesize_nonempty_parents",
+    "empty_directories": "omit",
+    "unknown_root_policy": "reject"
+  },
+  "path": {
+    "encoding": "ASCII",
+    "separator": "/",
+    "segment_pattern": "^[A-Za-z0-9._-]+$",
+    "normalization": "none",
+    "absolute_paths": "reject",
+    "empty_dot_and_parent_segments": "reject",
+    "collision_key": "ASCII_A_Z_to_a_z",
+    "exact_and_collision_duplicates": "reject"
+  },
+  "limits": {
+    "package_bytes": 33554432,
+    "regular_files": 10000,
+    "single_file_bytes": 8388608,
+    "path_bytes": 256,
+    "path_components": 16,
+    "ustar_name_bytes": 100,
+    "ustar_prefix_bytes": 155
+  },
+  "archive": {
+    "format": "POSIX_ustar",
+    "compression": "none",
+    "block_bytes": 512,
+    "end_zero_blocks": 2,
+    "entry_order": "canonical_path_ASCII_byte_ascending",
+    "directory_header_trailing_slash": false,
+    "path_encoding": {
+      "short": "full_path_in_name_when_at_most_100_bytes",
+      "long": "rightmost_slash_prefix_and_basename",
+      "extensions": "reject"
+    },
+    "metadata": {
+      "file_mode": 420,
+      "directory_mode": 493,
+      "uid": 0,
+      "gid": 0,
+      "mtime": 0,
+      "uname": "",
+      "gname": "",
+      "file_typeflag": "0",
+      "directory_typeflag": "5",
+      "linkname": "",
+      "magic_hex": "757374617200",
+      "version": "00",
+      "devmajor": 0,
+      "devminor": 0
+    },
+    "numeric_fields": "zero_padded_octal_with_trailing_NUL",
+    "checksum_field": "six_zero_padded_octal_digits_NUL_space",
+    "file_padding": "zero_to_512_byte_boundary"
+  },
+  "rejected_author_entry_types": [
+    "block_device",
+    "character_device",
+    "fifo",
+    "hardlink",
+    "socket",
+    "symlink"
+  ],
+  "rejection_codes": [
+    "absolute_path",
+    "case_collision",
+    "duplicate_path",
+    "file_count_exceeded",
+    "invalid_entry",
+    "invalid_path_segment",
+    "missing_power",
+    "missing_required_file",
+    "nested_power",
+    "non_ascii_path",
+    "package_too_large",
+    "path_too_deep",
+    "path_too_long",
+    "single_file_too_large",
+    "special_file",
+    "traversal",
+    "unknown_root",
+    "ustar_name_too_long",
+    "ustar_prefix_too_long"
+  ]
+}

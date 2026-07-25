@@ -1475,6 +1475,7 @@ version = "0.1.4"
 dependencies = [
  "self_update",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

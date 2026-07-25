@@ -1,0 +1,259 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "minimum",
+      "valid": true,
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": "spec = 1\n"},
+        {"path": "pyproject.toml", "type": "regular_file", "text": "[project]\nname = \"hello\"\n"},
+        {"path": "powers/hello.py", "type": "regular_file", "text": "async def run():\n    return \"hello\"\n"}
+      ],
+      "sha256": "5afa5d913c54efb877eaa6b12e129e1938d16d3c6eb3a9750587e082604917e0"
+    },
+    {
+      "name": "portable_ascii",
+      "valid": true,
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/Hello_world-1.py", "type": "regular_file", "text": ""},
+        {"path": "lib/pkg.name/__init__.py", "type": "regular_file", "text": ""},
+        {"path": "tests/test-hello_world.py", "type": "regular_file", "text": ""}
+      ],
+      "sha256": "86b4a73045aaae8e198f2aeae637f73446fe3bbfb0c5c6be368850a63ccdf3c7"
+    },
+    {
+      "name": "maximum_depth",
+      "valid": true,
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""},
+        {"path": "lib/a/b/c/d/e/f/g/h/i/j/k/l/m/n/deep.py", "type": "regular_file", "text": "deep = True\n"}
+      ],
+      "sha256": "1b003ade7fc9612db45de07ec25e844878b3b018e9c513846d9580dbb6e9a465"
+    },
+    {
+      "name": "split_path_256_bytes",
+      "valid": true,
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""},
+        {
+          "path": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.py",
+          "type": "regular_file",
+          "text": ""
+        }
+      ],
+      "expected_ustar": {
+        "path": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.py",
+        "prefix": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.py"
+      },
+      "sha256": "05e3cfa3e8f3a30a18b8630b07547782e0b819cf9f0579998e0bb71907f86a78"
+    },
+    {
+      "name": "non_ascii",
+      "valid": false,
+      "error": "non_ascii_path",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""},
+        {"path": "lib/café.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "case_collision",
+      "valid": false,
+      "error": "case_collision",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""},
+        {"path": "lib/Hello.py", "type": "regular_file", "text": ""},
+        {"path": "lib/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "basename_101_bytes",
+      "valid": false,
+      "error": "ustar_name_too_long",
+      "entries": [
+        {"path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "unencodable_ustar_path",
+      "valid": false,
+      "error": "ustar_prefix_too_long",
+      "entries": [
+        {"path": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "nested_power",
+      "valid": false,
+      "error": "nested_power",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/nested/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "symlink",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/link.py", "type": "symlink", "target": "../outside.py"}
+      ]
+    },
+    {
+      "name": "hardlink",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/link.py", "type": "hardlink", "target": "lib/real.py"}
+      ]
+    },
+    {
+      "name": "absolute_path",
+      "valid": false,
+      "error": "absolute_path",
+      "entries": [
+        {"path": "/etc/passwd", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "traversal",
+      "valid": false,
+      "error": "traversal",
+      "entries": [
+        {"path": "lib/../escape.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "fifo",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/pipe", "type": "fifo"}
+      ]
+    },
+    {
+      "name": "character_device",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/tty", "type": "character_device"}
+      ]
+    },
+    {
+      "name": "block_device",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/disk", "type": "block_device"}
+      ]
+    },
+    {
+      "name": "socket",
+      "valid": false,
+      "error": "special_file",
+      "entries": [
+        {"path": "lib/service.sock", "type": "socket"}
+      ]
+    },
+    {
+      "name": "single_file_oversize",
+      "valid": false,
+      "error": "single_file_too_large",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "repeat": {"byte": "x", "count": 8388609}}
+      ]
+    },
+    {
+      "name": "package_oversize",
+      "valid": false,
+      "error": "package_too_large",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "repeat": {"byte": "a", "count": 8388608}},
+        {"path": "pyproject.toml", "type": "regular_file", "repeat": {"byte": "b", "count": 8388608}},
+        {"path": "powers/hello.py", "type": "regular_file", "repeat": {"byte": "c", "count": 8388608}},
+        {"path": "lib/data.bin", "type": "regular_file", "repeat": {"byte": "d", "count": 8388608}}
+      ]
+    },
+    {
+      "name": "file_count_oversize",
+      "valid": false,
+      "error": "file_count_exceeded",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ],
+      "generate": [
+        {"root": "tests", "prefix": "case-", "suffix": ".py", "start": 0, "count": 9998, "width": 5, "text": ""}
+      ]
+    },
+    {
+      "name": "depth_oversize",
+      "valid": false,
+      "error": "path_too_deep",
+      "entries": [
+        {"path": "lib/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/deep.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "path_oversize",
+      "valid": false,
+      "error": "path_too_long",
+      "entries": [
+        {"path": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "extra_root",
+      "valid": false,
+      "error": "unknown_root",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""},
+        {"path": "README.md", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "missing_manifest",
+      "valid": false,
+      "error": "missing_required_file",
+      "entries": [
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "missing_pyproject",
+      "valid": false,
+      "error": "missing_required_file",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "missing_power",
+      "valid": false,
+      "error": "missing_power",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""}
+      ]
+    }
+  ]
+}
