@@ -83,6 +83,7 @@ fn manifest(name: &str) -> String {
     format!(
         "\
 spec = 1
+id = \"{name}\"
 version = \"0.1.0\"
 name = \"{display_name}\"
 summary = \"A Hello World Assistant for Shimpz.\"
@@ -107,7 +108,7 @@ version = \"0.1.0\"
 description = \"A Hello World Assistant for Shimpz\"
 requires-python = \">=3.14\"
 dependencies = [
-  \"shimpz==0.1.1\",
+  \"shimpz==0.1.2\",
 ]
 
 [tool.ruff]
@@ -212,10 +213,13 @@ mod tests {
                 "tests/test_hello.py".into(),
             ])
         );
+        let manifest = fs::read_to_string(root.join("shimpz.toml")).unwrap();
+        assert!(manifest.contains("id = \"hello-assistant\""));
+        assert!(manifest.contains("name = \"Hello Assistant\""));
         assert!(
-            fs::read_to_string(root.join("shimpz.toml"))
+            fs::read_to_string(root.join("pyproject.toml"))
                 .unwrap()
-                .contains("name = \"Hello Assistant\"")
+                .contains("\"shimpz==0.1.2\"")
         );
         assert!(
             fs::read_to_string(root.join("powers/hello_world.py"))

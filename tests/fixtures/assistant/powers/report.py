@@ -8,5 +8,5 @@ class Report(TypedDict):
 
 
 @power(accounts=["cloudflare"])
-async def run(*, ctx: Context = None) -> Report:
+async def run(*, ctx: Context) -> Report:
     return {"token_length": len(ctx.accounts.cloudflare.access_token)}

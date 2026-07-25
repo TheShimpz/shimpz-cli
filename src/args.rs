@@ -203,7 +203,10 @@ fn valid_power_id(value: &str) -> bool {
 }
 
 fn valid_assistant_name(value: &str) -> bool {
-    valid_power_id(value) && !value.contains("--")
+    valid_power_id(value)
+        && value.len() <= 40
+        && !value.contains("--")
+        && !matches!(value, "postgres" | "app-egress-proxy")
 }
 
 #[cfg(test)]
@@ -265,6 +268,16 @@ mod tests {
             parse(strings(&["new", "assistant", "one", "two"])),
             Err("new assistant accepts one name".into())
         );
+        for name in [
+            "postgres",
+            "app-egress-proxy",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert_eq!(
+                parse(strings(&["new", "assistant", name])),
+                Err("Assistant name is invalid".into())
+            );
+        }
     }
 
     #[test]

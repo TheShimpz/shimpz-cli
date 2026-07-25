@@ -1,4 +1,5 @@
 spec = 1
+id = "cli-smoke"
 version = "0.1.0"
 name = "CLI Smoke Assistant"
 summary = "Verify local file-backed Power execution."
