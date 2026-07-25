@@ -44,6 +44,7 @@ fn bridge<const SIZE: usize>(
             "run",
             "--default-index",
             "https://pypi.org/simple",
+            "--isolated",
             "--no-project",
             "--with-requirements",
         ])
