@@ -62,6 +62,7 @@ fn bridge<const SIZE: usize>(
             "shimpz._bridge",
         ])
         .args(arguments)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if input.is_some() {
