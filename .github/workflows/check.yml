@@ -23,15 +23,6 @@ jobs:
           test "${jobs}" -ge 1 || jobs=1
           cargo test --all-features --locked --jobs "${jobs}"
       - run: cargo package --locked
-      - name: Smoke test without Docker or repository artifacts
-        env:
-          SHIMPZ_CACHE_DIR: ${{ runner.temp }}/shimpz
-        run: |
-          cargo build --locked
-          target/debug/shimpz check --project tests/fixtures/assistant
-          result="$(target/debug/shimpz test greet --project tests/fixtures/assistant --input '{"name":"Ada"}')"
-          test "${result}" = '{"message":"Hello, Ada"}'
-          test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 3
 
   test:
     strategy:
@@ -48,3 +39,22 @@ jobs:
           jobs="$(( processors / 2 ))"
           test "${jobs}" -ge 1 || jobs=1
           cargo test --all-features --locked --jobs "${jobs}"
+      - name: Smoke test without Docker or repository artifacts
+        shell: bash
+        env:
+          SHIMPZ_CACHE_DIR: ${{ runner.temp }}/shimpz
+        run: |
+          cargo build --locked
+          bin="target/debug/shimpz"
+          test "${RUNNER_OS}" = "Windows" && bin="${bin}.exe"
+          "${bin}" check --project tests/fixtures/assistant
+          test "$("${bin}" test greet --project tests/fixtures/assistant --input '{"name":"Ada"}')" = '{"message":"Hello, Ada"}'
+          export SHIMPZ_ACCOUNT_CLOUDFLARE=smoke-token-0123
+          # shimpz test report exposes only a non-secret derived token length.
+          test "$("${bin}" test report --project tests/fixtures/assistant --input '{}')" = '{"token_length":16}'
+          if env -u SHIMPZ_ACCOUNT_CLOUDFLARE "${bin}" test report --project tests/fixtures/assistant --input '{}' 2>error.log; then
+            echo 'expected the missing-account failure' >&2
+            exit 1
+          fi
+          grep -q 'SHIMPZ_ACCOUNT_CLOUDFLARE is required for this Power' error.log
+          test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 4
