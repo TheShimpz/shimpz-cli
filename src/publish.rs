@@ -169,7 +169,10 @@ struct Publication {
     safe_error_code: Option<String>,
     image_reference: Option<String>,
     oci_digest: Option<String>,
+    manifest_digest: Option<String>,
+    machine_contract_digest: Option<String>,
     signature_identity: Option<String>,
+    signature_reference: Option<String>,
     provenance_reference: Option<String>,
     sbom_digest: Option<String>,
     scan_digest: Option<String>,
@@ -208,7 +211,10 @@ impl Publication {
         let artifacts = [
             self.image_reference.as_deref(),
             self.oci_digest.as_deref(),
+            self.manifest_digest.as_deref(),
+            self.machine_contract_digest.as_deref(),
             self.signature_identity.as_deref(),
+            self.signature_reference.as_deref(),
             self.provenance_reference.as_deref(),
             self.sbom_digest.as_deref(),
             self.scan_digest.as_deref(),
@@ -239,20 +245,29 @@ impl Publication {
         let Some(oci_digest) = self.oci_digest.as_deref() else {
             return false;
         };
-        let Some(workflow_run_id) = self.workflow_run_id else {
+        if self.workflow_run_id.is_none_or(|value| value == 0) {
             return false;
-        };
+        }
         let expected_image = format!("ghcr.io/theshimpz/shimpz-assistants@{oci_digest}");
-        let expected_provenance = format!(
-            "https://github.com/TheShimpz/shimpz-developers/actions/runs/{workflow_run_id}"
-        );
         valid_digest(oci_digest)
             && self.image_reference.as_deref() == Some(expected_image.as_str())
+            && self.manifest_digest.as_deref().is_some_and(valid_digest)
+            && self
+                .machine_contract_digest
+                .as_deref()
+                .is_some_and(valid_digest)
             && self.signature_identity.as_deref()
                 == Some(
                     "https://github.com/TheShimpz/shimpz-developers/.github/workflows/build-assistant.yml@refs/heads/main",
                 )
-            && self.provenance_reference.as_deref() == Some(expected_provenance.as_str())
+            && self
+                .signature_reference
+                .as_deref()
+                .is_some_and(valid_trust_reference)
+            && self
+                .provenance_reference
+                .as_deref()
+                .is_some_and(valid_trust_reference)
             && self.sbom_digest.as_deref().is_some_and(valid_digest)
             && self.scan_digest.as_deref().is_some_and(valid_digest)
     }
@@ -287,14 +302,19 @@ impl Publication {
                 .provenance_reference
                 .as_deref()
                 .expect("validated ready publication has provenance");
+            let signature = self
+                .signature_reference
+                .as_deref()
+                .expect("validated ready publication has a signature");
             Ok(format!(
-                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nImage: {}\nOCI digest: {}\nReview: {}\nProvenance: {}\nPortal: https://developers.shimpz.com/assistants/{}",
+                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nImage: {}\nOCI digest: {}\nReview: {}\nSignature: {}\nProvenance: {}\nPortal: https://developers.shimpz.com/assistants/{}",
                 self.assistant_id,
                 self.version,
                 self.source_digest,
                 image,
                 oci_digest,
                 self.review_state,
+                signature,
                 provenance,
                 self.assistant_id
             ))
@@ -382,6 +402,12 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn valid_trust_reference(value: &str) -> bool {
+    value
+        .strip_prefix("ghcr.io/theshimpz/shimpz-assistant-trust@")
+        .is_some_and(valid_digest)
+}
+
 fn unavailable() -> String {
     "Developers is unavailable; try again shortly".into()
 }
@@ -404,7 +430,10 @@ mod tests {
             safe_error_code: None,
             image_reference: None,
             oci_digest: None,
+            manifest_digest: None,
+            machine_contract_digest: None,
             signature_identity: None,
+            signature_reference: None,
             provenance_reference: None,
             sbom_digest: None,
             scan_digest: None,
@@ -417,11 +446,15 @@ mod tests {
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         ready.image_reference = Some(format!("ghcr.io/theshimpz/shimpz-assistants@{digest}"));
         ready.oci_digest = Some(digest.into());
+        ready.manifest_digest = Some(digest.into());
+        ready.machine_contract_digest = Some(digest.into());
         ready.signature_identity = Some(
             "https://github.com/TheShimpz/shimpz-developers/.github/workflows/build-assistant.yml@refs/heads/main".into(),
         );
+        ready.signature_reference =
+            Some(format!("ghcr.io/theshimpz/shimpz-assistant-trust@{digest}"));
         ready.provenance_reference =
-            Some("https://github.com/TheShimpz/shimpz-developers/actions/runs/42".into());
+            Some(format!("ghcr.io/theshimpz/shimpz-assistant-trust@{digest}"));
         ready.sbom_digest = Some(digest.into());
         ready.scan_digest = Some(digest.into());
         ready.workflow_run_id = Some(42);
@@ -441,6 +474,13 @@ mod tests {
         assert!(invalid.validate(DIGEST).is_err());
         invalid = publication("queued");
         invalid.source_digest = DIGEST.replace('a', "b");
+        assert!(invalid.validate(DIGEST).is_err());
+        invalid = ready_publication();
+        invalid.signature_reference =
+            Some("ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+        assert!(invalid.validate(DIGEST).is_err());
+        invalid = ready_publication();
+        invalid.workflow_run_id = Some(0);
         assert!(invalid.validate(DIGEST).is_err());
     }
 
