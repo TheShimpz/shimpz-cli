@@ -18,11 +18,18 @@ Releases. Both installation paths provide the `shimpz` command.
 ## Use
 
 ```console
+shimpz auth
 shimpz new assistant hello-assistant
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
 shimpz upgrade
 ```
+
+`shimpz auth` opens the default browser for OAuth authorization and also
+prints the URL and user code in the terminal. `shimpz auth status` validates
+the exact Accounts session online, while `shimpz auth logout` revokes the
+complete rotating token family. Local credentials are stored in the current
+OS user configuration directory with owner-only permissions.
 
 `shimpz new assistant <name>` creates a minimal Python Assistant with one
 Hello World Power. Python is the default language; it can also be selected

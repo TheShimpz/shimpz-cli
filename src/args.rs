@@ -3,11 +3,12 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str = "Usage: shimpz <new|check|test|upgrade> [options]";
+pub(crate) const USAGE: &str = "Usage: shimpz <auth|new|check|test|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
 Usage:
+  shimpz auth [login|status|logout]
   shimpz new assistant <name> [--language python]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
@@ -25,6 +26,7 @@ pub(crate) enum Action {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Command {
+    Auth(AuthAction),
     NewAssistant {
         name: String,
     },
@@ -37,6 +39,13 @@ pub(crate) enum Command {
         input: Input,
     },
     Upgrade,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum AuthAction {
+    Login,
+    Status,
+    Logout,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -57,12 +66,25 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(Action::Help),
         "-V" | "--version" | "version" => Ok(Action::Version),
+        "auth" => parse_auth(rest),
         "new" => parse_new(rest),
         "check" => parse_check(rest),
         "test" => parse_test(rest),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
+}
+
+fn parse_auth(arguments: &[String]) -> Result<Action, String> {
+    let action = match arguments {
+        [] => AuthAction::Login,
+        [action] if action == "login" => AuthAction::Login,
+        [action] if action == "status" => AuthAction::Status,
+        [action] if action == "logout" => AuthAction::Logout,
+        [option] if option == "--help" || option == "-h" => return Ok(Action::Help),
+        _ => return Err("auth accepts login, status, or logout".into()),
+    };
+    Ok(Action::Run(Command::Auth(action)))
 }
 
 fn parse_new(arguments: &[String]) -> Result<Action, String> {
@@ -224,6 +246,30 @@ mod tests {
             Ok(Action::Run(Command::Check {
                 project: PathBuf::from(".")
             }))
+        );
+    }
+
+    #[test]
+    fn parses_auth_with_login_as_the_default() {
+        assert_eq!(
+            parse(strings(&["auth"])),
+            Ok(Action::Run(Command::Auth(AuthAction::Login)))
+        );
+        assert_eq!(
+            parse(strings(&["auth", "login"])),
+            Ok(Action::Run(Command::Auth(AuthAction::Login)))
+        );
+        assert_eq!(
+            parse(strings(&["auth", "status"])),
+            Ok(Action::Run(Command::Auth(AuthAction::Status)))
+        );
+        assert_eq!(
+            parse(strings(&["auth", "logout"])),
+            Ok(Action::Run(Command::Auth(AuthAction::Logout)))
+        );
+        assert_eq!(
+            parse(strings(&["auth", "token"])),
+            Err("auth accepts login, status, or logout".into())
         );
     }
 

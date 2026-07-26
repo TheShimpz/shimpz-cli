@@ -1,6 +1,8 @@
 //! Command-line tooling for Shimpz Assistants.
 
 mod args;
+mod auth;
+mod credentials;
 mod invoke;
 mod new_assistant;
 mod python;
@@ -15,7 +17,7 @@ mod source_package_tests;
 use std::env;
 use std::process::ExitCode;
 
-use args::{Action, Command};
+use args::{Action, AuthAction, Command};
 
 fn main() -> ExitCode {
     match args::parse(env::args_os().skip(1)) {
@@ -37,6 +39,9 @@ fn main() -> ExitCode {
 
 fn run(command: &Command) -> ExitCode {
     let result = match command {
+        Command::Auth(AuthAction::Login) => auth::login(),
+        Command::Auth(AuthAction::Status) => auth::status(),
+        Command::Auth(AuthAction::Logout) => auth::logout(),
         Command::NewAssistant { name } => new_assistant::run(name),
         Command::Check { project } => source_package::build(project)
             .and_then(|package| {
