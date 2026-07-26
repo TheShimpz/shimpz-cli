@@ -20,7 +20,8 @@ const SESSION_URL: &str = "https://developers.shimpz.com/api/v1/auth/session";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
-const REQUESTED_SCOPES: [&str; 4] = [
+const IDENTITY_SCOPE: &str = "identity:read";
+const AVAILABLE_SCOPES: [&str; 4] = [
     "identity:read",
     "teams:read",
     "assistant:publish",
@@ -36,16 +37,18 @@ pub(crate) fn login() -> Result<String, String> {
         api.revoke(stored.refresh_token())?;
         credentials::clear()?;
     }
-    interactive_login(&api)?;
+    interactive_login(&api, &[IDENTITY_SCOPE])?;
     Ok("Authentication complete. You can close the browser tab.".into())
 }
 
 pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, String> {
-    if !REQUESTED_SCOPES.contains(&required_scope) {
+    if !AVAILABLE_SCOPES.contains(&required_scope) {
         return Err("CLI requested an unknown permission".into());
     }
     let api = Api::new();
+    let mut requested_scopes = cumulative_scopes(&[], required_scope);
     if let Some(mut stored) = credentials::load()? {
+        requested_scopes = cumulative_scopes(stored.scopes(), required_scope);
         if ensure_session(&api, &mut stored)?
             .is_some_and(|session| session.has_scope(required_scope))
         {
@@ -54,7 +57,7 @@ pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, 
         api.revoke(stored.refresh_token())?;
         credentials::clear()?;
     }
-    let mut stored = interactive_login(&api)?;
+    let mut stored = interactive_login(&api, &requested_scopes)?;
     println!("Authentication complete. You can close the browser tab.");
     let authorized =
         ensure_session(&api, &mut stored)?.is_some_and(|session| session.has_scope(required_scope));
@@ -66,8 +69,8 @@ pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, 
     Ok(stored)
 }
 
-fn interactive_login(api: &Api) -> Result<Credentials, String> {
-    let authorization = api.authorize()?;
+fn interactive_login(api: &Api, scopes: &[&str]) -> Result<Credentials, String> {
+    let authorization = api.authorize(scopes)?;
     println!("Authorize Shimpz in your browser:");
     println!("{}", authorization.verification_url);
     println!("Code: {}", authorization.user_code);
@@ -80,6 +83,17 @@ fn interactive_login(api: &Api) -> Result<Credentials, String> {
     let tokens = api.wait_for_tokens(&authorization)?;
     credentials::store(&tokens)?;
     Ok(tokens)
+}
+
+fn cumulative_scopes(existing: &[String], required: &str) -> Vec<&'static str> {
+    AVAILABLE_SCOPES
+        .into_iter()
+        .filter(|scope| {
+            *scope == IDENTITY_SCOPE
+                || *scope == required
+                || existing.iter().any(|current| current == scope)
+        })
+        .collect()
 }
 
 pub(crate) fn status() -> Result<String, String> {
@@ -122,14 +136,12 @@ impl Api {
         }
     }
 
-    fn authorize(&self) -> Result<DeviceAuthorization, String> {
+    fn authorize(&self, scopes: &[&str]) -> Result<DeviceAuthorization, String> {
         let mut response = self
             .agent
             .post(AUTHORIZE_URL)
             .header("Accept", "application/json")
-            .send_json(AuthorizationRequest {
-                scopes: &REQUESTED_SCOPES,
-            })
+            .send_json(AuthorizationRequest { scopes })
             .map_err(|_| unavailable())?;
         if response.status().as_u16() != 200 {
             return Err(status_error(&mut response, "authorization could not start"));
@@ -420,11 +432,11 @@ impl AuthSession {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             || self.scopes.is_empty()
-            || self.scopes.len() > REQUESTED_SCOPES.len()
+            || self.scopes.len() > AVAILABLE_SCOPES.len()
             || self
                 .scopes
                 .iter()
-                .any(|scope| !REQUESTED_SCOPES.contains(&scope.as_str()))
+                .any(|scope| !AVAILABLE_SCOPES.contains(&scope.as_str()))
         {
             return Err("Developers returned an invalid session response".into());
         }
@@ -495,8 +507,8 @@ fn valid_user_code(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthSession, DeviceAuthorization, SecretInput, TokenResponse, valid_error_code,
-        valid_user_code,
+        AuthSession, DeviceAuthorization, SecretInput, TokenResponse, cumulative_scopes,
+        valid_error_code, valid_user_code,
     };
 
     #[test]
@@ -513,6 +525,22 @@ mod tests {
         };
 
         assert!(valid.validate().is_ok());
+    }
+
+    #[test]
+    fn requests_only_identity_and_cumulative_command_scopes() {
+        assert_eq!(cumulative_scopes(&[], "identity:read"), ["identity:read"]);
+        assert_eq!(
+            cumulative_scopes(&[], "assistant:publish"),
+            ["identity:read", "assistant:publish"]
+        );
+        assert_eq!(
+            cumulative_scopes(
+                &["identity:read".into(), "assistant:publish".into()],
+                "assistant:install"
+            ),
+            ["identity:read", "assistant:publish", "assistant:install"]
+        );
     }
 
     #[test]

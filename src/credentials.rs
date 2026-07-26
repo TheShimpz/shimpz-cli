@@ -63,6 +63,10 @@ impl Credentials {
         &self.refresh_token
     }
 
+    pub(crate) fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.version != FORMAT_VERSION
             || !valid_token(&self.access_token)
