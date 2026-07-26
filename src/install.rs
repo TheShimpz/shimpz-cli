@@ -11,7 +11,7 @@ use crate::auth;
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
 const REQUIRED_SCOPE: &str = "assistant:install";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 pub(crate) fn run(source_digest: &str, selected_team: Option<&str>) -> Result<String, String> {
