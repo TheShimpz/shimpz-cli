@@ -3,7 +3,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str = "Usage: shimpz <auth|new|check|test|publish|upgrade> [options]";
+pub(crate) const USAGE: &str =
+    "Usage: shimpz <auth|new|check|test|publish|install|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
@@ -13,6 +14,7 @@ Usage:
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
   shimpz publish [--project <path>]
+  shimpz install assistant <source-hash> [--team <team-id>]
   shimpz upgrade
   shimpz --help
   shimpz --version
@@ -41,6 +43,10 @@ pub(crate) enum Command {
     },
     Publish {
         project: PathBuf,
+    },
+    InstallAssistant {
+        source_digest: String,
+        team: Option<String>,
     },
     Upgrade,
 }
@@ -75,6 +81,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
         "check" => parse_check(rest),
         "test" => parse_test(rest),
         "publish" => parse_publish(rest),
+        "install" => parse_install(rest),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
@@ -217,6 +224,35 @@ fn parse_publish(arguments: &[String]) -> Result<Action, String> {
     Ok(Action::Run(Command::Publish { project }))
 }
 
+fn parse_install(arguments: &[String]) -> Result<Action, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Action::Help);
+    }
+    let Some((resource, rest)) = arguments.split_first() else {
+        return Err("install requires a resource".into());
+    };
+    if resource != "assistant" {
+        return Err("install only supports assistant".into());
+    }
+    let Some(source_digest) = rest.first().filter(|value| !value.starts_with('-')) else {
+        return Err("install assistant requires a source hash".into());
+    };
+    if !valid_sha256_digest(source_digest) {
+        return Err("Assistant source hash is invalid".into());
+    }
+    let team = match &rest[1..] {
+        [] => None,
+        [option, value] if option == "--team" && valid_team_id(value) => Some(value.clone()),
+        [option, _] if option == "--team" => return Err("Team id is invalid".into()),
+        [option] if option == "--team" => return Err("--team requires a value".into()),
+        _ => return Err("install assistant accepts only --team <team-id>".into()),
+    };
+    Ok(Action::Run(Command::InstallAssistant {
+        source_digest: source_digest.clone(),
+        team,
+    }))
+}
+
 fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
     match arguments {
         [] => Ok(PathBuf::from(".")),
@@ -247,6 +283,22 @@ fn valid_assistant_name(value: &str) -> bool {
         && value.len() <= 40
         && !value.contains("--")
         && !matches!(value, "postgres" | "app-egress-proxy")
+}
+
+fn valid_team_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]
@@ -388,6 +440,31 @@ mod tests {
         assert_eq!(
             parse(strings(&["upgrade", "--force"])),
             Err("upgrade accepts no options".into())
+        );
+    }
+
+    #[test]
+    fn parses_assistant_install_with_an_optional_team() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            parse(strings(&["install", "assistant", &digest])),
+            Ok(Action::Run(Command::InstallAssistant {
+                source_digest: digest.clone(),
+                team: None,
+            }))
+        );
+        assert_eq!(
+            parse(strings(&[
+                "install",
+                "assistant",
+                &digest,
+                "--team",
+                "team_1"
+            ])),
+            Ok(Action::Run(Command::InstallAssistant {
+                source_digest: digest,
+                team: Some("team_1".into()),
+            }))
         );
     }
 

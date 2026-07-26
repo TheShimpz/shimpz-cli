@@ -3,6 +3,7 @@
 mod args;
 mod auth;
 mod credentials;
+mod install;
 mod invoke;
 mod new_assistant;
 mod publish;
@@ -57,6 +58,10 @@ fn run(command: &Command) -> ExitCode {
             input,
         } => invoke::run(project, power, input),
         Command::Publish { project } => publish::run(project),
+        Command::InstallAssistant {
+            source_digest,
+            team,
+        } => install::run(source_digest, team.as_deref()),
         Command::Upgrade => upgrade::run(),
     };
     match result {
