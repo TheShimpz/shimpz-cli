@@ -6,12 +6,12 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
+use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -199,27 +199,20 @@ fn store_at(path: &Path, credentials: &Credentials) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|_| "CLI configuration directory cannot be created".to_owned())?;
     secure_directory(parent)?;
-    let temporary = temporary_path(path)?;
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    configure_secure_open(&mut options);
+    let mut options = AtomicOpenOptions::new();
+    configure_atomic_secure_open(&mut options);
     let mut file = options
-        .open(&temporary)
+        .open(path)
         .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
-    secure_open_file(&file)?;
-    let result = (|| {
-        serde_json::to_writer(&mut file, credentials)
-            .map_err(|_| "CLI credentials cannot be encoded".to_owned())?;
-        file.write_all(b"\n")
-            .and_then(|()| file.sync_all())
-            .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
-        replace_file(&temporary, path)?;
-        sync_directory(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
+    secure_open_file(file.as_file())?;
+    serde_json::to_writer(&mut file, credentials)
+        .map_err(|_| "CLI credentials cannot be encoded".to_owned())?;
+    file.write_all(b"\n")
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
+    file.commit()
+        .map_err(|_| "CLI credentials cannot be replaced".to_owned())?;
+    sync_directory(parent)
 }
 
 fn clear_at(path: &Path) -> Result<(), String> {
@@ -261,18 +254,6 @@ fn secure_open_file(file: &File) -> Result<(), String> {
     require_secure_file(&metadata)
 }
 
-fn temporary_path(path: &Path) -> Result<PathBuf, String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "CLI credential path is invalid".to_owned())?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "CLI credentials cannot be stored".to_owned())?
-        .as_nanos();
-    Ok(path.with_file_name(format!(".{file_name}.{}.{nonce}.tmp", std::process::id())))
-}
-
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
@@ -285,43 +266,6 @@ const fn sync_directory(_: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::rename(source, destination).map_err(|_| "CLI credentials cannot be replaced".to_owned())
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain
-    // alive for the duration of the call.
-    let replaced = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if replaced == 0 {
-        return Err("CLI credentials cannot be replaced".into());
-    }
-    Ok(())
-}
-
 fn configure_no_follow(options: &mut OpenOptions) {
     #[cfg(unix)]
     options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
@@ -329,6 +273,11 @@ fn configure_no_follow(options: &mut OpenOptions) {
 
 fn configure_secure_open(options: &mut OpenOptions) {
     configure_no_follow(options);
+    #[cfg(unix)]
+    options.mode(0o600);
+}
+
+fn configure_atomic_secure_open(options: &mut AtomicOpenOptions) {
     #[cfg(unix)]
     options.mode(0o600);
 }

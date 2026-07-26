@@ -15,6 +15,7 @@ publish = ["crates-io"]
 include = ["contracts/**", "src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "NOTICE"]
 
 [dependencies]
+atomic-write-file = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -28,7 +29,6 @@ rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1.11"
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"
