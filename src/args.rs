@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str = "Usage: shimpz <auth|new|check|test|upgrade> [options]";
+pub(crate) const USAGE: &str = "Usage: shimpz <auth|new|check|test|publish|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
@@ -12,6 +12,7 @@ Usage:
   shimpz new assistant <name> [--language python]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
+  shimpz publish [--project <path>]
   shimpz upgrade
   shimpz --help
   shimpz --version
@@ -37,6 +38,9 @@ pub(crate) enum Command {
         project: PathBuf,
         power: String,
         input: Input,
+    },
+    Publish {
+        project: PathBuf,
     },
     Upgrade,
 }
@@ -70,6 +74,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
         "new" => parse_new(rest),
         "check" => parse_check(rest),
         "test" => parse_test(rest),
+        "publish" => parse_publish(rest),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
@@ -197,6 +202,19 @@ fn parse_upgrade(arguments: &[String]) -> Result<Action, String> {
         [option] if option == "--help" || option == "-h" => Ok(Action::Help),
         _ => Err("upgrade accepts no options".into()),
     }
+}
+
+fn parse_publish(arguments: &[String]) -> Result<Action, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Action::Help);
+    }
+    let project = match arguments {
+        [] => PathBuf::from("."),
+        [option, value] if option == "--project" => PathBuf::from(value),
+        [option] if option == "--project" => return Err("--project requires a value".into()),
+        _ => return Err("publish accepts only --project <path>".into()),
+    };
+    Ok(Action::Run(Command::Publish { project }))
 }
 
 fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
@@ -370,6 +388,26 @@ mod tests {
         assert_eq!(
             parse(strings(&["upgrade", "--force"])),
             Err("upgrade accepts no options".into())
+        );
+    }
+
+    #[test]
+    fn parses_publish_with_a_project_or_current_directory() {
+        assert_eq!(
+            parse(strings(&["publish"])),
+            Ok(Action::Run(Command::Publish {
+                project: PathBuf::from(".")
+            }))
+        );
+        assert_eq!(
+            parse(strings(&["publish", "--project", "hello"])),
+            Ok(Action::Run(Command::Publish {
+                project: PathBuf::from("hello")
+            }))
+        );
+        assert_eq!(
+            parse(strings(&["publish", "--project"])),
+            Err("--project requires a value".into())
         );
     }
 }

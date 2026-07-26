@@ -5,6 +5,7 @@ mod auth;
 mod credentials;
 mod invoke;
 mod new_assistant;
+mod publish;
 mod python;
 mod source_package;
 mod toolchain;
@@ -55,6 +56,7 @@ fn run(command: &Command) -> ExitCode {
             power,
             input,
         } => invoke::run(project, power, input),
+        Command::Publish { project } => publish::run(project),
         Command::Upgrade => upgrade::run(),
     };
     match result {

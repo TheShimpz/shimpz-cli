@@ -36,6 +36,37 @@ pub(crate) fn login() -> Result<String, String> {
         api.revoke(stored.refresh_token())?;
         credentials::clear()?;
     }
+    interactive_login(&api)?;
+    Ok("Authentication complete. You can close the browser tab.".into())
+}
+
+pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, String> {
+    if !REQUESTED_SCOPES.contains(&required_scope) {
+        return Err("CLI requested an unknown permission".into());
+    }
+    let api = Api::new();
+    if let Some(mut stored) = credentials::load()? {
+        if ensure_session(&api, &mut stored)?
+            .is_some_and(|session| session.has_scope(required_scope))
+        {
+            return Ok(stored);
+        }
+        api.revoke(stored.refresh_token())?;
+        credentials::clear()?;
+    }
+    let mut stored = interactive_login(&api)?;
+    println!("Authentication complete. You can close the browser tab.");
+    let authorized =
+        ensure_session(&api, &mut stored)?.is_some_and(|session| session.has_scope(required_scope));
+    if !authorized {
+        api.revoke(stored.refresh_token())?;
+        credentials::clear()?;
+        return Err("CLI authorization lacks the required permission".into());
+    }
+    Ok(stored)
+}
+
+fn interactive_login(api: &Api) -> Result<Credentials, String> {
     let authorization = api.authorize()?;
     println!("Authorize Shimpz in your browser:");
     println!("{}", authorization.verification_url);
@@ -48,7 +79,7 @@ pub(crate) fn login() -> Result<String, String> {
     println!("Waiting for browser authorization...");
     let tokens = api.wait_for_tokens(&authorization)?;
     credentials::store(&tokens)?;
-    Ok("Authentication complete. You can close the browser tab.".into())
+    Ok(tokens)
 }
 
 pub(crate) fn status() -> Result<String, String> {
@@ -401,6 +432,10 @@ impl AuthSession {
         }
         Ok(())
     }
+
+    fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|value| value == scope)
+    }
 }
 
 #[derive(Deserialize)]
@@ -495,6 +530,13 @@ mod tests {
             scopes: vec!["identity:read".into()],
         };
         assert!(invalid_session.validate().is_err());
+        let session = AuthSession {
+            authenticated: true,
+            account_id: "a".repeat(32),
+            scopes: vec!["identity:read".into(), "assistant:publish".into()],
+        };
+        assert!(session.has_scope("assistant:publish"));
+        assert!(!session.has_scope("assistant:install"));
     }
 
     #[test]
