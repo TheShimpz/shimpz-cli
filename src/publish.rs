@@ -166,6 +166,14 @@ struct Publication {
     review_state: String,
     security_state: String,
     blocked: bool,
+    safe_error_code: Option<String>,
+    image_reference: Option<String>,
+    oci_digest: Option<String>,
+    signature_identity: Option<String>,
+    provenance_reference: Option<String>,
+    sbom_digest: Option<String>,
+    scan_digest: Option<String>,
+    workflow_run_id: Option<u64>,
 }
 
 impl Publication {
@@ -189,10 +197,64 @@ impl Publication {
             )
             || !matches!(self.security_state.as_str(), "clear" | "security_rejected")
             || (self.security_state == "security_rejected" && !self.blocked)
+            || !self.valid_build_result()
         {
             return Err("Developers returned an invalid publication response".into());
         }
         Ok(())
+    }
+
+    fn valid_build_result(&self) -> bool {
+        let artifacts = [
+            self.image_reference.as_deref(),
+            self.oci_digest.as_deref(),
+            self.signature_identity.as_deref(),
+            self.provenance_reference.as_deref(),
+            self.sbom_digest.as_deref(),
+            self.scan_digest.as_deref(),
+        ];
+        match self.build_state.as_str() {
+            "artifact_ready" => {
+                self.safe_error_code.is_none()
+                    && artifacts.iter().all(Option::is_some)
+                    && self.workflow_run_id.is_some()
+                    && self.valid_ready_artifact()
+            }
+            "build_failed" => {
+                self.safe_error_code
+                    .as_deref()
+                    .is_some_and(valid_build_error)
+                    && artifacts.iter().all(Option::is_none)
+                    && self.workflow_run_id.is_none()
+            }
+            _ => {
+                self.safe_error_code.is_none()
+                    && artifacts.iter().all(Option::is_none)
+                    && self.workflow_run_id.is_none()
+            }
+        }
+    }
+
+    fn valid_ready_artifact(&self) -> bool {
+        let Some(oci_digest) = self.oci_digest.as_deref() else {
+            return false;
+        };
+        let Some(workflow_run_id) = self.workflow_run_id else {
+            return false;
+        };
+        let expected_image = format!("ghcr.io/theshimpz/shimpz-assistants@{oci_digest}");
+        let expected_provenance = format!(
+            "https://github.com/TheShimpz/shimpz-developers/actions/runs/{workflow_run_id}"
+        );
+        valid_digest(oci_digest)
+            && self.image_reference.as_deref() == Some(expected_image.as_str())
+            && self.signature_identity.as_deref()
+                == Some(
+                    "https://github.com/TheShimpz/shimpz-developers/.github/workflows/build-assistant.yml@refs/heads/main",
+                )
+            && self.provenance_reference.as_deref() == Some(expected_provenance.as_str())
+            && self.sbom_digest.as_deref().is_some_and(valid_digest)
+            && self.scan_digest.as_deref().is_some_and(valid_digest)
     }
 
     fn terminal_result(&self) -> Option<Result<String, String>> {
@@ -203,15 +265,37 @@ impl Publication {
             return Some(Err("publication is blocked".into()));
         }
         if self.build_state == "build_failed" {
-            return Some(Err("publication build failed".into()));
+            let error = match self.safe_error_code.as_deref() {
+                Some("dependency_resolution_failed") => "publication dependency resolution failed",
+                Some("security_scan_failed") => "publication security scan failed",
+                Some("signing_failed") => "publication signing failed",
+                Some("non_reproducible_build") => "publication build was not reproducible",
+                _ => "publication build failed",
+            };
+            return Some(Err(error.into()));
         }
         (self.build_state == "artifact_ready").then(|| {
+            let image = self
+                .image_reference
+                .as_deref()
+                .expect("validated ready publication has an image");
+            let oci_digest = self
+                .oci_digest
+                .as_deref()
+                .expect("validated ready publication has an OCI digest");
+            let provenance = self
+                .provenance_reference
+                .as_deref()
+                .expect("validated ready publication has provenance");
             Ok(format!(
-                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nReview: {}\nPortal: https://developers.shimpz.com/assistants/{}",
+                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nImage: {}\nOCI digest: {}\nReview: {}\nProvenance: {}\nPortal: https://developers.shimpz.com/assistants/{}",
                 self.assistant_id,
                 self.version,
                 self.source_digest,
+                image,
+                oci_digest,
                 self.review_state,
+                provenance,
                 self.assistant_id
             ))
         })
@@ -279,6 +363,25 @@ fn valid_error_code(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+fn valid_build_error(value: &str) -> bool {
+    matches!(
+        value,
+        "dependency_resolution_failed"
+            | "build_failed"
+            | "security_scan_failed"
+            | "signing_failed"
+            | "non_reproducible_build"
+    )
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn unavailable() -> String {
     "Developers is unavailable; try again shortly".into()
 }
@@ -298,22 +401,42 @@ mod tests {
             review_state: "pending".into(),
             security_state: "clear".into(),
             blocked: false,
+            safe_error_code: None,
+            image_reference: None,
+            oci_digest: None,
+            signature_identity: None,
+            provenance_reference: None,
+            sbom_digest: None,
+            scan_digest: None,
+            workflow_run_id: None,
         }
+    }
+
+    fn ready_publication() -> Publication {
+        let mut ready = publication("artifact_ready");
+        let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        ready.image_reference = Some(format!("ghcr.io/theshimpz/shimpz-assistants@{digest}"));
+        ready.oci_digest = Some(digest.into());
+        ready.signature_identity = Some(
+            "https://github.com/TheShimpz/shimpz-developers/.github/workflows/build-assistant.yml@refs/heads/main".into(),
+        );
+        ready.provenance_reference =
+            Some("https://github.com/TheShimpz/shimpz-developers/actions/runs/42".into());
+        ready.sbom_digest = Some(digest.into());
+        ready.scan_digest = Some(digest.into());
+        ready.workflow_run_id = Some(42);
+        ready
     }
 
     #[test]
     fn accepts_only_closed_publication_states() {
-        for state in [
-            "queued",
-            "resolving",
-            "building",
-            "scanning",
-            "signing",
-            "artifact_ready",
-            "build_failed",
-        ] {
+        for state in ["queued", "resolving", "building", "scanning", "signing"] {
             assert!(publication(state).validate(DIGEST).is_ok());
         }
+        assert!(ready_publication().validate(DIGEST).is_ok());
+        let mut failed = publication("build_failed");
+        failed.safe_error_code = Some("build_failed".into());
+        assert!(failed.validate(DIGEST).is_ok());
         let mut invalid = publication("ready");
         assert!(invalid.validate(DIGEST).is_err());
         invalid = publication("queued");
@@ -324,24 +447,16 @@ mod tests {
     #[test]
     fn only_installability_or_safe_failure_ends_the_wait() {
         assert!(publication("queued").terminal_result().is_none());
-        assert!(
-            publication("artifact_ready")
-                .terminal_result()
-                .unwrap()
-                .is_ok()
-        );
-        assert!(
-            publication("build_failed")
-                .terminal_result()
-                .unwrap()
-                .is_err()
-        );
+        assert!(ready_publication().terminal_result().unwrap().is_ok());
+        let mut failed = publication("build_failed");
+        failed.safe_error_code = Some("security_scan_failed".into());
+        assert!(failed.terminal_result().unwrap().is_err());
 
-        let mut blocked = publication("artifact_ready");
+        let mut blocked = ready_publication();
         blocked.blocked = true;
         assert!(blocked.terminal_result().unwrap().is_err());
 
-        let mut rejected = publication("artifact_ready");
+        let mut rejected = ready_publication();
         rejected.security_state = "security_rejected".into();
         rejected.blocked = true;
         assert!(rejected.terminal_result().unwrap().is_err());
