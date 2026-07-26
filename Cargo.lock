@@ -1483,6 +1483,7 @@ dependencies = [
  "tempfile",
  "ureq",
  "winapi-util",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

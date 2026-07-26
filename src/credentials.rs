@@ -213,8 +213,7 @@ fn store_at(path: &Path, credentials: &Credentials) -> Result<(), String> {
         file.write_all(b"\n")
             .and_then(|()| file.sync_all())
             .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
-        fs::rename(&temporary, path)
-            .map_err(|_| "CLI credentials cannot be replaced".to_owned())?;
+        replace_file(&temporary, path)?;
         sync_directory(parent)
     })();
     if result.is_err() {
@@ -274,10 +273,53 @@ fn temporary_path(path: &Path) -> Result<PathBuf, String> {
     Ok(path.with_file_name(format!(".{file_name}.{}.{nonce}.tmp", std::process::id())))
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| "CLI credential directory cannot be synchronized".to_owned())
+}
+
+#[cfg(not(unix))]
+const fn sync_directory(_: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(source, destination).map_err(|_| "CLI credentials cannot be replaced".to_owned())
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of the call.
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        return Err("CLI credentials cannot be replaced".into());
+    }
+    Ok(())
 }
 
 fn configure_no_follow(options: &mut OpenOptions) {
