@@ -331,7 +331,6 @@ struct DeviceAuthorization {
     device_code: SecretInput,
     user_code: String,
     verification_url: String,
-    wait_token: SecretInput,
     expires_in: u64,
 }
 
@@ -343,7 +342,6 @@ impl DeviceAuthorization {
             || self.verification_url != expected_url
             || self.expires_in != 600
             || !valid_token(self.device_code.expose())
-            || !valid_token(self.wait_token.expose())
         {
             return Err("Developers returned an invalid authorization response".into());
         }
@@ -511,7 +509,6 @@ mod tests {
                 "https://developers.shimpz.com/cli/auth?flow={}",
                 "a".repeat(22)
             ),
-            wait_token: SecretInput("c".repeat(43)),
             expires_in: 600,
         };
 
