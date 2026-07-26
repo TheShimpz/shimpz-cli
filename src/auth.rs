@@ -29,15 +29,16 @@ const AVAILABLE_SCOPES: [&str; 4] = [
 ];
 
 pub(crate) fn login() -> Result<String, String> {
+    let credential_lock = credentials::lock()?;
     let api = Api::new();
-    if let Some(mut stored) = credentials::load()? {
-        if let Some(session) = ensure_session(&api, &mut stored)? {
+    if let Some(mut stored) = credentials::load(&credential_lock)? {
+        if let Some(session) = ensure_session(&api, &credential_lock, &mut stored)? {
             return Ok(format!("Already authenticated as {}.", session.account_id));
         }
         api.revoke(stored.refresh_token())?;
-        credentials::clear()?;
+        credentials::clear(&credential_lock)?;
     }
-    interactive_login(&api, &[IDENTITY_SCOPE])?;
+    interactive_login(&api, &credential_lock, &[IDENTITY_SCOPE])?;
     Ok("Authentication complete. You can close the browser tab.".into())
 }
 
@@ -45,31 +46,36 @@ pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, 
     if !AVAILABLE_SCOPES.contains(&required_scope) {
         return Err("CLI requested an unknown permission".into());
     }
+    let credential_lock = credentials::lock()?;
     let api = Api::new();
     let mut requested_scopes = cumulative_scopes(&[], required_scope);
-    if let Some(mut stored) = credentials::load()? {
+    if let Some(mut stored) = credentials::load(&credential_lock)? {
         requested_scopes = cumulative_scopes(stored.scopes(), required_scope);
-        if ensure_session(&api, &mut stored)?
+        if ensure_session(&api, &credential_lock, &mut stored)?
             .is_some_and(|session| session.has_scope(required_scope))
         {
             return Ok(stored);
         }
         api.revoke(stored.refresh_token())?;
-        credentials::clear()?;
+        credentials::clear(&credential_lock)?;
     }
-    let mut stored = interactive_login(&api, &requested_scopes)?;
+    let mut stored = interactive_login(&api, &credential_lock, &requested_scopes)?;
     println!("Authentication complete. You can close the browser tab.");
-    let authorized =
-        ensure_session(&api, &mut stored)?.is_some_and(|session| session.has_scope(required_scope));
+    let authorized = ensure_session(&api, &credential_lock, &mut stored)?
+        .is_some_and(|session| session.has_scope(required_scope));
     if !authorized {
         api.revoke(stored.refresh_token())?;
-        credentials::clear()?;
+        credentials::clear(&credential_lock)?;
         return Err("CLI authorization lacks the required permission".into());
     }
     Ok(stored)
 }
 
-fn interactive_login(api: &Api, scopes: &[&str]) -> Result<Credentials, String> {
+fn interactive_login(
+    api: &Api,
+    credential_lock: &credentials::CredentialLock,
+    scopes: &[&str],
+) -> Result<Credentials, String> {
     let authorization = api.authorize(scopes)?;
     println!("Authorize Shimpz in your browser:");
     println!("{}", authorization.verification_url);
@@ -81,7 +87,7 @@ fn interactive_login(api: &Api, scopes: &[&str]) -> Result<Credentials, String> 
     }
     println!("Waiting for browser authorization...");
     let tokens = api.wait_for_tokens(&authorization)?;
-    credentials::store(&tokens)?;
+    credentials::store(credential_lock, &tokens)?;
     Ok(tokens)
 }
 
@@ -97,11 +103,12 @@ fn cumulative_scopes(existing: &[String], required: &str) -> Vec<&'static str> {
 }
 
 pub(crate) fn status() -> Result<String, String> {
-    let Some(mut stored) = credentials::load()? else {
+    let credential_lock = credentials::lock()?;
+    let Some(mut stored) = credentials::load(&credential_lock)? else {
         return Ok("Not authenticated. Run `shimpz auth`.".into());
     };
     let api = Api::new();
-    let Some(session) = ensure_session(&api, &mut stored)? else {
+    let Some(session) = ensure_session(&api, &credential_lock, &mut stored)? else {
         return Ok("Authentication needs renewal. Run `shimpz auth`.".into());
     };
     Ok(format!(
@@ -112,11 +119,12 @@ pub(crate) fn status() -> Result<String, String> {
 }
 
 pub(crate) fn logout() -> Result<String, String> {
-    let Some(stored) = credentials::load()? else {
+    let credential_lock = credentials::lock()?;
+    let Some(stored) = credentials::load(&credential_lock)? else {
         return Ok("Already logged out.".into());
     };
     Api::new().revoke(stored.refresh_token())?;
-    credentials::clear()?;
+    credentials::clear(&credential_lock)?;
     Ok("Logged out and revoked the CLI session.".into())
 }
 
@@ -238,14 +246,18 @@ impl Api {
     }
 }
 
-fn ensure_session(api: &Api, credentials: &mut Credentials) -> Result<Option<AuthSession>, String> {
+fn ensure_session(
+    api: &Api,
+    credential_lock: &credentials::CredentialLock,
+    credentials: &mut Credentials,
+) -> Result<Option<AuthSession>, String> {
     if let Some(session) = api.session(credentials.access_token())? {
         return Ok(Some(session));
     }
     let Some(replacement) = api.refresh(credentials.refresh_token())? else {
         return Ok(None);
     };
-    credentials::store(&replacement)?;
+    credentials::store(credential_lock, &replacement)?;
     *credentials = replacement;
     api.session(credentials.access_token())
 }

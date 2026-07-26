@@ -1475,6 +1475,7 @@ name = "shimpz-cli"
 version = "0.1.6"
 dependencies = [
  "libc",
+ "rustix",
  "self_update",
  "serde",
  "serde_json",

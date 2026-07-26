@@ -6,15 +6,17 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 const CREDENTIALS_FILE: &str = "credentials.json";
+const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
 const MAX_CREDENTIALS_BYTES: u64 = 16 * 1024;
 const FORMAT_VERSION: u8 = 1;
 const VALID_SCOPES: [&str; 4] = [
@@ -102,15 +104,39 @@ impl Drop for Credentials {
     }
 }
 
-pub(crate) fn load() -> Result<Option<Credentials>, String> {
+pub(crate) struct CredentialLock {
+    _file: File,
+}
+
+pub(crate) fn lock() -> Result<CredentialLock, String> {
+    let directory = config_root()
+        .map(|root| root.join("shimpz"))
+        .ok_or_else(|| "OS configuration directory is unavailable".to_owned())?;
+    fs::create_dir_all(&directory)
+        .map_err(|_| "CLI configuration directory cannot be created".to_owned())?;
+    secure_directory(&directory)?;
+    let path = directory.join(CREDENTIALS_LOCK_FILE);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    configure_secure_open(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|_| "CLI credential lock cannot be opened".to_owned())?;
+    secure_open_file(&file)?;
+    file.lock()
+        .map_err(|_| "CLI credentials are busy".to_owned())?;
+    Ok(CredentialLock { _file: file })
+}
+
+pub(crate) fn load(_lock: &CredentialLock) -> Result<Option<Credentials>, String> {
     load_from(&credentials_path()?)
 }
 
-pub(crate) fn store(credentials: &Credentials) -> Result<(), String> {
+pub(crate) fn store(_lock: &CredentialLock, credentials: &Credentials) -> Result<(), String> {
     store_at(&credentials_path()?, credentials)
 }
 
-pub(crate) fn clear() -> Result<(), String> {
+pub(crate) fn clear(_lock: &CredentialLock) -> Result<(), String> {
     clear_at(&credentials_path()?)
 }
 
@@ -137,18 +163,24 @@ fn config_root() -> Option<PathBuf> {
 }
 
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = match options.open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("CLI credential metadata is unavailable".into()),
+        Err(_) => return Err("CLI credentials cannot be opened".into()),
     };
+    let metadata = file
+        .metadata()
+        .map_err(|_| "CLI credential metadata is unavailable".to_owned())?;
     require_secure_file(&metadata)?;
     if metadata.len() > MAX_CREDENTIALS_BYTES {
         return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    File::open(path)
-        .and_then(|file| file.take(MAX_CREDENTIALS_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_CREDENTIALS_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| "CLI credentials cannot be read".to_owned())?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CREDENTIALS_BYTES {
         return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
@@ -167,31 +199,36 @@ fn store_at(path: &Path, credentials: &Credentials) -> Result<(), String> {
     fs::create_dir_all(parent)
         .map_err(|_| "CLI configuration directory cannot be created".to_owned())?;
     secure_directory(parent)?;
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        require_secure_file(&metadata)?;
-    }
+    let temporary = temporary_path(path)?;
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
+    options.create_new(true).write(true);
+    configure_secure_open(&mut options);
     let mut file = options
-        .open(path)
+        .open(&temporary)
         .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
     secure_open_file(&file)?;
-    serde_json::to_writer(&mut file, credentials)
-        .map_err(|_| "CLI credentials cannot be encoded".to_owned())?;
-    file.write_all(b"\n")
-        .and_then(|()| file.sync_all())
-        .map_err(|_| "CLI credentials cannot be stored".to_owned())
+    let result = (|| {
+        serde_json::to_writer(&mut file, credentials)
+            .map_err(|_| "CLI credentials cannot be encoded".to_owned())?;
+        file.write_all(b"\n")
+            .and_then(|()| file.sync_all())
+            .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
+        fs::rename(&temporary, path)
+            .map_err(|_| "CLI credentials cannot be replaced".to_owned())?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn clear_at(path: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => require_secure_file(&metadata)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("CLI credential metadata is unavailable".into()),
+    if load_from(path)?.is_none() {
+        return Ok(());
     }
-    fs::remove_file(path).map_err(|_| "local CLI credentials cannot be removed".into())
+    fs::remove_file(path).map_err(|_| "local CLI credentials cannot be removed".to_owned())?;
+    path.parent().map_or(Ok(()), sync_directory)
 }
 
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
@@ -199,8 +236,11 @@ fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
         return Err("CLI credential path is not a regular file".into());
     }
     #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0 {
-        return Err("CLI credential file permissions must be 0600".into());
+    if metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.nlink() != 1
+    {
+        return Err("CLI credential file ownership or permissions are unsafe".into());
     }
     Ok(())
 }
@@ -216,7 +256,39 @@ fn secure_open_file(file: &File) -> Result<(), String> {
     #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|_| "CLI credential file cannot be secured".to_owned())?;
-    Ok(())
+    let metadata = file
+        .metadata()
+        .map_err(|_| "CLI credential metadata is unavailable".to_owned())?;
+    require_secure_file(&metadata)
+}
+
+fn temporary_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "CLI credential path is invalid".to_owned())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "CLI credentials cannot be stored".to_owned())?
+        .as_nanos();
+    Ok(path.with_file_name(format!(".{file_name}.{}.{nonce}.tmp", std::process::id())))
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "CLI credential directory cannot be synchronized".to_owned())
+}
+
+fn configure_no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+}
+
+fn configure_secure_open(options: &mut OpenOptions) {
+    configure_no_follow(options);
+    #[cfg(unix)]
+    options.mode(0o600);
 }
 
 fn valid_token(value: &str) -> bool {
@@ -242,7 +314,7 @@ fn valid_scopes(scopes: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, File};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -306,9 +378,68 @@ mod tests {
         let error = load_from(&path).unwrap_err();
 
         #[cfg(unix)]
-        assert_eq!(error, "CLI credential file permissions must be 0600");
+        assert_eq!(
+            error,
+            "CLI credential file ownership or permissions are unsafe"
+        );
         #[cfg(not(unix))]
         assert!(error.contains("stored CLI credentials are invalid"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_and_hardlinked_credential_files() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().unwrap();
+        let target = directory.path().join("target.json");
+        let symlink_path = directory.path().join("symlink.json");
+        let hardlink_path = directory.path().join("hardlink.json");
+        store_at(&target, &credentials()).unwrap();
+
+        symlink(&target, &symlink_path).unwrap();
+        assert!(load_from(&symlink_path).is_err());
+
+        fs::hard_link(&target, &hardlink_path).unwrap();
+        assert_eq!(
+            load_from(&target).unwrap_err(),
+            "CLI credential file ownership or permissions are unsafe"
+        );
+    }
+
+    #[test]
+    fn atomically_replaces_complete_credentials() {
+        use std::io::Read as _;
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("credentials.json");
+        let first = credentials();
+        let second = Credentials::new(
+            "c".repeat(43),
+            "d".repeat(43),
+            3_000,
+            4_000,
+            vec!["identity:read".into(), "assistant:install".into()],
+        )
+        .unwrap();
+        store_at(&path, &first).unwrap();
+        let mut old_file = File::open(&path).unwrap();
+
+        store_at(&path, &second).unwrap();
+
+        let loaded = load_from(&path).unwrap().unwrap();
+        assert_eq!(loaded.access_token(), "c".repeat(43));
+        let mut old_contents = String::new();
+        old_file.read_to_string(&mut old_contents).unwrap();
+        let old: Credentials = serde_json::from_str(&old_contents).unwrap();
+        assert_eq!(old.access_token(), "a".repeat(43));
+        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
