@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
-const SDK_REQUIREMENT: &str = "shimpz==0.1.3";
+const SDK_REQUIREMENT: &str = "shimpz==0.1.4";
 
 pub(crate) struct Assistant {
     root: PathBuf,
