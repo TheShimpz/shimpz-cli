@@ -129,7 +129,10 @@ fn collect(root: &Path) -> Result<(Vec<InputEntry>, Vec<String>), Error> {
             Some("shimpz.toml" | "pyproject.toml") => {
                 collect_entry(root, &child.path(), &mut entries)?;
             }
-            Some("powers" | "lib" | "tests") => {
+            Some("powers") => {
+                collect_powers(root, &child.path(), &mut entries)?;
+            }
+            Some("lib" | "tests") => {
                 collect_allowed_root(root, &child.path(), &mut entries)?;
             }
             _ => excluded.push(name.to_string_lossy().into_owned()),
@@ -138,6 +141,28 @@ fn collect(root: &Path) -> Result<(Vec<InputEntry>, Vec<String>), Error> {
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     excluded.sort();
     Ok((entries, excluded))
+}
+
+fn collect_powers(root: &Path, path: &Path, entries: &mut Vec<InputEntry>) -> Result<(), Error> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| Error::new("invalid_entry"))?;
+    if !metadata.is_dir() {
+        return collect_entry_with_metadata(root, path, &metadata, entries);
+    }
+    let children = fs::read_dir(path).map_err(|_| Error::new("invalid_entry"))?;
+    for child in children {
+        let child = child.map_err(|_| Error::new("invalid_entry"))?;
+        let child_path = child.path();
+        let metadata =
+            fs::symlink_metadata(&child_path).map_err(|_| Error::new("invalid_entry"))?;
+        if !metadata.is_dir()
+            && child_path
+                .extension()
+                .is_some_and(|extension| extension == "py")
+        {
+            collect_entry_with_metadata(root, &child_path, &metadata, entries)?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_allowed_root(
