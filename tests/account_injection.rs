@@ -51,7 +51,9 @@ fn run_report(shim: &Path, token: Option<&str>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_shimpz"));
     command
         .args(["test", "report", "--project", project, "--input", "{}"])
-        .env("SHIMPZ_UV", shim);
+        .env("SHIMPZ_UV", shim)
+        .env_remove("NO_COLOR")
+        .env("CLICOLOR_FORCE", "1");
     match token {
         Some(value) => command.env("SHIMPZ_ACCOUNT_CLOUDFLARE", value),
         None => command.env_remove("SHIMPZ_ACCOUNT_CLOUDFLARE"),
