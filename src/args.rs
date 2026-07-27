@@ -11,7 +11,7 @@ Fast local tooling for Shimpz Assistants.
 Usage:
   shimpz auth [login|status|logout]
   shimpz new assistant <name> [--language python]
-  shimpz develop <codex|claude> [--project <path>] [--yolo]
+  shimpz develop <codex|claude> [path] [--yolo]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
   shimpz publish [--project <path>]
@@ -112,47 +112,27 @@ fn parse_develop(arguments: &[String]) -> Result<Action, String> {
         "claude" => DeveloperAgent::Claude,
         _ => return Err("develop supports only codex or claude".into()),
     };
-    let mut project = PathBuf::from(".");
-    let mut project_seen = false;
+    let mut project = None;
     let mut yolo = false;
-    let mut index = 0;
-    while index < options.len() {
-        let option = &options[index];
+    for option in options {
         if option == "--yolo" {
             if yolo {
                 return Err("--yolo was repeated".into());
             }
             yolo = true;
-        } else if let Some(value) = option.strip_prefix("--project=") {
-            set_project(&mut project, &mut project_seen, value)?;
-        } else if option == "--project" {
-            let value = options
-                .get(index + 1)
-                .ok_or_else(|| "--project requires a value".to_owned())?;
-            set_project(&mut project, &mut project_seen, value)?;
-            index += 1;
-        } else {
+        } else if option.starts_with('-') {
             return Err(format!("unknown option {option}"));
+        } else if project.is_some() {
+            return Err("develop accepts one project path".into());
+        } else {
+            project = Some(PathBuf::from(option));
         }
-        index += 1;
     }
     Ok(Action::Run(Command::Develop {
         agent,
-        project,
+        project: project.unwrap_or_else(|| PathBuf::from(".")),
         yolo,
     }))
-}
-
-fn set_project(project: &mut PathBuf, project_seen: &mut bool, value: &str) -> Result<(), String> {
-    if *project_seen {
-        return Err("--project was repeated".into());
-    }
-    if value.is_empty() {
-        return Err("--project requires a value".into());
-    }
-    *project = PathBuf::from(value);
-    *project_seen = true;
-    Ok(())
 }
 
 fn parse_auth(arguments: &[String]) -> Result<Action, String> {
@@ -443,12 +423,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            parse(strings(&[
-                "develop",
-                "claude",
-                "--yolo",
-                "--project=assistant"
-            ])),
+            parse(strings(&["develop", "claude", "assistant", "--yolo",])),
             Ok(Action::Run(Command::Develop {
                 agent: DeveloperAgent::Claude,
                 project: PathBuf::from("assistant"),
@@ -469,11 +444,15 @@ mod tests {
         );
         assert_eq!(
             parse(strings(&["develop", "codex", "--project"])),
-            Err("--project requires a value".into())
+            Err("unknown option --project".into())
         );
         assert_eq!(
             parse(strings(&["develop", "codex", "--yolo", "--yolo"])),
             Err("--yolo was repeated".into())
+        );
+        assert_eq!(
+            parse(strings(&["develop", "codex", "one", "two"])),
+            Err("develop accepts one project path".into())
         );
     }
 

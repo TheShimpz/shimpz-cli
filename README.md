@@ -21,7 +21,7 @@ Releases. Both installation paths provide the `shimpz` command.
 shimpz auth
 shimpz new assistant hello-assistant
 shimpz develop codex
-shimpz develop claude --project hello-assistant --yolo
+shimpz develop claude hello-assistant --yolo
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
 shimpz upgrade
@@ -37,11 +37,11 @@ OS user configuration directory with owner-only permissions.
 Hello World Power. Python is the default language; it can also be selected
 explicitly with `--language python`.
 
-`shimpz develop <codex|claude>` starts an interactive coding agent in the
-current directory with the versioned Shimpz Assistant development guide from
-`https://developers.shimpz.com/assistant.md`. Use `--project <path>` for another
-directory. The agent keeps its normal permission protections unless `--yolo`
-is explicitly provided.
+`shimpz develop <codex|claude> [path]` starts an interactive coding agent in
+the current directory, or in the optional path, with the versioned Shimpz
+Assistant development guide from `https://developers.shimpz.com/assistant.md`.
+The agent keeps its normal permission protections unless `--yolo` is explicitly
+provided.
 
 `shimpz upgrade` checks the latest stable GitHub release and replaces the
 current executable only when a newer version is available.
