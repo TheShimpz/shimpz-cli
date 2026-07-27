@@ -4,13 +4,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub(crate) const USAGE: &str =
-    "Usage: shimpz <auth|new|check|test|publish|install|upgrade> [options]";
+    "Usage: shimpz <auth|new|develop|check|test|publish|install|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
 Usage:
   shimpz auth [login|status|logout]
   shimpz new assistant <name> [--language python]
+  shimpz develop <codex|claude> [--project <path>] [--yolo]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
   shimpz publish [--project <path>]
@@ -33,6 +34,11 @@ pub(crate) enum Command {
     NewAssistant {
         name: String,
     },
+    Develop {
+        agent: DeveloperAgent,
+        project: PathBuf,
+        yolo: bool,
+    },
     Check {
         project: PathBuf,
     },
@@ -49,6 +55,12 @@ pub(crate) enum Command {
         team: Option<String>,
     },
     Upgrade,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeveloperAgent {
+    Claude,
+    Codex,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -78,6 +90,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
         "-V" | "--version" | "version" => Ok(Action::Version),
         "auth" => parse_auth(rest),
         "new" => parse_new(rest),
+        "develop" => parse_develop(rest),
         "check" => parse_check(rest),
         "test" => parse_test(rest),
         "publish" => parse_publish(rest),
@@ -85,6 +98,61 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Act
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
+}
+
+fn parse_develop(arguments: &[String]) -> Result<Action, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Action::Help);
+    }
+    let Some((agent, options)) = arguments.split_first() else {
+        return Err("develop requires codex or claude".into());
+    };
+    let agent = match agent.as_str() {
+        "codex" => DeveloperAgent::Codex,
+        "claude" => DeveloperAgent::Claude,
+        _ => return Err("develop supports only codex or claude".into()),
+    };
+    let mut project = PathBuf::from(".");
+    let mut project_seen = false;
+    let mut yolo = false;
+    let mut index = 0;
+    while index < options.len() {
+        let option = &options[index];
+        if option == "--yolo" {
+            if yolo {
+                return Err("--yolo was repeated".into());
+            }
+            yolo = true;
+        } else if let Some(value) = option.strip_prefix("--project=") {
+            set_project(&mut project, &mut project_seen, value)?;
+        } else if option == "--project" {
+            let value = options
+                .get(index + 1)
+                .ok_or_else(|| "--project requires a value".to_owned())?;
+            set_project(&mut project, &mut project_seen, value)?;
+            index += 1;
+        } else {
+            return Err(format!("unknown option {option}"));
+        }
+        index += 1;
+    }
+    Ok(Action::Run(Command::Develop {
+        agent,
+        project,
+        yolo,
+    }))
+}
+
+fn set_project(project: &mut PathBuf, project_seen: &mut bool, value: &str) -> Result<(), String> {
+    if *project_seen {
+        return Err("--project was repeated".into());
+    }
+    if value.is_empty() {
+        return Err("--project requires a value".into());
+    }
+    *project = PathBuf::from(value);
+    *project_seen = true;
+    Ok(())
 }
 
 fn parse_auth(arguments: &[String]) -> Result<Action, String> {
@@ -361,6 +429,51 @@ mod tests {
             Ok(Action::Run(Command::NewAssistant {
                 name: "hello-assistant".into()
             }))
+        );
+    }
+
+    #[test]
+    fn parses_a_safe_or_yolo_development_session() {
+        assert_eq!(
+            parse(strings(&["develop", "codex"])),
+            Ok(Action::Run(Command::Develop {
+                agent: DeveloperAgent::Codex,
+                project: PathBuf::from("."),
+                yolo: false,
+            }))
+        );
+        assert_eq!(
+            parse(strings(&[
+                "develop",
+                "claude",
+                "--yolo",
+                "--project=assistant"
+            ])),
+            Ok(Action::Run(Command::Develop {
+                agent: DeveloperAgent::Claude,
+                project: PathBuf::from("assistant"),
+                yolo: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_development_session_options() {
+        assert_eq!(
+            parse(strings(&["develop"])),
+            Err("develop requires codex or claude".into())
+        );
+        assert_eq!(
+            parse(strings(&["develop", "cursor"])),
+            Err("develop supports only codex or claude".into())
+        );
+        assert_eq!(
+            parse(strings(&["develop", "codex", "--project"])),
+            Err("--project requires a value".into())
+        );
+        assert_eq!(
+            parse(strings(&["develop", "codex", "--yolo", "--yolo"])),
+            Err("--yolo was repeated".into())
         );
     }
 

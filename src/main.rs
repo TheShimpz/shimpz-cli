@@ -3,6 +3,7 @@
 mod args;
 mod auth;
 mod credentials;
+mod develop;
 mod install;
 mod invoke;
 mod new_assistant;
@@ -47,6 +48,11 @@ fn run(command: &Command) -> ExitCode {
         Command::Auth(AuthAction::Status) => (auth::status(), Presentation::Info),
         Command::Auth(AuthAction::Logout) => (auth::logout(), Presentation::Success),
         Command::NewAssistant { name } => (new_assistant::run(name), Presentation::Success),
+        Command::Develop {
+            agent,
+            project,
+            yolo,
+        } => (develop::run(*agent, project, *yolo), Presentation::Success),
         Command::Check { project } => (check(project), Presentation::Success),
         Command::Test {
             project,
