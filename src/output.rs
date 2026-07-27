@@ -39,7 +39,7 @@ pub(crate) fn plain(message: &str) {
 }
 
 pub(crate) fn data(message: &str) {
-    println!("{message}");
+    anstream::println!("{message}");
 }
 
 fn labeled(style: Style, label: &str, message: &str) -> String {

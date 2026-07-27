@@ -47,16 +47,7 @@ fn run(command: &Command) -> ExitCode {
         Command::Auth(AuthAction::Status) => (auth::status(), Presentation::Info),
         Command::Auth(AuthAction::Logout) => (auth::logout(), Presentation::Success),
         Command::NewAssistant { name } => (new_assistant::run(name), Presentation::Success),
-        Command::Check { project } => (
-            source_package::build(project)
-                .and_then(|package| {
-                    python::Assistant::open(project)
-                        .and_then(|assistant| assistant.contract())
-                        .map(|_| package)
-                })
-                .map(source_package::check_summary),
-            Presentation::Success,
-        ),
+        Command::Check { project } => (check(project), Presentation::Success),
         Command::Test {
             project,
             power,
@@ -82,6 +73,15 @@ fn run(command: &Command) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn check(project: &std::path::Path) -> Result<String, String> {
+    let package = source_package::build(project)?;
+    python::Assistant::open(project)?.contract()?;
+    if let Some(message) = source_package::exclusion_warning(&package) {
+        output::warning(&message);
+    }
+    Ok(source_package::check_summary(&package))
 }
 
 #[derive(Clone, Copy)]

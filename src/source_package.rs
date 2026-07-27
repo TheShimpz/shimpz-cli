@@ -1,6 +1,5 @@
 //! Collect authored Assistant files without following links.
 
-use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -92,26 +91,24 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
     })
 }
 
-pub(crate) fn check_summary(package: SourcePackage) -> String {
-    let SourcePackage {
-        bytes,
-        digest,
-        excluded_roots,
-    } = package;
-    let mut message = format!(
+pub(crate) fn check_summary(package: &SourcePackage) -> String {
+    format!(
         "Assistant is valid.\nSource package: {} ({} bytes)",
-        digest,
-        bytes.len()
-    );
-    if !excluded_roots.is_empty() {
-        let names = excluded_roots
+        package.digest,
+        package.bytes.len()
+    )
+}
+
+pub(crate) fn exclusion_warning(package: &SourcePackage) -> Option<String> {
+    (!package.excluded_roots.is_empty()).then(|| {
+        let names = package
+            .excluded_roots
             .iter()
             .map(|name| format!("{name:?}"))
             .collect::<Vec<_>>()
             .join(", ");
-        write!(&mut message, "\nExcluded from publish: {names}").expect("write to String");
-    }
-    message
+        format!("Excluded from publish: {names}")
+    })
 }
 
 pub(crate) fn reject<T>(code: &'static str) -> Result<T, Error> {

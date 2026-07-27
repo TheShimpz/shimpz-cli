@@ -116,6 +116,11 @@ fn collects_only_publishable_roots_from_disk() {
     );
     assert_eq!(package.excluded_roots, ["README.md"]);
     assert_eq!(package.bytes.len() % 512, 0);
+    assert_eq!(
+        source_package::exclusion_warning(&package).as_deref(),
+        Some("Excluded from publish: \"README.md\"")
+    );
+    assert!(!source_package::check_summary(&package).contains("Excluded"));
 }
 
 #[test]
