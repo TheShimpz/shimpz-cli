@@ -49,3 +49,16 @@ fn no_color_takes_priority_over_forced_color() {
 
     assert!(!stderr(&output).contains("\u{1b}["));
 }
+
+#[test]
+fn untrusted_diagnostics_cannot_inject_terminal_controls() {
+    let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+        .args(["new", "assistant", "demo", "--\u{1b}[2J"])
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let diagnostic = stderr(&output);
+
+    assert!(diagnostic.contains("unknown option --�[2J"));
+    assert!(!diagnostic.contains("\u{1b}[2J"));
+}

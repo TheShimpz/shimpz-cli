@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::output;
+
 const UV_VERSION: &str = "0.11.32";
 
 pub(crate) fn uv() -> Result<Command, String> {
@@ -35,7 +37,7 @@ fn managed_uv() -> Result<PathBuf, String> {
         return Ok(executable);
     }
     std::fs::create_dir_all(&directory).map_err(|_| "uv cache cannot be created")?;
-    eprintln!("shimpz: installing managed uv {UV_VERSION}");
+    output::progress(&format!("Installing managed uv {UV_VERSION}..."));
     install(&directory)?;
     if !executable.is_file() {
         return Err("managed uv installation failed".into());

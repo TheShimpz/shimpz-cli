@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::credentials::{self, Credentials};
+use crate::{
+    credentials::{self, Credentials},
+    output,
+};
 
 const ORIGIN: &str = "https://developers.shimpz.com";
 const AUTHORIZE_URL: &str = "https://developers.shimpz.com/api/oauth/device/authorization";
@@ -60,7 +63,7 @@ pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, 
         credentials::clear(&credential_lock)?;
     }
     let mut stored = interactive_login(&api, &credential_lock, &requested_scopes)?;
-    println!("Authentication complete. You can close the browser tab.");
+    output::success("Authentication complete. You can close the browser tab.");
     let authorized = ensure_session(&api, &credential_lock, &mut stored)?
         .is_some_and(|session| session.has_scope(required_scope));
     if !authorized {
@@ -77,15 +80,15 @@ fn interactive_login(
     scopes: &[&str],
 ) -> Result<Credentials, String> {
     let authorization = api.authorize(scopes)?;
-    println!("Authorize Shimpz in your browser:");
-    println!("{}", authorization.verification_url);
-    println!("Code: {}", authorization.user_code);
+    output::info("Authorize Shimpz in your browser.");
+    output::detail("URL", &authorization.verification_url);
+    output::detail("Code", &authorization.user_code);
     if open_browser(&authorization.verification_url) {
-        println!("Your default browser was opened automatically.");
+        output::info("Your default browser was opened automatically.");
     } else {
-        println!("Open the URL above in your browser.");
+        output::warning("The browser could not be opened. Open the URL above.");
     }
-    println!("Waiting for browser authorization...");
+    output::progress("Waiting for browser authorization...");
     let tokens = api.wait_for_tokens(&authorization)?;
     credentials::store(credential_lock, &tokens)?;
     Ok(tokens)

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::{auth, python, source_package};
+use crate::{auth, output, python, source_package};
 
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
@@ -26,7 +26,8 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     let credentials = auth::ensure_authenticated(REQUIRED_SCOPE)?;
     let api = Api::new();
     let publication = api.create(&credentials, &package)?;
-    println!("Publication accepted: {}", package.digest);
+    output::info("Publication accepted.");
+    output::detail("Source", &package.digest);
     wait_until_installable(&api, &credentials, &package.digest, publication)
 }
 
@@ -43,7 +44,7 @@ fn wait_until_installable(
     loop {
         publication.validate(expected_digest)?;
         if observed_state.as_deref() != Some(publication.build_state.as_str()) {
-            println!("{}", publication.progress_message());
+            output::progress(&publication.progress_message());
             observed_state = Some(publication.build_state.clone());
         }
         match publication.terminal_result() {
