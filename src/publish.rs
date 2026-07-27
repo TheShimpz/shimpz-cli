@@ -16,7 +16,7 @@ const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publication
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
 const REQUIRED_SCOPE: &str = "assistant:publish";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WAIT_TIMEOUT: Duration = Duration::from_mins(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 
@@ -26,10 +26,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     let credentials = auth::ensure_authenticated(REQUIRED_SCOPE)?;
     let api = Api::new();
     let publication = api.create(&credentials, &package)?;
-    println!(
-        "Publication accepted: {}\nWaiting for the signed artifact...",
-        package.digest
-    );
+    println!("Publication accepted: {}", package.digest);
     wait_until_installable(&api, &credentials, &package.digest, publication)
 }
 
@@ -42,8 +39,13 @@ fn wait_until_installable(
     let deadline = Instant::now()
         .checked_add(WAIT_TIMEOUT)
         .ok_or_else(unavailable)?;
+    let mut observed_state = None;
     loop {
         publication.validate(expected_digest)?;
+        if observed_state.as_deref() != Some(publication.build_state.as_str()) {
+            println!("{}", publication.progress_message());
+            observed_state = Some(publication.build_state.clone());
+        }
         match publication.terminal_result() {
             Some(result) => return result,
             None if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
@@ -231,13 +233,28 @@ impl Publication {
                     .as_deref()
                     .is_some_and(valid_build_error)
                     && artifacts.iter().all(Option::is_none)
-                    && self.workflow_run_id.is_none()
+                    && self.valid_optional_workflow_run()
             }
             _ => {
                 self.safe_error_code.is_none()
                     && artifacts.iter().all(Option::is_none)
-                    && self.workflow_run_id.is_none()
+                    && self.valid_active_workflow_run()
             }
+        }
+    }
+
+    fn valid_optional_workflow_run(&self) -> bool {
+        self.workflow_run_id.is_none_or(|value| value > 0)
+    }
+
+    fn valid_active_workflow_run(&self) -> bool {
+        match self.build_state.as_str() {
+            "queued" => self.workflow_run_id.is_none(),
+            "resolving" => self.valid_optional_workflow_run(),
+            "building" | "scanning" | "signing" => {
+                self.workflow_run_id.is_some_and(|value| value > 0)
+            }
+            _ => false,
         }
     }
 
@@ -287,7 +304,10 @@ impl Publication {
                 Some("non_reproducible_build") => "publication build was not reproducible",
                 _ => "publication build failed",
             };
-            return Some(Err(error.into()));
+            let run = self
+                .workflow_url()
+                .map_or_else(String::new, |url| format!("\nBuild run: {url}"));
+            return Some(Err(format!("{error}{run}")));
         }
         (self.build_state == "artifact_ready").then(|| {
             let image = self
@@ -306,18 +326,45 @@ impl Publication {
                 .signature_reference
                 .as_deref()
                 .expect("validated ready publication has a signature");
+            let workflow = self
+                .workflow_url()
+                .expect("validated ready publication has a workflow run");
             Ok(format!(
-                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nImage: {}\nOCI digest: {}\nReview: {}\nSignature: {}\nProvenance: {}\nPortal: https://developers.shimpz.com/assistants/{}",
+                "Assistant published and installable.\nAssistant: {} {}\nSource: {}\nImage: {}\nOCI digest: {}\nReview: {}\nBuild run: {}\nSignature: {}\nProvenance: {}\nPortal: https://developers.shimpz.com/assistants/{}",
                 self.assistant_id,
                 self.version,
                 self.source_digest,
                 image,
                 oci_digest,
                 self.review_state,
+                workflow,
                 signature,
                 provenance,
                 self.assistant_id
             ))
+        })
+    }
+
+    fn progress_message(&self) -> String {
+        let message = match self.build_state.as_str() {
+            "queued" => "Queued — starting automatically.",
+            "resolving" => "Resolving and locking dependencies.",
+            "building" => "Building and publishing the immutable amd64/arm64 image.",
+            "scanning" => "Scanning the image and generating its SBOM.",
+            "signing" => "Signing the image and provenance.",
+            "artifact_ready" => "Signed artifact ready.",
+            "build_failed" => "Build failed.",
+            _ => unreachable!("validated publication has a closed build state"),
+        };
+        self.workflow_url().map_or_else(
+            || format!("[{}] {message}", self.build_state),
+            |url| format!("[{}] {message}\nRun: {url}", self.build_state),
+        )
+    }
+
+    fn workflow_url(&self) -> Option<String> {
+        self.workflow_run_id.map(|run_id| {
+            format!("https://github.com/TheShimpz/shimpz-developers/actions/runs/{run_id}")
         })
     }
 }
@@ -463,8 +510,13 @@ mod tests {
 
     #[test]
     fn accepts_only_closed_publication_states() {
-        for state in ["queued", "resolving", "building", "scanning", "signing"] {
+        for state in ["queued", "resolving"] {
             assert!(publication(state).validate(DIGEST).is_ok());
+        }
+        for state in ["building", "scanning", "signing"] {
+            let mut active = publication(state);
+            active.workflow_run_id = Some(42);
+            assert!(active.validate(DIGEST).is_ok());
         }
         assert!(ready_publication().validate(DIGEST).is_ok());
         let mut failed = publication("build_failed");
@@ -500,5 +552,32 @@ mod tests {
         rejected.security_state = "security_rejected".into();
         rejected.blocked = true;
         assert!(rejected.terminal_result().unwrap().is_err());
+    }
+
+    #[test]
+    fn renders_each_real_stage_and_the_exact_workflow() {
+        assert_eq!(
+            publication("queued").progress_message(),
+            "[queued] Queued — starting automatically."
+        );
+        let mut building = publication("building");
+        building.workflow_run_id = Some(42);
+        assert_eq!(
+            building.progress_message(),
+            "[building] Building and publishing the immutable amd64/arm64 image.\nRun: https://github.com/TheShimpz/shimpz-developers/actions/runs/42"
+        );
+        assert!(building.validate(DIGEST).is_ok());
+
+        let mut failed = publication("build_failed");
+        failed.safe_error_code = Some("build_failed".into());
+        failed.workflow_run_id = Some(42);
+        assert!(failed.validate(DIGEST).is_ok());
+        assert!(
+            failed
+                .terminal_result()
+                .unwrap()
+                .unwrap_err()
+                .contains("/actions/runs/42")
+        );
     }
 }
