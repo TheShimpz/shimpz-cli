@@ -1,4 +1,4 @@
-//! Local Power invocation and Account injection.
+//! Local Power invocation and Integration injection.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,13 +15,13 @@ const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 pub(crate) fn run(project: &Path, power_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
     let contract = assistant.contract()?;
-    let account_ids = power_accounts(&contract, power_id)?;
-    let accounts = account_tokens(&account_ids)?;
-    let request = request(input, &accounts)?;
+    let integration_ids = power_integrations(&contract, power_id)?;
+    let integrations = integration_tokens(&integration_ids)?;
+    let request = request(input, &integrations)?;
     assistant.invoke(power_id, request.as_bytes())
 }
 
-fn power_accounts(contract: &str, power_id: &str) -> Result<Vec<String>, String> {
+fn power_integrations(contract: &str, power_id: &str) -> Result<Vec<String>, String> {
     let value: Value =
         serde_json::from_str(contract).map_err(|_| "SDK contract is invalid".to_owned())?;
     if value.get("version").and_then(Value::as_u64) != Some(1) {
@@ -36,12 +36,12 @@ fn power_accounts(contract: &str, power_id: &str) -> Result<Vec<String>, String>
         .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(power_id))
         .ok_or_else(|| "Power id does not exist".to_owned())?;
     power
-        .get("accounts")
+        .get("integrations")
         .and_then(Value::as_array)
         .ok_or_else(|| "SDK contract is invalid".to_owned())?
         .iter()
-        .map(|account| {
-            account
+        .map(|integration| {
+            integration
                 .as_str()
                 .map(str::to_owned)
                 .ok_or_else(|| "SDK contract is invalid".to_owned())
@@ -49,23 +49,23 @@ fn power_accounts(contract: &str, power_id: &str) -> Result<Vec<String>, String>
         .collect()
 }
 
-fn account_tokens(account_ids: &[String]) -> Result<BTreeMap<String, String>, String> {
-    account_ids
+fn integration_tokens(integration_ids: &[String]) -> Result<BTreeMap<String, String>, String> {
+    integration_ids
         .iter()
-        .map(|account_id| {
-            let variable = account_variable(account_id);
+        .map(|integration_id| {
+            let variable = integration_variable(integration_id);
             let token = std::env::var(&variable)
                 .map_err(|_| format!("{variable} is required for this Power"))?;
             if token.is_empty() {
                 return Err(format!("{variable} is required for this Power"));
             }
-            Ok((account_id.clone(), token))
+            Ok((integration_id.clone(), token))
         })
         .collect()
 }
 
-fn account_variable(account_id: &str) -> String {
-    let suffix: String = account_id
+fn integration_variable(integration_id: &str) -> String {
+    let suffix: String = integration_id
         .chars()
         .map(|character| {
             if character == '-' {
@@ -75,17 +75,17 @@ fn account_variable(account_id: &str) -> String {
             }
         })
         .collect();
-    format!("SHIMPZ_ACCOUNT_{suffix}")
+    format!("SHIMPZ_INTEGRATION_{suffix}")
 }
 
-fn request(input: &Input, accounts: &BTreeMap<String, String>) -> Result<String, String> {
+fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<String, String> {
     let raw = read_input(input)?;
     let value: Value =
         serde_json::from_str(&raw).map_err(|_| "--input must be a JSON object".to_owned())?;
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
-    Ok(serde_json::json!({ "input": value, "accounts": accounts }).to_string())
+    Ok(serde_json::json!({ "input": value, "integrations": integrations }).to_string())
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -162,31 +162,32 @@ mod tests {
     }
 
     #[test]
-    fn derives_account_environment_variables() {
+    fn derives_integration_environment_variables() {
         assert_eq!(
-            account_variable("cloudflare-api"),
-            "SHIMPZ_ACCOUNT_CLOUDFLARE_API"
+            integration_variable("cloudflare-api"),
+            "SHIMPZ_INTEGRATION_CLOUDFLARE_API"
         );
     }
 
     #[test]
-    fn finds_accounts_for_the_selected_power() {
-        let contract = r#"{"version":1,"powers":[{"id":"create-dns","accounts":["cloudflare"]}]}"#;
+    fn finds_integrations_for_the_selected_power() {
+        let contract =
+            r#"{"version":1,"powers":[{"id":"create-dns","integrations":["cloudflare"]}]}"#;
         assert_eq!(
-            power_accounts(contract, "create-dns"),
+            power_integrations(contract, "create-dns"),
             Ok(vec!["cloudflare".into()])
         );
     }
 
     #[test]
     fn preserves_json_for_strict_sdk_parsing() {
-        let accounts = BTreeMap::new();
+        let integrations = BTreeMap::new();
         assert_eq!(
             request(
                 &Input::Inline(r#"{"zone":"example.com"}"#.into()),
-                &accounts
+                &integrations
             ),
-            Ok(r#"{"accounts":{},"input":{"zone":"example.com"}}"#.into())
+            Ok(r#"{"input":{"zone":"example.com"},"integrations":{}}"#.into())
         );
     }
 
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn rejects_key_injecting_input() {
-        let injected = r#"{},"accounts":{"attacker":"token"}"#;
+        let injected = r#"{},"integrations":{"attacker":"token"}"#;
         let error = request(&Input::Inline(injected.into()), &BTreeMap::new()).unwrap_err();
         assert!(
             error.contains("--input"),

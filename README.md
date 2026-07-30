@@ -46,9 +46,9 @@ provided.
 `shimpz upgrade` checks the latest stable GitHub release and replaces the
 current executable only when a newer version is available.
 
-Account tokens are read from environment variables and never accepted as CLI
-arguments. For example, account `cloudflare` uses
-`SHIMPZ_ACCOUNT_CLOUDFLARE`.
+Integration tokens are read from environment variables and never accepted as CLI
+arguments. For example, Integration `cloudflare` uses
+`SHIMPZ_INTEGRATION_CLOUDFLARE`.
 
 The crates.io package is named `shimpz-cli`; the installed command is
 `shimpz`.

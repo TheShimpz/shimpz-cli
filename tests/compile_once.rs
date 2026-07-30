@@ -26,7 +26,7 @@ fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do
     if [ "$argument" = "contract" ]; then
-      echo '{"version":1,"powers":[{"id":"greet","accounts":[]}]}'
+      echo '{"version":1,"powers":[{"id":"greet","integrations":[]}]}'
       exit 0
     fi
     if [ "$argument" = "invoke" ]; then

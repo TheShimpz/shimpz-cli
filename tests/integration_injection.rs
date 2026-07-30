@@ -1,4 +1,4 @@
-//! Exercises real Account injection through the CLI process boundary.
+//! Exercises real Integration injection through the CLI process boundary.
 
 #![cfg(unix)]
 
@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 fn fake_uv(name: &str) -> (PathBuf, PathBuf) {
     let directory =
-        std::env::temp_dir().join(format!("shimpz-account-{name}-{}", std::process::id()));
+        std::env::temp_dir().join(format!("shimpz-integration-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).unwrap();
     let capture = directory.join("invoke-stdin.json");
@@ -27,7 +27,7 @@ fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do
     if [ "$argument" = "contract" ]; then
-      echo '{{"version":1,"powers":[{{"id":"report","accounts":["cloudflare"]}}]}}'
+      echo '{{"version":1,"powers":[{{"id":"report","integrations":["cloudflare"]}}]}}'
       exit 0
     fi
     if [ "$argument" = "invoke" ]; then
@@ -55,14 +55,14 @@ fn run_report(shim: &Path, token: Option<&str>) -> Output {
         .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1");
     match token {
-        Some(value) => command.env("SHIMPZ_ACCOUNT_CLOUDFLARE", value),
-        None => command.env_remove("SHIMPZ_ACCOUNT_CLOUDFLARE"),
+        Some(value) => command.env("SHIMPZ_INTEGRATION_CLOUDFLARE", value),
+        None => command.env_remove("SHIMPZ_INTEGRATION_CLOUDFLARE"),
     };
     command.output().unwrap()
 }
 
 #[test]
-fn injects_declared_account_token() {
+fn injects_declared_integration_token() {
     let (shim, capture) = fake_uv("success");
     let output = run_report(&shim, Some("integration-secret"));
     assert!(
@@ -75,17 +75,20 @@ fn injects_declared_account_token() {
         r#"{"token_length":16}"#
     );
     let request = fs::read_to_string(capture).unwrap();
-    assert!(request.contains(r#""accounts":{"cloudflare":"integration-secret"}"#));
+    assert!(request.contains(r#""integrations":{"cloudflare":"integration-secret"}"#));
 }
 
 #[test]
-fn fails_closed_when_account_variable_is_missing() {
+fn fails_closed_when_integration_variable_is_missing() {
     let (shim, capture) = fake_uv("missing");
     let output = run_report(&shim, None);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("SHIMPZ_ACCOUNT_CLOUDFLARE is required for this Power")
+            .contains("SHIMPZ_INTEGRATION_CLOUDFLARE is required for this Power")
     );
-    assert!(!capture.exists(), "invoke must not run without its Account");
+    assert!(
+        !capture.exists(),
+        "invoke must not run without its Integration"
+    );
 }

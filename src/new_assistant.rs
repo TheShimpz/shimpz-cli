@@ -108,7 +108,7 @@ version = \"0.1.0\"
 description = \"A Hello World Assistant for Shimpz\"
 requires-python = \">=3.14\"
 dependencies = [
-  \"shimpz==0.1.4\",
+  \"shimpz==0.2.0\",
 ]
 
 [tool.ruff]
@@ -219,7 +219,7 @@ mod tests {
         assert!(
             fs::read_to_string(root.join("pyproject.toml"))
                 .unwrap()
-                .contains("\"shimpz==0.1.4\"")
+                .contains("\"shimpz==0.2.0\"")
         );
         assert!(
             fs::read_to_string(root.join("powers/hello_world.py"))

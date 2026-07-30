@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
-fn power_subprocess_cannot_read_account_or_ambient_secrets() {
+fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
     let dir = std::env::temp_dir().join(format!("shimpz-envtest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -23,15 +23,15 @@ fn power_subprocess_cannot_read_account_or_ambient_secrets() {
     let status = Command::new(env!("CARGO_BIN_EXE_shimpz"))
         .args(["check", "--project", project])
         .env("SHIMPZ_UV", &fake_uv)
-        .env("SHIMPZ_ACCOUNT_CLOUDFLARE", "leaky-token")
+        .env("SHIMPZ_INTEGRATION_CLOUDFLARE", "leaky-token")
         .env("SECRET", "top-secret-value")
         .status()
         .unwrap();
     assert!(status.success(), "check should succeed with the fake uv");
     let seen = fs::read_to_string(&dump).expect("fake uv must have dumped its env");
     assert!(
-        !seen.contains("SHIMPZ_ACCOUNT_"),
-        "account env leaked to Power:\n{seen}"
+        !seen.contains("SHIMPZ_INTEGRATION_"),
+        "integration env leaked to Power:\n{seen}"
     );
     assert!(
         !seen.contains("SECRET"),

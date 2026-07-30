@@ -49,12 +49,12 @@ jobs:
           test "${RUNNER_OS}" = "Windows" && bin="${bin}.exe"
           "${bin}" check --project tests/fixtures/assistant
           test "$("${bin}" test greet --project tests/fixtures/assistant --input '{"name":"Ada"}')" = '{"message":"Hello, Ada"}'
-          export SHIMPZ_ACCOUNT_CLOUDFLARE=smoke-token-0123
+          export SHIMPZ_INTEGRATION_CLOUDFLARE=smoke-token-0123
           # shimpz test report exposes only a non-secret derived token length.
           test "$("${bin}" test report --project tests/fixtures/assistant --input '{}')" = '{"token_length":16}'
-          if env -u SHIMPZ_ACCOUNT_CLOUDFLARE "${bin}" test report --project tests/fixtures/assistant --input '{}' 2>error.log; then
-            echo 'expected the missing-account failure' >&2
+          if env -u SHIMPZ_INTEGRATION_CLOUDFLARE "${bin}" test report --project tests/fixtures/assistant --input '{}' 2>error.log; then
+            echo 'expected the missing-integration failure' >&2
             exit 1
           fi
-          grep -q 'SHIMPZ_ACCOUNT_CLOUDFLARE is required for this Power' error.log
+          grep -q 'SHIMPZ_INTEGRATION_CLOUDFLARE is required for this Power' error.log
           test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 4

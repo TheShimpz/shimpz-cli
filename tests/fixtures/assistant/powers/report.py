@@ -7,6 +7,6 @@ class Report(TypedDict):
     token_length: int
 
 
-@power(accounts=["cloudflare"])
+@power(integrations=["cloudflare"])
 async def run(*, ctx: Context) -> Report:
-    return {"token_length": len(ctx.accounts.cloudflare.access_token)}
+    return {"token_length": len(ctx.integrations.cloudflare.access_token)}
