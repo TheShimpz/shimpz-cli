@@ -14,7 +14,7 @@ Usage:
   shimpz develop <codex|claude> [path] [--yolo]
   shimpz check [--project <path>]
   shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
-  shimpz publish [--project <path>]
+  shimpz publish --visibility <private|public> [--project <path>]
   shimpz install assistant <source-hash> [--team <team-id>]
   shimpz upgrade
   shimpz --help
@@ -49,6 +49,7 @@ pub(crate) enum Command {
     },
     Publish {
         project: PathBuf,
+        visibility: PublicationVisibility,
     },
     InstallAssistant {
         source_digest: String,
@@ -68,6 +69,21 @@ pub(crate) enum AuthAction {
     Login,
     Status,
     Logout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublicationVisibility {
+    Private,
+    Public,
+}
+
+impl PublicationVisibility {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Public => "public",
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -263,13 +279,37 @@ fn parse_publish(arguments: &[String]) -> Result<Action, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
         return Ok(Action::Help);
     }
-    let project = match arguments {
-        [] => PathBuf::from("."),
-        [option, value] if option == "--project" => PathBuf::from(value),
-        [option] if option == "--project" => return Err("--project requires a value".into()),
-        _ => return Err("publish accepts only --project <path>".into()),
-    };
-    Ok(Action::Run(Command::Publish { project }))
+    let mut project = PathBuf::from(".");
+    let mut project_seen = false;
+    let mut visibility = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = &arguments[index];
+        let value = arguments
+            .get(index + 1)
+            .ok_or_else(|| format!("{option} requires a value"))?;
+        match option.as_str() {
+            "--project" if !project_seen => {
+                project = PathBuf::from(value);
+                project_seen = true;
+            }
+            "--visibility" if visibility.is_none() => {
+                visibility = Some(match value.as_str() {
+                    "private" => PublicationVisibility::Private,
+                    "public" => PublicationVisibility::Public,
+                    _ => return Err("visibility must be private or public".into()),
+                });
+            }
+            "--project" | "--visibility" => return Err(format!("{option} was repeated")),
+            _ => return Err(format!("unknown option {option}")),
+        }
+        index += 2;
+    }
+    let visibility = visibility.ok_or_else(|| "publish requires --visibility".to_owned())?;
+    Ok(Action::Run(Command::Publish {
+        project,
+        visibility,
+    }))
 }
 
 fn parse_install(arguments: &[String]) -> Result<Action, String> {
@@ -563,20 +603,36 @@ mod tests {
     #[test]
     fn parses_publish_with_a_project_or_current_directory() {
         assert_eq!(
-            parse(strings(&["publish"])),
+            parse(strings(&["publish", "--visibility", "private"])),
             Ok(Action::Run(Command::Publish {
-                project: PathBuf::from(".")
+                project: PathBuf::from("."),
+                visibility: PublicationVisibility::Private,
             }))
         );
         assert_eq!(
-            parse(strings(&["publish", "--project", "hello"])),
+            parse(strings(&[
+                "publish",
+                "--project",
+                "hello",
+                "--visibility",
+                "public"
+            ])),
             Ok(Action::Run(Command::Publish {
-                project: PathBuf::from("hello")
+                project: PathBuf::from("hello"),
+                visibility: PublicationVisibility::Public,
             }))
         );
         assert_eq!(
             parse(strings(&["publish", "--project"])),
             Err("--project requires a value".into())
+        );
+        assert_eq!(
+            parse(strings(&["publish"])),
+            Err("publish requires --visibility".into())
+        );
+        assert_eq!(
+            parse(strings(&["publish", "--visibility", "listed"])),
+            Err("visibility must be private or public".into())
         );
     }
 }

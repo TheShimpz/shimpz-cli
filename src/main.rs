@@ -59,7 +59,10 @@ fn run(command: &Command) -> ExitCode {
             power,
             input,
         } => (invoke::run(project, power, input), Presentation::Data),
-        Command::Publish { project } => (publish::run(project), Presentation::Success),
+        Command::Publish {
+            project,
+            visibility,
+        } => (publish::run(project, *visibility), Presentation::Success),
         Command::InstallAssistant {
             source_digest,
             team,

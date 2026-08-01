@@ -10,7 +10,7 @@ use serde::Deserialize;
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::{auth, output, python, source_package};
+use crate::{args::PublicationVisibility, auth, output, python, source_package};
 
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
@@ -20,12 +20,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WAIT_TIMEOUT: Duration = Duration::from_mins(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 
-pub(crate) fn run(project: &Path) -> Result<String, String> {
+pub(crate) fn run(project: &Path, visibility: PublicationVisibility) -> Result<String, String> {
     let package = source_package::build(project)?;
     python::Assistant::open(project)?.contract()?;
     let credentials = auth::ensure_authenticated(REQUIRED_SCOPE)?;
     let api = Api::new();
-    let publication = api.create(&credentials, &package)?;
+    let publication = api.create(&credentials, &package, visibility)?;
     output::info("Publication accepted.");
     output::detail("Source", &package.digest);
     wait_until_installable(&api, &credentials, &package.digest, publication)
@@ -76,6 +76,7 @@ impl Api {
         &self,
         credentials: &crate::credentials::Credentials,
         package: &source_package::SourcePackage,
+        visibility: PublicationVisibility,
     ) -> Result<Publication, String> {
         let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
         let mut response = self
@@ -86,6 +87,7 @@ impl Api {
             .header("Content-Type", SOURCE_MEDIA_TYPE)
             .header("Content-Length", package.bytes.len().to_string())
             .header("X-Shimpz-Source-Digest", &package.digest)
+            .header("X-Shimpz-Visibility", visibility.as_str())
             .send(&package.bytes)
             .map_err(|_| unavailable())?;
         match response.status().as_u16() {
