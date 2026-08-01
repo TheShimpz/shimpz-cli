@@ -268,7 +268,7 @@ impl Publication {
         if self.workflow_run_id.is_none_or(|value| value == 0) {
             return false;
         }
-        let expected_image = format!("ghcr.io/theshimpz/shimpz-assistants@{oci_digest}");
+        let expected_image = format!("ghcr.io/theshimpz/shimpz-assistant@{oci_digest}");
         valid_digest(oci_digest)
             && self.image_reference.as_deref() == Some(expected_image.as_str())
             && self.manifest_digest.as_deref().is_some_and(valid_digest)
@@ -494,7 +494,7 @@ mod tests {
     fn ready_publication() -> Publication {
         let mut ready = publication("artifact_ready");
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        ready.image_reference = Some(format!("ghcr.io/theshimpz/shimpz-assistants@{digest}"));
+        ready.image_reference = Some(format!("ghcr.io/theshimpz/shimpz-assistant@{digest}"));
         ready.oci_digest = Some(digest.into());
         ready.manifest_digest = Some(digest.into());
         ready.machine_contract_digest = Some(digest.into());
@@ -529,6 +529,11 @@ mod tests {
         assert!(invalid.validate(DIGEST).is_err());
         invalid = publication("queued");
         invalid.source_digest = DIGEST.replace('a', "b");
+        assert!(invalid.validate(DIGEST).is_err());
+        invalid = ready_publication();
+        invalid.image_reference = Some(
+            "ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
         assert!(invalid.validate(DIGEST).is_err());
         invalid = ready_publication();
         invalid.signature_reference =
