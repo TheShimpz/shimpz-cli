@@ -38,13 +38,14 @@ pub(crate) fn run(project: &Path, visibility: PublicationVisibility) -> Result<S
     let publication = api.create(&credentials, &package, visibility)?;
     output::info("Publication accepted.");
     output::detail("Source", &package.digest);
-    wait_until_installable(&api, &credentials, &package.digest, publication)
+    wait_until_installable(&api, &credentials, &package.digest, visibility, publication)
 }
 
 fn wait_until_installable(
     api: &Api,
     credentials: &crate::credentials::Credentials,
     expected_digest: &str,
+    expected_visibility: PublicationVisibility,
     mut publication: Publication,
 ) -> Result<String, String> {
     let deadline = Instant::now()
@@ -52,7 +53,7 @@ fn wait_until_installable(
         .ok_or_else(unavailable)?;
     let mut observed_state = None;
     loop {
-        publication.validate(expected_digest)?;
+        publication.validate(expected_digest, expected_visibility.as_str())?;
         if observed_state.as_deref() != Some(publication.build_state.as_str()) {
             output::progress(&publication.progress_message());
             observed_state = Some(publication.build_state.clone());
@@ -62,7 +63,7 @@ fn wait_until_installable(
             None if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
             None => return Err("publication wait timed out; run `shimpz publish` again".into()),
         }
-        publication = api.status(credentials, expected_digest)?;
+        publication = api.status(credentials, expected_digest, expected_visibility)?;
     }
 }
 
@@ -129,7 +130,7 @@ impl Api {
             .send(&package.bytes)
             .map_err(|_| unavailable())?;
         match response.status().as_u16() {
-            200 | 201 => read_publication(&mut response, &package.digest),
+            200 | 201 => read_publication(&mut response, &package.digest, visibility.as_str()),
             _ => Err(status_error(&mut response, "publication was rejected")),
         }
     }
@@ -138,6 +139,7 @@ impl Api {
         &self,
         credentials: &crate::credentials::Credentials,
         source_digest: &str,
+        visibility: PublicationVisibility,
     ) -> Result<Publication, String> {
         let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
         let url = format!("{PUBLICATIONS_URL}/{source_digest}");
@@ -149,7 +151,7 @@ impl Api {
             .call()
             .map_err(|_| unavailable())?;
         match response.status().as_u16() {
-            200 => read_publication(&mut response, source_digest),
+            200 => read_publication(&mut response, source_digest, visibility.as_str()),
             _ => Err(status_error(
                 &mut response,
                 "publication status is unavailable",
@@ -216,6 +218,7 @@ fn read_consent(response: &mut Response<Body>) -> Result<CreatorConsent, String>
 fn read_publication(
     response: &mut Response<Body>,
     expected_digest: &str,
+    expected_visibility: &str,
 ) -> Result<Publication, String> {
     if response
         .headers()
@@ -231,7 +234,7 @@ fn read_publication(
         .limit(MAX_RESPONSE_BYTES)
         .read_json()
         .map_err(|_| "Developers returned an invalid publication response".to_owned())?;
-    publication.validate(expected_digest)?;
+    publication.validate(expected_digest, expected_visibility)?;
     Ok(publication)
 }
 
@@ -285,10 +288,12 @@ struct Publication {
     version: String,
     source_digest: String,
     build_state: String,
+    visibility: String,
     review_state: String,
     security_state: String,
     blocked: bool,
     safe_error_code: Option<String>,
+    safe_error_details: Option<Vec<AssistantTestFailure>>,
     image_reference: Option<String>,
     oci_digest: Option<String>,
     manifest_digest: Option<String>,
@@ -301,11 +306,25 @@ struct Publication {
     workflow_run_id: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssistantTestFailure {
+    test: String,
+    reason: String,
+}
+
+impl AssistantTestFailure {
+    fn valid(&self) -> bool {
+        valid_printable_ascii(&self.test, 256) && valid_printable_ascii(&self.reason, 512)
+    }
+}
+
 impl Publication {
-    fn validate(&self, expected_digest: &str) -> Result<(), String> {
+    fn validate(&self, expected_digest: &str, expected_visibility: &str) -> Result<(), String> {
         if !manifest::valid_id(&self.assistant_id)
             || !manifest::valid_version(&self.version)
             || self.source_digest != expected_digest
+            || self.visibility != expected_visibility
             || !matches!(
                 self.build_state.as_str(),
                 "queued"
@@ -344,6 +363,7 @@ impl Publication {
         match self.build_state.as_str() {
             "artifact_ready" => {
                 self.safe_error_code.is_none()
+                    && self.safe_error_details.is_none()
                     && artifacts.iter().all(Option::is_some)
                     && self.workflow_run_id.is_some()
                     && self.valid_ready_artifact()
@@ -352,14 +372,29 @@ impl Publication {
                 self.safe_error_code
                     .as_deref()
                     .is_some_and(valid_build_error)
+                    && self.valid_error_details()
                     && artifacts.iter().all(Option::is_none)
                     && self.valid_optional_workflow_run()
             }
             _ => {
                 self.safe_error_code.is_none()
+                    && self.safe_error_details.is_none()
                     && artifacts.iter().all(Option::is_none)
                     && self.valid_active_workflow_run()
             }
+        }
+    }
+
+    fn valid_error_details(&self) -> bool {
+        match self.safe_error_code.as_deref() {
+            Some("assistant_tests_failed") => {
+                self.safe_error_details.as_deref().is_some_and(|details| {
+                    (1..=20).contains(&details.len())
+                        && details.iter().all(AssistantTestFailure::valid)
+                })
+            }
+            Some(_) => self.safe_error_details.is_none(),
+            None => false,
         }
     }
 
@@ -422,6 +457,7 @@ impl Publication {
                 Some("security_scan_failed") => "publication security scan failed",
                 Some("signing_failed") => "publication signing failed",
                 Some("non_reproducible_build") => "publication build was not reproducible",
+                Some("assistant_tests_failed") => "publication Assistant tests failed",
                 _ => "publication build failed",
             };
             let run = self
@@ -536,7 +572,14 @@ fn valid_build_error(value: &str) -> bool {
             | "security_scan_failed"
             | "signing_failed"
             | "non_reproducible_build"
+            | "assistant_tests_failed"
     )
+}
+
+fn valid_printable_ascii(value: &str, max_length: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_length
+        && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -559,7 +602,7 @@ fn unavailable() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreatorConsent, Publication, validate_retry_after};
+    use super::{AssistantTestFailure, CreatorConsent, Publication, validate_retry_after};
     use crate::manifest::PublicationIdentity;
 
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -570,10 +613,12 @@ mod tests {
             version: "0.1.0".into(),
             source_digest: DIGEST.into(),
             build_state: build_state.into(),
+            visibility: "public".into(),
             review_state: "pending".into(),
             security_state: "clear".into(),
             blocked: false,
             safe_error_code: None,
+            safe_error_details: None,
             image_reference: None,
             oci_digest: None,
             manifest_digest: None,
@@ -629,34 +674,47 @@ mod tests {
     #[test]
     fn accepts_only_closed_publication_states() {
         for state in ["queued", "resolving"] {
-            assert!(publication(state).validate(DIGEST).is_ok());
+            assert!(publication(state).validate(DIGEST, "public").is_ok());
         }
         for state in ["building", "scanning", "signing"] {
             let mut active = publication(state);
             active.workflow_run_id = Some(42);
-            assert!(active.validate(DIGEST).is_ok());
+            assert!(active.validate(DIGEST, "public").is_ok());
         }
-        assert!(ready_publication().validate(DIGEST).is_ok());
+        assert!(ready_publication().validate(DIGEST, "public").is_ok());
         let mut failed = publication("build_failed");
         failed.safe_error_code = Some("build_failed".into());
-        assert!(failed.validate(DIGEST).is_ok());
+        assert!(failed.validate(DIGEST, "public").is_ok());
         let mut invalid = publication("ready");
-        assert!(invalid.validate(DIGEST).is_err());
+        assert!(invalid.validate(DIGEST, "public").is_err());
         invalid = publication("queued");
         invalid.source_digest = DIGEST.replace('a', "b");
-        assert!(invalid.validate(DIGEST).is_err());
+        assert!(invalid.validate(DIGEST, "public").is_err());
+        invalid = publication("queued");
+        invalid.visibility = "private".into();
+        assert!(invalid.validate(DIGEST, "public").is_err());
         invalid = ready_publication();
         invalid.image_reference = Some(
             "ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
-        assert!(invalid.validate(DIGEST).is_err());
+        assert!(invalid.validate(DIGEST, "public").is_err());
         invalid = ready_publication();
         invalid.signature_reference =
             Some("ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
-        assert!(invalid.validate(DIGEST).is_err());
+        assert!(invalid.validate(DIGEST, "public").is_err());
         invalid = ready_publication();
         invalid.workflow_run_id = Some(0);
-        assert!(invalid.validate(DIGEST).is_err());
+        assert!(invalid.validate(DIGEST, "public").is_err());
+
+        let mut test_failure = publication("build_failed");
+        test_failure.safe_error_code = Some("assistant_tests_failed".into());
+        test_failure.safe_error_details = Some(vec![AssistantTestFailure {
+            test: "tests/test_zones.py::test_lists_zones".into(),
+            reason: "assertion failed".into(),
+        }]);
+        assert!(test_failure.validate(DIGEST, "public").is_ok());
+        test_failure.safe_error_details = None;
+        assert!(test_failure.validate(DIGEST, "public").is_err());
     }
 
     #[test]
@@ -689,12 +747,12 @@ mod tests {
             building.progress_message(),
             "[building] Building and publishing the immutable amd64/arm64 image.\nRun: https://github.com/TheShimpz/shimpz-developers/actions/runs/42"
         );
-        assert!(building.validate(DIGEST).is_ok());
+        assert!(building.validate(DIGEST, "public").is_ok());
 
         let mut failed = publication("build_failed");
         failed.safe_error_code = Some("build_failed".into());
         failed.workflow_run_id = Some(42);
-        assert!(failed.validate(DIGEST).is_ok());
+        assert!(failed.validate(DIGEST, "public").is_ok());
         assert!(
             failed
                 .terminal_result()
