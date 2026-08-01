@@ -17,11 +17,7 @@ pub(crate) enum EntryKind {
 }
 
 pub(crate) enum EntryContent {
-    File {
-        path: PathBuf,
-        size: u64,
-    },
-    #[cfg(test)]
+    File { path: PathBuf, size: u64 },
     Bytes(Vec<u8>),
     Empty,
 }
@@ -30,7 +26,6 @@ impl EntryContent {
     pub(crate) fn size(&self) -> u64 {
         match self {
             Self::File { size, .. } => *size,
-            #[cfg(test)]
             Self::Bytes(bytes) => bytes.len() as u64,
             Self::Empty => 0,
         }
@@ -39,7 +34,6 @@ impl EntryContent {
     pub(crate) fn read(&self) -> Result<Vec<u8>, Error> {
         match self {
             Self::File { path, size } => read_unchanged_file(path, *size),
-            #[cfg(test)]
             Self::Bytes(bytes) => Ok(bytes.clone()),
             Self::Empty => Ok(Vec::new()),
         }
@@ -55,6 +49,7 @@ pub(crate) struct InputEntry {
 pub(crate) struct SourcePackage {
     pub(crate) bytes: Vec<u8>,
     pub(crate) digest: String,
+    pub(crate) manifest: Vec<u8>,
     pub(crate) excluded_roots: Vec<String>,
 }
 
@@ -81,14 +76,29 @@ impl std::fmt::Display for Error {
 }
 
 pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
-    let (entries, excluded_roots) = collect(root).map_err(|error| error.to_string())?;
+    let (mut entries, excluded_roots) = collect(root).map_err(|error| error.to_string())?;
+    let manifest = snapshot_manifest(&mut entries).map_err(|error| error.to_string())?;
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     Ok(SourcePackage {
         bytes,
         digest,
+        manifest,
         excluded_roots,
     })
+}
+
+fn snapshot_manifest(entries: &mut [InputEntry]) -> Result<Vec<u8>, Error> {
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.path == "shimpz.toml")
+        .ok_or_else(|| Error::new("required_file_missing"))?;
+    if entry.kind != EntryKind::RegularFile {
+        return reject("invalid_entry");
+    }
+    let bytes = entry.content.read()?;
+    entry.content = EntryContent::Bytes(bytes.clone());
+    Ok(bytes)
 }
 
 pub(crate) fn check_summary(package: &SourcePackage) -> String {

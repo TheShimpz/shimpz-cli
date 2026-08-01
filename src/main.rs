@@ -6,6 +6,7 @@ mod credentials;
 mod develop;
 mod install;
 mod invoke;
+mod manifest;
 mod new_assistant;
 mod output;
 mod publish;

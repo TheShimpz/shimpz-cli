@@ -115,6 +115,7 @@ fn collects_only_publishable_roots_from_disk() {
         "sha256:5afa5d913c54efb877eaa6b12e129e1938d16d3c6eb3a9750587e082604917e0"
     );
     assert_eq!(package.excluded_roots, ["README.md"]);
+    assert_eq!(package.manifest, b"spec = 1\n");
     assert_eq!(package.bytes.len() % 512, 0);
     assert_eq!(
         source_package::exclusion_warning(&package).as_deref(),

@@ -6,12 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::{args::PublicationVisibility, auth, output, python, source_package};
+use crate::{args::PublicationVisibility, auth, manifest, output, python, source_package};
 
+const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publication-consents";
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
 const REQUIRED_SCOPE: &str = "assistant:publish";
@@ -23,8 +24,17 @@ const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 pub(crate) fn run(project: &Path, visibility: PublicationVisibility) -> Result<String, String> {
     let package = source_package::build(project)?;
     python::Assistant::open(project)?.contract()?;
+    let identity = manifest::PublicationIdentity::parse(&package.manifest)?;
     let credentials = auth::ensure_authenticated(REQUIRED_SCOPE)?;
     let api = Api::new();
+    output::info("Recording exact Creator consent.");
+    output::detail(
+        "Assistant",
+        &format!("{} {}", identity.id, identity.version),
+    );
+    output::detail("Source", &package.digest);
+    output::detail("Creators", &identity.creators.join(", "));
+    api.consent(&credentials, &identity, &package.digest)?;
     let publication = api.create(&credentials, &package, visibility)?;
     output::info("Publication accepted.");
     output::detail("Source", &package.digest);
@@ -69,6 +79,34 @@ impl Api {
             .build();
         Self {
             agent: config.into(),
+        }
+    }
+
+    fn consent(
+        &self,
+        credentials: &crate::credentials::Credentials,
+        identity: &manifest::PublicationIdentity,
+        source_digest: &str,
+    ) -> Result<(), String> {
+        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let request = CreatorConsentRequest {
+            assistant_id: &identity.id,
+            version: &identity.version,
+            source_digest,
+        };
+        let mut response = self
+            .agent
+            .post(CREATOR_CONSENTS_URL)
+            .header("Accept", "application/json")
+            .header("Authorization", authorization.as_str())
+            .send_json(&request)
+            .map_err(|_| unavailable())?;
+        match response.status().as_u16() {
+            200 | 201 => {
+                let consent = read_consent(&mut response)?;
+                consent.validate(identity, source_digest)
+            }
+            _ => Err(status_error(&mut response, "Creator consent was rejected")),
         }
     }
 
@@ -120,6 +158,61 @@ impl Api {
     }
 }
 
+#[derive(Serialize)]
+struct CreatorConsentRequest<'a> {
+    assistant_id: &'a str,
+    version: &'a str,
+    source_digest: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatorConsent {
+    assistant_id: String,
+    version: String,
+    source_digest: String,
+    creator_handle: String,
+    outcome: String,
+    consented_at: u64,
+}
+
+impl CreatorConsent {
+    fn validate(
+        &self,
+        identity: &manifest::PublicationIdentity,
+        expected_digest: &str,
+    ) -> Result<(), String> {
+        if self.assistant_id != identity.id
+            || self.version != identity.version
+            || self.source_digest != expected_digest
+            || !manifest::valid_creator(&self.creator_handle)
+            || !identity.creators.contains(&self.creator_handle)
+            || self.outcome != "consented"
+        {
+            return Err("Developers returned an invalid Creator consent response".into());
+        }
+        let _ = self.consented_at;
+        Ok(())
+    }
+}
+
+fn read_consent(response: &mut Response<Body>) -> Result<CreatorConsent, String> {
+    if response
+        .headers()
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        != Some("application/json")
+    {
+        return Err("Developers returned an invalid Creator consent response".into());
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .read_json()
+        .map_err(|_| "Developers returned an invalid Creator consent response".to_owned())
+}
+
 fn read_publication(
     response: &mut Response<Body>,
     expected_digest: &str,
@@ -143,6 +236,16 @@ fn read_publication(
 }
 
 fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
+    let retry_after = match validate_retry_after(
+        response.status().as_u16(),
+        response
+            .headers()
+            .get("Retry-After")
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        Ok(value) => value,
+        Err(message) => return message,
+    };
     if response
         .headers()
         .get("Content-Type")
@@ -151,14 +254,28 @@ fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String
     {
         return fallback.into();
     }
-    response
+    let message = response
         .body_mut()
         .with_config()
         .limit(MAX_RESPONSE_BYTES)
         .read_json::<ErrorEnvelope>()
         .ok()
         .filter(|envelope| envelope.error.valid())
-        .map_or_else(|| fallback.into(), |envelope| envelope.error.message)
+        .map_or_else(|| fallback.into(), |envelope| envelope.error.message);
+    retry_after.map_or(message.clone(), |seconds| {
+        format!("{message}; retry after {seconds} seconds")
+    })
+}
+
+fn validate_retry_after(status: u16, value: Option<&str>) -> Result<Option<u64>, String> {
+    if status != 429 {
+        return Ok(None);
+    }
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .map(Some)
+        .ok_or_else(|| "Developers returned an invalid rate-limit response".into())
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,8 +303,8 @@ struct Publication {
 
 impl Publication {
     fn validate(&self, expected_digest: &str) -> Result<(), String> {
-        if !valid_assistant_id(&self.assistant_id)
-            || !valid_version(&self.version)
+        if !manifest::valid_id(&self.assistant_id)
+            || !manifest::valid_version(&self.version)
             || self.source_digest != expected_digest
             || !matches!(
                 self.build_state.as_str(),
@@ -403,28 +520,6 @@ impl ApiError {
     }
 }
 
-fn valid_assistant_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 40
-        && value.starts_with(|character: char| character.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.ends_with('-')
-        && !value.contains("--")
-        && !matches!(value, "postgres" | "app-egress-proxy")
-}
-
-fn valid_version(value: &str) -> bool {
-    let parts = value.split('.').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (part == &"0" || !part.starts_with('0'))
-        })
-}
-
 fn valid_error_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -464,7 +559,8 @@ fn unavailable() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Publication;
+    use super::{CreatorConsent, Publication, validate_retry_after};
+    use crate::manifest::PublicationIdentity;
 
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -488,6 +584,25 @@ mod tests {
             sbom_digest: None,
             scan_digest: None,
             workflow_run_id: None,
+        }
+    }
+
+    fn identity() -> PublicationIdentity {
+        PublicationIdentity {
+            id: "hello-world".into(),
+            version: "0.1.0".into(),
+            creators: vec!["@creator-one".into()],
+        }
+    }
+
+    fn consent() -> CreatorConsent {
+        CreatorConsent {
+            assistant_id: "hello-world".into(),
+            version: "0.1.0".into(),
+            source_digest: DIGEST.into(),
+            creator_handle: "@creator-one".into(),
+            outcome: "consented".into(),
+            consented_at: 42,
         }
     }
 
@@ -587,5 +702,31 @@ mod tests {
                 .unwrap_err()
                 .contains("/actions/runs/42")
         );
+    }
+
+    #[test]
+    fn accepts_only_the_exact_attributed_creator_consent() {
+        assert!(consent().validate(&identity(), DIGEST).is_ok());
+
+        let mut invalid = consent();
+        invalid.source_digest = DIGEST.replace('a', "b");
+        assert!(invalid.validate(&identity(), DIGEST).is_err());
+
+        invalid = consent();
+        invalid.creator_handle = "@another-creator".into();
+        assert!(invalid.validate(&identity(), DIGEST).is_err());
+
+        invalid = consent();
+        invalid.outcome = "pending".into();
+        assert!(invalid.validate(&identity(), DIGEST).is_err());
+    }
+
+    #[test]
+    fn accepts_only_bounded_delta_seconds_for_rate_limits() {
+        assert_eq!(validate_retry_after(429, Some("60")), Ok(Some(60)));
+        assert_eq!(validate_retry_after(503, None), Ok(None));
+        for value in [None, Some("0"), Some("3601"), Some("tomorrow")] {
+            assert!(validate_retry_after(429, value).is_err());
+        }
     }
 }
