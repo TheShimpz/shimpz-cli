@@ -1,3 +1,4 @@
+[shimpz]
 spec = 1
 id = "cli-smoke"
 version = "0.1.0"
@@ -5,8 +6,10 @@ name = "CLI Smoke Assistant"
 summary = "Verify local file-backed Power execution."
 creators = ["@roxygens"]
 github = "https://github.com/TheShimpz/shimpz-cli"
-allowed_hosts = []
 genesis = "Return a deterministic greeting for CLI verification."
+
+[network]
+allowed_hosts = []
 
 [integrations.cloudflare]
 scopes = ["zone.read"]

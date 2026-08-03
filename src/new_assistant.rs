@@ -82,6 +82,7 @@ fn manifest(name: &str) -> String {
     let display_name = display_name(name);
     format!(
         "\
+[shimpz]
 spec = 1
 id = \"{name}\"
 version = \"0.1.0\"
@@ -89,12 +90,14 @@ name = \"{display_name}\"
 summary = \"A Hello World Assistant for Shimpz.\"
 creators = [\"@your-github-username\"]
 github = \"https://github.com/your-github-username/{name}\"
-allowed_hosts = []
 genesis = \"\"\"
 Use this Assistant to greet people.
 
 Call hello-world with the name of the person to greet.
 \"\"\"
+
+[network]
+allowed_hosts = []
 "
     )
 }
@@ -108,7 +111,7 @@ version = \"0.1.0\"
 description = \"A Hello World Assistant for Shimpz\"
 requires-python = \">=3.14\"
 dependencies = [
-  \"shimpz==0.2.0\",
+  \"shimpz==0.2.1\",
 ]
 
 [tool.ruff]
@@ -219,7 +222,7 @@ mod tests {
         assert!(
             fs::read_to_string(root.join("pyproject.toml"))
                 .unwrap()
-                .contains("\"shimpz==0.2.0\"")
+                .contains("\"shimpz==0.2.1\"")
         );
         assert!(
             fs::read_to_string(root.join("powers/hello_world.py"))

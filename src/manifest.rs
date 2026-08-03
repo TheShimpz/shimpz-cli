@@ -11,12 +11,18 @@ pub(crate) struct PublicationIdentity {
     pub(crate) creators: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicationManifest {
+    shimpz: PublicationIdentity,
+}
+
 impl PublicationIdentity {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
         let source = std::str::from_utf8(bytes)
             .map_err(|_| "Assistant manifest identity is invalid".to_owned())?;
-        let identity: Self = toml::from_str(source)
+        let manifest: PublicationManifest = toml::from_str(source)
             .map_err(|_| "Assistant manifest identity is invalid".to_owned())?;
+        let identity = manifest.shimpz;
         if !valid_id(&identity.id)
             || !valid_version(&identity.version)
             || !valid_creators(&identity.creators)
@@ -72,6 +78,7 @@ mod tests {
     use super::PublicationIdentity;
 
     const VALID: &str = r#"
+[shimpz]
 spec = 1
 id = "hello-world"
 version = "1.2.3"
@@ -101,5 +108,12 @@ name = "Hello"
         ] {
             assert!(PublicationIdentity::parse(source.as_bytes()).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_the_retired_root_level_identity() {
+        let retired = VALID.replace("[shimpz]\n", "");
+
+        assert!(PublicationIdentity::parse(retired.as_bytes()).is_err());
     }
 }
