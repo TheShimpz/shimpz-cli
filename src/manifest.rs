@@ -42,7 +42,10 @@ pub(crate) fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && !value.ends_with('-')
         && !value.contains("--")
-        && !matches!(value, "postgres" | "assistant-egress")
+        && !matches!(
+            value,
+            "postgres" | "assistant-egress" | "shimpz-assistant-egress"
+        )
 }
 
 pub(crate) fn valid_version(value: &str) -> bool {
@@ -102,6 +105,8 @@ name = "Hello"
     fn rejects_noncanonical_publication_identity() {
         for source in [
             VALID.replace("hello-world", "postgres"),
+            VALID.replace("hello-world", "assistant-egress"),
+            VALID.replace("hello-world", "shimpz-assistant-egress"),
             VALID.replace("1.2.3", "1..3"),
             VALID.replace("@creator-two", "@creator-one"),
             VALID.replace("@creator-two", "@Creator"),

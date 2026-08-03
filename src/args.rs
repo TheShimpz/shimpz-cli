@@ -370,7 +370,10 @@ fn valid_assistant_name(value: &str) -> bool {
     valid_power_id(value)
         && value.len() <= 40
         && !value.contains("--")
-        && !matches!(value, "postgres" | "app-egress-proxy")
+        && !matches!(
+            value,
+            "postgres" | "assistant-egress" | "shimpz-assistant-egress"
+        )
 }
 
 fn valid_team_id(value: &str) -> bool {
@@ -518,7 +521,8 @@ mod tests {
         );
         for name in [
             "postgres",
-            "app-egress-proxy",
+            "assistant-egress",
+            "shimpz-assistant-egress",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert_eq!(
