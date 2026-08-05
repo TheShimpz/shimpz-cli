@@ -1632,6 +1632,8 @@ dependencies = [
  "anstream",
  "anstyle",
  "atomic-write-file",
+ "base64",
+ "crc32fast",
  "libc",
  "rustix",
  "self_update",

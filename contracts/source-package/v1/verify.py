@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import re
 import shutil
+import struct
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,15 +121,20 @@ def validate_contract(contract: dict[str, object]) -> None:
     }
     for key, expected in expected_path.items():
         require_equal(path.get(key), expected, f"contract.path.{key}")
-    require_equal(set(limits), {
-        "package_bytes",
-        "regular_files",
-        "single_file_bytes",
-        "path_bytes",
-        "path_components",
-        "ustar_name_bytes",
-        "ustar_prefix_bytes",
-    }, "contract.limits keys")
+    require_equal(
+        set(limits),
+        {
+            "package_bytes",
+            "icon_bytes",
+            "regular_files",
+            "single_file_bytes",
+            "path_bytes",
+            "path_components",
+            "ustar_name_bytes",
+            "ustar_prefix_bytes",
+        },
+        "contract.limits keys",
+    )
     expected_archive = {
         "format": "POSIX_ustar",
         "compression": "none",
@@ -155,13 +164,22 @@ def validate_contract(contract: dict[str, object]) -> None:
 def content_from(raw: dict[str, object], label: str) -> Content:
     has_text = "text" in raw
     has_repeat = "repeat" in raw
-    if has_text == has_repeat:
-        fail(f"{label} must define exactly one of text or repeat")
+    has_base64 = "base64" in raw
+    if sum((has_text, has_repeat, has_base64)) != 1:
+        fail(f"{label} must define exactly one of text, repeat, or base64")
     if has_text:
         text = raw["text"]
         if not isinstance(text, str):
             fail(f"{label}.text must be a string")
         return Content(text.encode())
+    if has_base64:
+        encoded = raw["base64"]
+        if not isinstance(encoded, str):
+            fail(f"{label}.base64 must be a string")
+        try:
+            return Content(base64.b64decode(encoded, validate=True))
+        except (ValueError, binascii.Error) as exc:
+            fail(f"{label}.base64 must be canonical base64: {exc}")
     repeat = require_object(raw["repeat"], f"{label}.repeat")
     unit = repeat.get("byte")
     count = require_integer(repeat.get("count"), f"{label}.repeat.count")
@@ -313,7 +331,58 @@ def validate_entries(
     max_file = require_integer(limits.get("single_file_bytes"), "contract.limits.single_file_bytes")
     if any(entry.content.size > max_file for entry in entries):
         raise ContractViolationError("single_file_too_large")
+    icon = next((entry for entry in entries if entry.path == "icon.png"), None)
+    icon_limit = require_integer(limits.get("icon_bytes"), "contract.limits.icon_bytes")
+    if icon is not None and icon.content.size > icon_limit:
+        raise ContractViolationError("icon_too_large")
+    if icon is not None:
+        validate_icon(icon.content.materialize())
     return entries, splits
+
+
+def validate_icon(contents: bytes) -> None:
+    if not contents.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ContractViolationError("invalid_icon")
+    offset = 8
+    chunks: list[tuple[bytes, bytes]] = []
+    while offset < len(contents):
+        if len(contents) - offset < 12:
+            raise ContractViolationError("invalid_icon")
+        length = struct.unpack(">I", contents[offset : offset + 4])[0]
+        end = offset + 12 + length
+        if end > len(contents):
+            raise ContractViolationError("invalid_icon")
+        kind = contents[offset + 4 : offset + 8]
+        data = contents[offset + 8 : offset + 8 + length]
+        expected_crc = struct.unpack(">I", contents[offset + 8 + length : end])[0]
+        if not kind.isalpha() or zlib.crc32(kind + data) & 0xFFFFFFFF != expected_crc:
+            raise ContractViolationError("invalid_icon")
+        chunks.append((kind, data))
+        offset = end
+    if offset != len(contents) or not chunks or chunks[0][0] != b"IHDR":
+        raise ContractViolationError("invalid_icon")
+    if chunks[-1] != (b"IEND", b"") or sum(kind == b"IHDR" for kind, _ in chunks) != 1:
+        raise ContractViolationError("invalid_icon")
+    if sum(kind == b"IEND" for kind, _ in chunks) != 1 or not any(kind == b"IDAT" for kind, _ in chunks):
+        raise ContractViolationError("invalid_icon")
+    if any(kind == b"acTL" for kind, _ in chunks):
+        raise ContractViolationError("animated_icon")
+    ihdr = chunks[0][1]
+    if len(ihdr) != 13:
+        raise ContractViolationError("invalid_icon")
+    width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", ihdr)
+    valid_depths = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
+    if (
+        (width, height) != (1024, 1024)
+        or depth not in valid_depths.get(color, set())
+        or compression != 0
+        or filtering != 0
+        or interlace not in {0, 1}
+    ):
+        raise ContractViolationError("invalid_icon")
+    kinds = [kind for kind, _ in chunks]
+    if color == 3 and (b"PLTE" not in kinds or kinds.index(b"PLTE") > kinds.index(b"IDAT")):
+        raise ContractViolationError("invalid_icon")
 
 
 def archive_entries(entries: list[SourceEntry], limits: dict[str, object]) -> list[ArchiveEntry]:
@@ -336,9 +405,9 @@ def padded_size(size: int) -> int:
 def canonical_records(entries: list[SourceEntry], contract: dict[str, object]) -> list[ArchiveEntry]:
     _, _, limits = contract_sections(contract)
     records = archive_entries(entries, limits)
-    package_size = (len(records) * BLOCK_BYTES) + sum(
-        padded_size(record.content.size) for record in records
-    ) + (2 * BLOCK_BYTES)
+    package_size = (
+        (len(records) * BLOCK_BYTES) + sum(padded_size(record.content.size) for record in records) + (2 * BLOCK_BYTES)
+    )
     maximum = require_integer(limits.get("package_bytes"), "contract.limits.package_bytes")
     if package_size > maximum:
         raise ContractViolationError("package_too_large")

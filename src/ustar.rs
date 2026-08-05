@@ -2,11 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::source_package::{EntryKind, Error, InputEntry, reject};
+use crate::source_package::{EntryKind, Error, InputEntry, reject, validate_icon};
 
 const BLOCK: usize = 512;
 const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ICON_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 struct Record<'a> {
@@ -65,6 +66,14 @@ fn validate(entries: &[InputEntry]) -> Result<(), Error> {
     {
         return reject("single_file_too_large");
     }
+    let icon = entries
+        .iter()
+        .find(|entry| entry.path == "icon.png")
+        .ok_or_else(|| Error::new("missing_required_file"))?;
+    if icon.content.size() > MAX_ICON_BYTES {
+        return reject("icon_too_large");
+    }
+    validate_icon(&icon.content.read()?)?;
     Ok(())
 }
 
@@ -97,8 +106,8 @@ fn validate_allowlist(path: &str, components: &[&str]) -> Result<(), Error> {
         ["powers", filename] if power_filename(filename) => Ok(()),
         ["powers", _] => reject("invalid_entry"),
         ["powers", ..] => reject("nested_power"),
-        ["shimpz.toml" | "pyproject.toml"] | ["lib" | "tests", _, ..] => Ok(()),
-        _ if matches!(path, "shimpz.toml" | "pyproject.toml") => Ok(()),
+        ["icon.png" | "shimpz.toml" | "pyproject.toml"] | ["lib" | "tests", _, ..] => Ok(()),
+        _ if matches!(path, "icon.png" | "shimpz.toml" | "pyproject.toml") => Ok(()),
         _ => reject("unknown_root"),
     }
 }
@@ -108,7 +117,10 @@ fn validate_required(entries: &[InputEntry]) -> Result<(), Error> {
         .iter()
         .map(|entry| entry.path.as_str())
         .collect::<BTreeSet<_>>();
-    if !paths.contains("shimpz.toml") || !paths.contains("pyproject.toml") {
+    if !paths.contains("icon.png")
+        || !paths.contains("shimpz.toml")
+        || !paths.contains("pyproject.toml")
+    {
         return reject("missing_required_file");
     }
     if !paths.iter().any(|path| path.starts_with("powers/")) {

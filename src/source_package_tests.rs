@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -34,6 +35,7 @@ struct VectorEntry {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
+    base64: Option<String>,
     repeat: Option<Repeat>,
 }
 
@@ -112,7 +114,7 @@ fn collects_only_publishable_roots_from_disk() {
 
     assert_eq!(
         package.digest,
-        "sha256:5afa5d913c54efb877eaa6b12e129e1938d16d3c6eb3a9750587e082604917e0"
+        "sha256:393136771c3bfb110a06aa852aebe7a23084ed4a6c3abb0c27a81cd967bebf5b"
     );
     assert_eq!(package.excluded_roots, ["README.md"]);
     assert_eq!(package.manifest, b"spec = 1\n");
@@ -209,6 +211,7 @@ fn rejects_symlinks_inside_publishable_roots() {
 fn write_minimum(root: &Path) {
     fs::create_dir(root.join("powers")).expect("powers");
     fs::write(root.join("shimpz.toml"), "spec = 1\n").expect("manifest");
+    fs::write(root.join("icon.png"), valid_icon()).expect("icon");
     fs::write(root.join("pyproject.toml"), "[project]\nname = \"hello\"\n").expect("project");
     fs::write(
         root.join("powers/hello.py"),
@@ -246,12 +249,17 @@ fn vector_entry(entry: &VectorEntry) -> InputEntry {
     };
     let bytes = entry.repeat.as_ref().map_or_else(
         || {
-            entry
-                .text
-                .as_deref()
-                .unwrap_or_default()
-                .as_bytes()
-                .to_vec()
+            entry.base64.as_ref().map_or_else(
+                || {
+                    entry
+                        .text
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes()
+                        .to_vec()
+                },
+                |encoded| BASE64.decode(encoded).expect("valid vector base64"),
+            )
         },
         |repeat| repeat.byte.as_bytes().repeat(repeat.count),
     );
@@ -260,4 +268,13 @@ fn vector_entry(entry: &VectorEntry) -> InputEntry {
         kind,
         content: EntryContent::Bytes(bytes),
     }
+}
+
+fn valid_icon() -> Vec<u8> {
+    let vectors: Vectors = serde_json::from_str(VECTORS).expect("valid vectors");
+    let encoded = vectors.cases[0].entries[0]
+        .base64
+        .as_ref()
+        .expect("canonical icon vector");
+    BASE64.decode(encoded).expect("valid canonical icon")
 }

@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use crate::ustar;
 
 const MAX_COLLECTED_FILES: usize = 10_000;
+const MAX_ICON_BYTES: u64 = 1_048_576;
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum EntryKind {
@@ -78,6 +80,7 @@ impl std::fmt::Display for Error {
 pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
     let (mut entries, excluded_roots) = collect(root).map_err(|error| error.to_string())?;
     let manifest = snapshot_manifest(&mut entries).map_err(|error| error.to_string())?;
+    snapshot_icon(&mut entries).map_err(|error| error.to_string())?;
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     Ok(SourcePackage {
@@ -86,6 +89,137 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         manifest,
         excluded_roots,
     })
+}
+
+fn snapshot_icon(entries: &mut [InputEntry]) -> Result<(), Error> {
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.path == "icon.png")
+        .ok_or_else(|| Error::new("missing_required_file"))?;
+    if entry.kind != EntryKind::RegularFile {
+        return reject("invalid_entry");
+    }
+    if entry.content.size() > MAX_ICON_BYTES {
+        return reject("icon_too_large");
+    }
+    let bytes = entry.content.read()?;
+    validate_icon(&bytes)?;
+    entry.content = EntryContent::Bytes(bytes);
+    Ok(())
+}
+
+pub(crate) fn validate_icon(bytes: &[u8]) -> Result<(), Error> {
+    if !bytes.starts_with(PNG_SIGNATURE) {
+        return reject("invalid_icon");
+    }
+    let mut offset = PNG_SIGNATURE.len();
+    let mut chunks = 0_usize;
+    let mut ihdr = None;
+    let mut ihdr_count = 0_usize;
+    let mut iend_count = 0_usize;
+    let mut has_idat = false;
+    let mut has_animation = false;
+    let mut palette_before_idat = false;
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(8)
+            .ok_or_else(|| Error::new("invalid_icon"))?;
+        if header_end > bytes.len() {
+            return reject("invalid_icon");
+        }
+        let length = usize::try_from(u32::from_be_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| Error::new("invalid_icon"))?,
+        ))
+        .map_err(|_| Error::new("invalid_icon"))?;
+        let chunk_end = header_end
+            .checked_add(length)
+            .and_then(|end| end.checked_add(4))
+            .ok_or_else(|| Error::new("invalid_icon"))?;
+        if chunk_end > bytes.len() {
+            return reject("invalid_icon");
+        }
+        let kind = &bytes[offset + 4..header_end];
+        if !kind.iter().all(u8::is_ascii_alphabetic) {
+            return reject("invalid_icon");
+        }
+        let data = &bytes[header_end..header_end + length];
+        let expected_crc = u32::from_be_bytes(
+            bytes[header_end + length..chunk_end]
+                .try_into()
+                .map_err(|_| Error::new("invalid_icon"))?,
+        );
+        let mut checksum = crc32fast::Hasher::new();
+        checksum.update(kind);
+        checksum.update(data);
+        if checksum.finalize() != expected_crc {
+            return reject("invalid_icon");
+        }
+        chunks += 1;
+        match kind {
+            b"IHDR" => {
+                ihdr_count += 1;
+                if chunks != 1 {
+                    return reject("invalid_icon");
+                }
+                ihdr = Some(data);
+            }
+            b"IDAT" => has_idat = true,
+            b"IEND" => {
+                iend_count += 1;
+                if !data.is_empty() || chunk_end != bytes.len() {
+                    return reject("invalid_icon");
+                }
+            }
+            b"acTL" => has_animation = true,
+            b"PLTE" if !has_idat => palette_before_idat = true,
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+    if offset != bytes.len() || chunks == 0 || ihdr_count != 1 || iend_count != 1 || !has_idat {
+        return reject("invalid_icon");
+    }
+    if has_animation {
+        return reject("animated_icon");
+    }
+    validate_ihdr(
+        ihdr.ok_or_else(|| Error::new("invalid_icon"))?,
+        palette_before_idat,
+    )
+}
+
+fn validate_ihdr(ihdr: &[u8], palette_before_idat: bool) -> Result<(), Error> {
+    if ihdr.len() != 13 {
+        return reject("invalid_icon");
+    }
+    let width = u32::from_be_bytes(
+        ihdr[0..4]
+            .try_into()
+            .map_err(|_| Error::new("invalid_icon"))?,
+    );
+    let height = u32::from_be_bytes(
+        ihdr[4..8]
+            .try_into()
+            .map_err(|_| Error::new("invalid_icon"))?,
+    );
+    let depth = ihdr[8];
+    let color = ihdr[9];
+    let valid_depth = matches!(
+        (color, depth),
+        (0, 1 | 2 | 4 | 8 | 16) | (2 | 4 | 6, 8 | 16) | (3, 1 | 2 | 4 | 8)
+    );
+    if (width, height) != (1024, 1024)
+        || !valid_depth
+        || ihdr[10] != 0
+        || ihdr[11] != 0
+        || !matches!(ihdr[12], 0 | 1)
+        || (color == 3 && !palette_before_idat)
+    {
+        return reject("invalid_icon");
+    }
+    Ok(())
 }
 
 fn snapshot_manifest(entries: &mut [InputEntry]) -> Result<Vec<u8>, Error> {
@@ -136,7 +270,7 @@ fn collect(root: &Path) -> Result<(Vec<InputEntry>, Vec<String>), Error> {
         let child = child.map_err(|_| Error::new("invalid_entry"))?;
         let name = child.file_name();
         match name.to_str() {
-            Some("shimpz.toml" | "pyproject.toml") => {
+            Some("icon.png" | "shimpz.toml" | "pyproject.toml") => {
                 collect_entry(root, &child.path(), &mut entries)?;
             }
             Some("powers") => {

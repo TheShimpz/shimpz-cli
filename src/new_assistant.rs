@@ -3,6 +3,10 @@
 use std::fs;
 use std::path::Path;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+const DEFAULT_ICON_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC";
+
 const GITIGNORE: &str = "\
 .venv/
 __pycache__/
@@ -64,12 +68,16 @@ pub(crate) fn run(name: &str) -> Result<String, String> {
 }
 
 fn create(root: &Path, name: &str) -> Result<(), String> {
+    let icon = BASE64
+        .decode(DEFAULT_ICON_BASE64)
+        .map_err(|_| "Assistant icon template is invalid".to_owned())?;
     fs::create_dir(root).map_err(|_| "Assistant directory cannot be created".to_owned())?;
     fs::create_dir(root.join("lib"))
         .and_then(|()| fs::create_dir(root.join("powers")))
         .and_then(|()| fs::create_dir(root.join("tests")))
         .and_then(|()| fs::write(root.join(".gitignore"), GITIGNORE))
         .and_then(|()| fs::write(root.join("shimpz.toml"), manifest(name)))
+        .and_then(|()| fs::write(root.join("icon.png"), icon))
         .and_then(|()| fs::write(root.join("pyproject.toml"), pyproject(name)))
         .and_then(|()| fs::write(root.join("README.md"), readme(name)))
         .and_then(|()| fs::write(root.join("lib/hello.py"), HELLO_LIBRARY))
@@ -209,6 +217,7 @@ mod tests {
             BTreeSet::from([
                 ".gitignore".into(),
                 "README.md".into(),
+                "icon.png".into(),
                 "lib/hello.py".into(),
                 "powers/hello_world.py".into(),
                 "pyproject.toml".into(),
@@ -219,6 +228,12 @@ mod tests {
         let manifest = fs::read_to_string(root.join("shimpz.toml")).unwrap();
         assert!(manifest.contains("id = \"hello-assistant\""));
         assert!(manifest.contains("name = \"Hello Assistant\""));
+        assert!(
+            fs::read(root.join("icon.png"))
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        crate::source_package::build(&root).expect("publishable generated Assistant");
         assert!(
             fs::read_to_string(root.join("pyproject.toml"))
                 .unwrap()

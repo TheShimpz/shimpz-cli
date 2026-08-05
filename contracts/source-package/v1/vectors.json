@@ -5,39 +5,43 @@
       "name": "minimum",
       "valid": true,
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": "spec = 1\n"},
         {"path": "pyproject.toml", "type": "regular_file", "text": "[project]\nname = \"hello\"\n"},
         {"path": "powers/hello.py", "type": "regular_file", "text": "async def run():\n    return \"hello\"\n"}
       ],
-      "sha256": "5afa5d913c54efb877eaa6b12e129e1938d16d3c6eb3a9750587e082604917e0"
+      "sha256": "393136771c3bfb110a06aa852aebe7a23084ed4a6c3abb0c27a81cd967bebf5b"
     },
     {
       "name": "portable_ascii",
       "valid": true,
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/Hello_world-1.py", "type": "regular_file", "text": ""},
         {"path": "lib/pkg.name/__init__.py", "type": "regular_file", "text": ""},
         {"path": "tests/test-hello_world.py", "type": "regular_file", "text": ""}
       ],
-      "sha256": "86b4a73045aaae8e198f2aeae637f73446fe3bbfb0c5c6be368850a63ccdf3c7"
+      "sha256": "9f04f4b329b3a883ead9bb5719ab0096e3bbf37a35faff350bf242c52ae43d5e"
     },
     {
       "name": "maximum_depth",
       "valid": true,
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "text": ""},
         {"path": "lib/a/b/c/d/e/f/g/h/i/j/k/l/m/n/deep.py", "type": "regular_file", "text": "deep = True\n"}
       ],
-      "sha256": "1b003ade7fc9612db45de07ec25e844878b3b018e9c513846d9580dbb6e9a465"
+      "sha256": "2fa0c4c556ea63d13e1141847d4d754525f701f6b2cf85ea60563cdd87e6a05e"
     },
     {
       "name": "split_path_256_bytes",
       "valid": true,
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "text": ""},
@@ -52,7 +56,7 @@
         "prefix": "lib/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "name": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.py"
       },
-      "sha256": "05e3cfa3e8f3a30a18b8630b07547782e0b819cf9f0579998e0bb71907f86a78"
+      "sha256": "e7fb668104f52f6b0193bcce9d77329d8651ed8da69863dff50b0c78bfe39034"
     },
     {
       "name": "non_ascii",
@@ -172,6 +176,7 @@
       "valid": false,
       "error": "single_file_too_large",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "repeat": {"byte": "x", "count": 8388609}}
@@ -182,6 +187,7 @@
       "valid": false,
       "error": "package_too_large",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "repeat": {"byte": "a", "count": 8388608}},
         {"path": "pyproject.toml", "type": "regular_file", "repeat": {"byte": "b", "count": 8388608}},
         {"path": "powers/hello.py", "type": "regular_file", "repeat": {"byte": "c", "count": 8388608}},
@@ -193,12 +199,13 @@
       "valid": false,
       "error": "file_count_exceeded",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "text": ""}
       ],
       "generate": [
-        {"root": "tests", "prefix": "case-", "suffix": ".py", "start": 0, "count": 9998, "width": 5, "text": ""}
+        {"root": "tests", "prefix": "case-", "suffix": ".py", "start": 0, "count": 9997, "width": 5, "text": ""}
       ]
     },
     {
@@ -229,10 +236,65 @@
       ]
     },
     {
+      "name": "missing_icon",
+      "valid": false,
+      "error": "missing_required_file",
+      "entries": [
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "icon_oversize",
+      "valid": false,
+      "error": "icon_too_large",
+      "entries": [
+        {"path": "icon.png", "type": "regular_file", "repeat": {"byte": "x", "count": 1048577}},
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "icon_wrong_dimensions",
+      "valid": false,
+      "error": "invalid_icon",
+      "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIAAQAAAADcA+lXAAAANklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8G4IAAAFjdVCkAAAAAElFTkSuQmCC"},
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "animated_icon",
+      "valid": false,
+      "error": "animated_icon",
+      "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAACGFjVEwAAAABAAAAALQt6aAAAACWSURBVHja7cEBAQAAAIIg/69uSEABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAO8GBB4AAQ3eOGQAAAAASUVORK5CYII="},
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
+      "name": "icon_bad_crc",
+      "valid": false,
+      "error": "invalid_icon",
+      "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkWuQmCC"},
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
       "name": "missing_manifest",
       "valid": false,
       "error": "missing_required_file",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "text": ""}
       ]
@@ -242,6 +304,7 @@
       "valid": false,
       "error": "missing_required_file",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "powers/hello.py", "type": "regular_file", "text": ""}
       ]
@@ -251,6 +314,7 @@
       "valid": false,
       "error": "missing_power",
       "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC"},
         {"path": "shimpz.toml", "type": "regular_file", "text": ""},
         {"path": "pyproject.toml", "type": "regular_file", "text": ""}
       ]

@@ -4,7 +4,12 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+const ICON: &str = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC";
 
 #[test]
 fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
@@ -19,9 +24,26 @@ fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
     );
     fs::write(&fake_uv, script).unwrap();
     fs::set_permissions(&fake_uv, fs::Permissions::from_mode(0o755)).unwrap();
-    let project = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/assistant");
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/assistant"
+    ));
+    let project = dir.join("assistant");
+    fs::create_dir_all(project.join("powers")).unwrap();
+    for name in ["pyproject.toml", "shimpz.toml"] {
+        fs::copy(fixture.join(name), project.join(name)).unwrap();
+    }
+    for name in ["greet.py", "report.py"] {
+        fs::copy(
+            fixture.join("powers").join(name),
+            project.join("powers").join(name),
+        )
+        .unwrap();
+    }
+    fs::write(project.join("icon.png"), BASE64.decode(ICON).unwrap()).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_shimpz"))
-        .args(["check", "--project", project])
+        .args(["check", "--project"])
+        .arg(&project)
         .env("SHIMPZ_UV", &fake_uv)
         .env("SHIMPZ_INTEGRATION_CLOUDFLARE", "leaky-token")
         .env("SECRET", "top-secret-value")

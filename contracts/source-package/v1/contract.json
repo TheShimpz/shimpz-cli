@@ -3,6 +3,7 @@
   "media_type": "application/vnd.shimpz.source.v1+tar",
   "source_tree": {
     "required_root_files": [
+      "icon.png",
       "pyproject.toml",
       "shimpz.toml"
     ],
@@ -31,6 +32,7 @@
     "exact_and_collision_duplicates": "reject"
   },
   "limits": {
+    "icon_bytes": 1048576,
     "package_bytes": 33554432,
     "regular_files": 10000,
     "single_file_bytes": 8388608,
@@ -81,10 +83,13 @@
   ],
   "rejection_codes": [
     "absolute_path",
+    "animated_icon",
     "case_collision",
     "duplicate_path",
     "file_count_exceeded",
+    "icon_too_large",
     "invalid_entry",
+    "invalid_icon",
     "invalid_path_segment",
     "missing_power",
     "missing_required_file",
