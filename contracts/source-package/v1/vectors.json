@@ -268,6 +268,17 @@
       ]
     },
     {
+      "name": "icon_missing_ihdr",
+      "valid": false,
+      "error": "invalid_icon",
+      "entries": [
+        {"path": "icon.png", "type": "regular_file", "base64": "iVBORw0KGgoAAAAASURBVDWvBh4AAAAASUVORK5CYII="},
+        {"path": "shimpz.toml", "type": "regular_file", "text": ""},
+        {"path": "pyproject.toml", "type": "regular_file", "text": ""},
+        {"path": "powers/hello.py", "type": "regular_file", "text": ""}
+      ]
+    },
+    {
       "name": "animated_icon",
       "valid": false,
       "error": "animated_icon",

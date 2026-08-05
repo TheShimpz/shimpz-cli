@@ -341,6 +341,11 @@ def validate_entries(
 
 
 def validate_icon(contents: bytes) -> None:
+    chunks = parse_icon_chunks(contents)
+    validate_icon_structure(chunks)
+
+
+def parse_icon_chunks(contents: bytes) -> list[tuple[bytes, bytes]]:
     if not contents.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ContractViolationError("invalid_icon")
     offset = 8
@@ -359,7 +364,13 @@ def validate_icon(contents: bytes) -> None:
             raise ContractViolationError("invalid_icon")
         chunks.append((kind, data))
         offset = end
-    if offset != len(contents) or not chunks or chunks[0][0] != b"IHDR":
+    if offset != len(contents):
+        raise ContractViolationError("invalid_icon")
+    return chunks
+
+
+def validate_icon_structure(chunks: list[tuple[bytes, bytes]]) -> None:
+    if not chunks or chunks[0][0] != b"IHDR":
         raise ContractViolationError("invalid_icon")
     if chunks[-1] != (b"IEND", b"") or sum(kind == b"IHDR" for kind, _ in chunks) != 1:
         raise ContractViolationError("invalid_icon")
