@@ -57,4 +57,4 @@ jobs:
             exit 1
           fi
           grep -q 'SHIMPZ_INTEGRATION_CLOUDFLARE is required for this Power' error.log
-          test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 4
+          test "$(find tests/fixtures/assistant -type f | wc -l)" -eq 5
