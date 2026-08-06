@@ -8,6 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::args::Input;
+use crate::human_request::{PowerResponse, answer, parse_response};
 use crate::python;
 
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
@@ -17,8 +18,28 @@ pub(crate) fn run(project: &Path, power_id: &str, input: &Input) -> Result<Strin
     let contract = assistant.contract()?;
     let integration_ids = power_integrations(&contract, power_id)?;
     let integrations = integration_tokens(&integration_ids)?;
-    let request = request(input, &integrations)?;
-    assistant.invoke(power_id, request.as_bytes())
+    let mut request = request(input, &integrations)?;
+    for _ in 0..=8 {
+        let output = assistant.invoke(power_id, request.to_string().as_bytes())?;
+        match parse_response(&output)? {
+            PowerResponse::Result(result) => {
+                return serde_json::to_string(&result)
+                    .map_err(|_| "Power result is invalid".into());
+            }
+            PowerResponse::Request(frame) => {
+                let response = answer(&frame)?;
+                request
+                    .as_object_mut()
+                    .ok_or_else(|| "Power invocation is invalid".to_owned())?
+                    .entry("responses")
+                    .or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .ok_or_else(|| "Power invocation is invalid".to_owned())?
+                    .push(response);
+            }
+        }
+    }
+    Err("Power exceeded its human request limit".into())
 }
 
 fn power_integrations(contract: &str, power_id: &str) -> Result<Vec<String>, String> {
@@ -78,14 +99,14 @@ fn integration_variable(integration_id: &str) -> String {
     format!("SHIMPZ_INTEGRATION_{suffix}")
 }
 
-fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<String, String> {
+fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Value, String> {
     let raw = read_input(input)?;
     let value: Value =
         serde_json::from_str(&raw).map_err(|_| "--input must be a JSON object".to_owned())?;
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
-    Ok(serde_json::json!({ "input": value, "integrations": integrations }).to_string())
+    Ok(serde_json::json!({ "input": value, "integrations": integrations }))
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -187,7 +208,10 @@ mod tests {
                 &Input::Inline(r#"{"zone":"example.com"}"#.into()),
                 &integrations
             ),
-            Ok(r#"{"input":{"zone":"example.com"},"integrations":{}}"#.into())
+            Ok(serde_json::json!({
+                "input": {"zone": "example.com"},
+                "integrations": {}
+            }))
         );
     }
 

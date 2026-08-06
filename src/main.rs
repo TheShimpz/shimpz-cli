@@ -4,6 +4,7 @@ mod args;
 mod auth;
 mod credentials;
 mod develop;
+mod human_request;
 mod install;
 mod invoke;
 mod manifest;

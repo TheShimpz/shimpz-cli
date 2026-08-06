@@ -28,6 +28,10 @@ pub(crate) fn progress(message: &str) {
     anstream::eprintln!("{}", labeled(INFO, "progress", message));
 }
 
+pub(crate) fn request(message: &str) {
+    anstream::eprintln!("{}", labeled(INFO, "request", message));
+}
+
 pub(crate) fn detail(label: &str, value: &str) {
     let label = sanitize(label);
     let value = sanitize(value);

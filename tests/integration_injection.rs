@@ -32,7 +32,7 @@ if [ "$1" = "run" ]; then
     fi
     if [ "$argument" = "invoke" ]; then
       cat > "$SHIMPZ_INVOKE_STDIN"
-      echo '{{"token_length":16}}'
+      echo '{{"type":"result","result":{{"token_length":16}}}}'
       exit 0
     fi
   done

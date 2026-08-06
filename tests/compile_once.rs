@@ -31,7 +31,7 @@ if [ "$1" = "run" ]; then
     fi
     if [ "$argument" = "invoke" ]; then
       cat >/dev/null
-      echo '{"message":"Hello, Ada"}'
+      echo '{"type":"result","result":{"message":"Hello, Ada"}}'
       exit 0
     fi
   done

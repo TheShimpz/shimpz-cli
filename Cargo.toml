@@ -1,6 +1,6 @@
 [package]
 name = "shimpz-cli"
-version = "0.2.3"
+version = "0.3.0"
 description = "Fast local tooling for Shimpz Assistants"
 edition = "2024"
 license = "Apache-2.0"
@@ -22,6 +22,7 @@ base64 = "0.22"
 crc32fast = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rpassword = "7.5.4"
 sha2 = "0.10"
 toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 self_update = { version = "0.44.0", default-features = false, features = ["compression-flate2", "compression-zip-deflate", "rustls", "ureq"] }
