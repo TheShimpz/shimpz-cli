@@ -278,13 +278,13 @@ def validate_allowlist(path: str, parts: list[str], source_tree: dict[str, objec
     required = require_list(source_tree.get("required_root_files"), "contract.source_tree.required_root_files")
     if path in required:
         return
-    power = require_object(source_tree.get("required_direct_power"), "contract.source_tree.required_direct_power")
-    power_directory = power.get("directory")
-    power_pattern = power.get("filename_pattern")
-    if parts[0] == power_directory:
+    action = require_object(source_tree.get("required_direct_action"), "contract.source_tree.required_direct_action")
+    action_directory = action.get("directory")
+    action_pattern = action.get("filename_pattern")
+    if parts[0] == action_directory:
         if len(parts) != 2:
-            raise ContractViolationError("nested_power")
-        if not isinstance(power_pattern, str) or re.fullmatch(power_pattern, parts[1]) is None:
+            raise ContractViolationError("nested_action")
+        if not isinstance(action_pattern, str) or re.fullmatch(action_pattern, parts[1]) is None:
             raise ContractViolationError("invalid_entry")
         return
     optional = require_list(source_tree.get("optional_roots"), "contract.source_tree.optional_roots")
@@ -298,11 +298,11 @@ def validate_required(entries: list[SourceEntry], source_tree: dict[str, object]
     required = require_list(source_tree.get("required_root_files"), "contract.source_tree.required_root_files")
     if any(path not in paths for path in required):
         raise ContractViolationError("missing_required_file")
-    power = require_object(source_tree.get("required_direct_power"), "contract.source_tree.required_direct_power")
-    directory = power.get("directory")
-    minimum = require_integer(power.get("minimum_files"), "contract.source_tree.required_direct_power.minimum_files")
+    action = require_object(source_tree.get("required_direct_action"), "contract.source_tree.required_direct_action")
+    directory = action.get("directory")
+    minimum = require_integer(action.get("minimum_files"), "contract.source_tree.required_direct_action.minimum_files")
     if sum(path.startswith(f"{directory}/") for path in paths) < minimum:
-        raise ContractViolationError("missing_power")
+        raise ContractViolationError("missing_action")
 
 
 def validate_entries(

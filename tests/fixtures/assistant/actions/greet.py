@@ -1,12 +1,12 @@
 from typing import TypedDict
 
-from shimpz import power
+from shimpz import action
 
 
 class Greeting(TypedDict):
     message: str
 
 
-@power()
+@action()
 async def run(name: str) -> Greeting:
     return {"message": f"Hello, {name}"}

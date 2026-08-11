@@ -7,8 +7,8 @@
       "pyproject.toml",
       "shimpz.toml"
     ],
-    "required_direct_power": {
-      "directory": "powers",
+    "required_direct_action": {
+      "directory": "actions",
       "minimum_files": 1,
       "filename_pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*\\.py$"
     },
@@ -91,9 +91,9 @@
     "invalid_entry",
     "invalid_icon",
     "invalid_path_segment",
-    "missing_power",
+    "missing_action",
     "missing_required_file",
-    "nested_power",
+    "nested_action",
     "non_ascii_path",
     "package_too_large",
     "path_too_deep",

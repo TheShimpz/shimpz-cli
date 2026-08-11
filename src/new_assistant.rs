@@ -21,13 +21,13 @@ def hello(name: str) -> str:
     return f\"Hello, {name}!\"
 ";
 
-const HELLO_POWER: &str = "\
+const HELLO_ACTION: &str = "\
 \"\"\"Greet one person.\"\"\"
 
 from typing import Annotated, TypedDict
 
 from lib.hello import hello
-from shimpz import power
+from shimpz import action
 
 Name = Annotated[str, \"Name to greet.\", {\"minLength\": 1, \"maxLength\": 80}]
 
@@ -36,7 +36,7 @@ class HelloWorldResult(TypedDict):
     message: str
 
 
-@power()
+@action()
 async def run(name: Name) -> HelloWorldResult:
     return {\"message\": hello(name)}
 ";
@@ -73,7 +73,7 @@ fn create(root: &Path, name: &str) -> Result<(), String> {
         .map_err(|_| "Assistant icon template is invalid".to_owned())?;
     fs::create_dir(root).map_err(|_| "Assistant directory cannot be created".to_owned())?;
     fs::create_dir(root.join("lib"))
-        .and_then(|()| fs::create_dir(root.join("powers")))
+        .and_then(|()| fs::create_dir(root.join("actions")))
         .and_then(|()| fs::create_dir(root.join("tests")))
         .and_then(|()| fs::write(root.join(".gitignore"), GITIGNORE))
         .and_then(|()| fs::write(root.join("shimpz.toml"), manifest(name)))
@@ -81,7 +81,7 @@ fn create(root: &Path, name: &str) -> Result<(), String> {
         .and_then(|()| fs::write(root.join("pyproject.toml"), pyproject(name)))
         .and_then(|()| fs::write(root.join("README.md"), readme(name)))
         .and_then(|()| fs::write(root.join("lib/hello.py"), HELLO_LIBRARY))
-        .and_then(|()| fs::write(root.join("powers/hello_world.py"), HELLO_POWER))
+        .and_then(|()| fs::write(root.join("actions/hello_world.py"), HELLO_ACTION))
         .and_then(|()| fs::write(root.join("tests/test_hello.py"), HELLO_TEST))
         .map_err(|_| "Assistant files cannot be created".to_owned())
 }
@@ -147,8 +147,8 @@ fn readme(name: &str) -> String {
 
 A minimal Hello World Assistant for Shimpz.
 
-Each file in `powers/` is one Power. Shared code lives in `lib/hello.py`. The Shimpz CLI manages
-Python and the SDK, generates the machine contract in memory, and runs Powers without Docker.
+Each file in `actions/` is one Action. Shared code lives in `lib/hello.py`. The Shimpz CLI manages
+Python and the SDK, generates the machine contract in memory, and runs Actions without Docker.
 
 ## Local checks
 
@@ -219,7 +219,7 @@ mod tests {
                 "README.md".into(),
                 "icon.png".into(),
                 "lib/hello.py".into(),
-                "powers/hello_world.py".into(),
+                "actions/hello_world.py".into(),
                 "pyproject.toml".into(),
                 "shimpz.toml".into(),
                 "tests/test_hello.py".into(),
@@ -240,7 +240,7 @@ mod tests {
                 .contains("\"shimpz==0.3.0\"")
         );
         assert!(
-            fs::read_to_string(root.join("powers/hello_world.py"))
+            fs::read_to_string(root.join("actions/hello_world.py"))
                 .unwrap()
                 .contains("return {\"message\": hello(name)}")
         );

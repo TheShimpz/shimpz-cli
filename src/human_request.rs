@@ -1,4 +1,4 @@
-//! Interactive terminal adapter for local Power human requests.
+//! Interactive terminal adapter for local Action human requests.
 
 use std::collections::HashSet;
 use std::io;
@@ -9,7 +9,7 @@ use crate::output;
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
 
-pub(crate) enum PowerResponse {
+pub(crate) enum ActionResponse {
     Result(Value),
     Request(HumanRequest),
 }
@@ -23,7 +23,7 @@ pub(crate) struct HumanRequest {
     fields: Map<String, Value>,
 }
 
-pub(crate) fn parse_response(source: &str) -> Result<PowerResponse, String> {
+pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
     let value: Value =
         serde_json::from_str(source).map_err(|_| "Python SDK response is invalid")?;
     let object = value.as_object().ok_or("Python SDK response is invalid")?;
@@ -32,10 +32,10 @@ pub(crate) fn parse_response(source: &str) -> Result<PowerResponse, String> {
             .get("result")
             .filter(|result| result.is_object())
             .cloned()
-            .map(PowerResponse::Result)
+            .map(ActionResponse::Result)
             .ok_or_else(|| "Python SDK response is invalid".into()),
         Some("request") if exact_fields(object, &["type", "request"]) => {
-            parse_request(object.get("request")).map(PowerResponse::Request)
+            parse_request(object.get("request")).map(ActionResponse::Request)
         }
         _ => Err("Python SDK response is invalid".into()),
     }
@@ -60,7 +60,7 @@ pub(crate) fn answer(request: &HumanRequest) -> Result<Value, String> {
         _ => return Err("Python SDK human request kind is invalid".into()),
     };
     if request.kind == "approval" && value != Value::Bool(true) {
-        return Err("Power request was denied".into());
+        return Err("Action request was denied".into());
     }
     Ok(json!({
         "kind": request.kind,
@@ -142,7 +142,7 @@ fn line(prompt: &str) -> Result<String, String> {
         .map_err(|_| "Human request input is unavailable")?;
     if size == 0 {
         return Err(
-            "Human request input is unavailable; do not use --input - for interactive Powers"
+            "Human request input is unavailable; do not use --input - for interactive Actions"
                 .into(),
         );
     }
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn parses_a_tagged_result() {
         let parsed = parse_response(r#"{"type":"result","result":{"ok":true}}"#).unwrap();
-        assert!(matches!(parsed, PowerResponse::Result(value) if value == json!({"ok": true})));
+        assert!(matches!(parsed, ActionResponse::Result(value) if value == json!({"ok": true})));
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
             r#"{"type":"request","request":{"kind":"approval","ordinal":0,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Deploy","description":"Deploy safely."}}"#,
         )
         .unwrap();
-        assert!(matches!(parsed, PowerResponse::Request(request) if request.kind == "approval"));
+        assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == "approval"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Verifies the CLI-to-Power environment boundary.
+//! Verifies the CLI-to-Action environment boundary.
 
 #![cfg(unix)]
 
@@ -12,7 +12,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 const ICON: &str = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC";
 
 #[test]
-fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
+fn action_subprocess_cannot_read_integration_or_ambient_secrets() {
     let dir = std::env::temp_dir().join(format!("shimpz-envtest-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -29,14 +29,14 @@ fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
         "/tests/fixtures/assistant"
     ));
     let project = dir.join("assistant");
-    fs::create_dir_all(project.join("powers")).unwrap();
+    fs::create_dir_all(project.join("actions")).unwrap();
     for name in ["pyproject.toml", "shimpz.toml"] {
         fs::copy(fixture.join(name), project.join(name)).unwrap();
     }
     for name in ["greet.py", "report.py"] {
         fs::copy(
-            fixture.join("powers").join(name),
-            project.join("powers").join(name),
+            fixture.join("actions").join(name),
+            project.join("actions").join(name),
         )
         .unwrap();
     }
@@ -53,11 +53,11 @@ fn power_subprocess_cannot_read_integration_or_ambient_secrets() {
     let seen = fs::read_to_string(&dump).expect("fake uv must have dumped its env");
     assert!(
         !seen.contains("SHIMPZ_INTEGRATION_"),
-        "integration env leaked to Power:\n{seen}"
+        "integration env leaked to Action:\n{seen}"
     );
     assert!(
         !seen.contains("SECRET"),
-        "ambient secret leaked to Power:\n{seen}"
+        "ambient secret leaked to Action:\n{seen}"
     );
     assert!(
         seen.contains("PATH="),

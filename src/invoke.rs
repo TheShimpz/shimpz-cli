@@ -1,4 +1,4 @@
-//! Local Power invocation and Integration injection.
+//! Local Action invocation and Integration injection.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,55 +8,55 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::args::Input;
-use crate::human_request::{PowerResponse, answer, parse_response};
+use crate::human_request::{ActionResponse, answer, parse_response};
 use crate::python;
 
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 
-pub(crate) fn run(project: &Path, power_id: &str, input: &Input) -> Result<String, String> {
+pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
     let contract = assistant.contract()?;
-    let integration_ids = power_integrations(&contract, power_id)?;
+    let integration_ids = action_integrations(&contract, action_id)?;
     let integrations = integration_tokens(&integration_ids)?;
     let mut request = request(input, &integrations)?;
     for _ in 0..=8 {
-        let output = assistant.invoke(power_id, request.to_string().as_bytes())?;
+        let output = assistant.invoke(action_id, request.to_string().as_bytes())?;
         match parse_response(&output)? {
-            PowerResponse::Result(result) => {
+            ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
-                    .map_err(|_| "Power result is invalid".into());
+                    .map_err(|_| "Action result is invalid".into());
             }
-            PowerResponse::Request(frame) => {
+            ActionResponse::Request(frame) => {
                 let response = answer(&frame)?;
                 request
                     .as_object_mut()
-                    .ok_or_else(|| "Power invocation is invalid".to_owned())?
+                    .ok_or_else(|| "Action invocation is invalid".to_owned())?
                     .entry("responses")
                     .or_insert_with(|| Value::Array(Vec::new()))
                     .as_array_mut()
-                    .ok_or_else(|| "Power invocation is invalid".to_owned())?
+                    .ok_or_else(|| "Action invocation is invalid".to_owned())?
                     .push(response);
             }
         }
     }
-    Err("Power exceeded its human request limit".into())
+    Err("Action exceeded its human request limit".into())
 }
 
-fn power_integrations(contract: &str, power_id: &str) -> Result<Vec<String>, String> {
+fn action_integrations(contract: &str, action_id: &str) -> Result<Vec<String>, String> {
     let value: Value =
         serde_json::from_str(contract).map_err(|_| "SDK contract is invalid".to_owned())?;
     if value.get("version").and_then(Value::as_u64) != Some(1) {
         return Err("SDK contract version is invalid".into());
     }
-    let powers = value
-        .get("powers")
+    let actions = value
+        .get("actions")
         .and_then(Value::as_array)
         .ok_or_else(|| "SDK contract is invalid".to_owned())?;
-    let power = powers
+    let action = actions
         .iter()
-        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(power_id))
-        .ok_or_else(|| "Power id does not exist".to_owned())?;
-    power
+        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(action_id))
+        .ok_or_else(|| "Action id does not exist".to_owned())?;
+    action
         .get("integrations")
         .and_then(Value::as_array)
         .ok_or_else(|| "SDK contract is invalid".to_owned())?
@@ -76,9 +76,9 @@ fn integration_tokens(integration_ids: &[String]) -> Result<BTreeMap<String, Str
         .map(|integration_id| {
             let variable = integration_variable(integration_id);
             let token = std::env::var(&variable)
-                .map_err(|_| format!("{variable} is required for this Power"))?;
+                .map_err(|_| format!("{variable} is required for this Action"))?;
             if token.is_empty() {
-                return Err(format!("{variable} is required for this Power"));
+                return Err(format!("{variable} is required for this Action"));
             }
             Ok((integration_id.clone(), token))
         })
@@ -115,10 +115,10 @@ fn read_input(input: &Input) -> Result<String, String> {
         Input::File(path) => {
             let mut bytes = Vec::new();
             fs::File::open(path)
-                .map_err(|_| "Power input file is unavailable")?
+                .map_err(|_| "Action input file is unavailable")?
                 .take(MAX_INPUT_BYTES + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|_| "Power input cannot be read")?;
+                .map_err(|_| "Action input cannot be read")?;
             bytes
         }
         Input::Stdin => {
@@ -126,14 +126,14 @@ fn read_input(input: &Input) -> Result<String, String> {
             io::stdin()
                 .take(MAX_INPUT_BYTES + 1)
                 .read_to_end(&mut bytes)
-                .map_err(|_| "Power input cannot be read")?;
+                .map_err(|_| "Action input cannot be read")?;
             bytes
         }
     };
     if bytes.is_empty() || bytes.len() as u64 > MAX_INPUT_BYTES {
-        return Err("Power input is outside the accepted size".into());
+        return Err("Action input is outside the accepted size".into());
     }
-    String::from_utf8(bytes).map_err(|_| "Power input must be UTF-8 JSON".into())
+    String::from_utf8(bytes).map_err(|_| "Action input must be UTF-8 JSON".into())
 }
 
 #[cfg(test)]
@@ -178,7 +178,7 @@ mod tests {
             .expect("read_input must fail fast without draining an unbounded file");
         assert_eq!(
             result,
-            Err("Power input is outside the accepted size".to_owned())
+            Err("Action input is outside the accepted size".to_owned())
         );
     }
 
@@ -191,11 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn finds_integrations_for_the_selected_power() {
+    fn finds_integrations_for_the_selected_action() {
         let contract =
-            r#"{"version":1,"powers":[{"id":"create-dns","integrations":["cloudflare"]}]}"#;
+            r#"{"version":1,"actions":[{"id":"create-dns","integrations":["cloudflare"]}]}"#;
         assert_eq!(
-            power_integrations(contract, "create-dns"),
+            action_integrations(contract, "create-dns"),
             Ok(vec!["cloudflare".into()])
         );
     }

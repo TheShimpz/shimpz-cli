@@ -13,15 +13,15 @@ const FILES: [(&str, &str); 4] = [
     ),
     (
         "contract.json",
-        "27cc783eedef5488b357b16e4e05af24ec46498f86450c44af1d760cae26f0bb",
+        "b060ab4e9e0e0debde5413201a409bacfe52bcc1e982a0787448e32f027346ba",
     ),
     (
         "vectors.json",
-        "e458d431a14b17f3cedd938dad786c5b05f5ccdb23a03e4a8c31371ed81b7e4a",
+        "da7116229fbcf070b8d0afa9eca481f6caa60135f97a09c153c614967a4ef7d5",
     ),
     (
         "verify.py",
-        "013113acace828c37e929f85624a22d7584076e306af60615f98d5cfd9a8c290",
+        "9de01565ffea1348f840a54d484d000543efd16c344e90339cdccb0e86505140",
     ),
 ];
 
@@ -30,7 +30,7 @@ fn contract_root() -> PathBuf {
 }
 
 #[test]
-fn vendored_source_package_contract_matches_the_pinned_docs_tree() {
+fn vendored_source_package_contract_matches_the_pinned_developers_tree() {
     let root = contract_root();
     let mirror = root.join("v1");
     let mut names = fs::read_dir(&mirror)
@@ -61,14 +61,14 @@ fn vendored_source_package_contract_matches_the_pinned_docs_tree() {
     let checksums = fs::read(mirror.join("contract-files.sha256")).expect("checksum manifest");
     assert_eq!(
         format!("{:x}", Sha256::digest(&checksums)),
-        "c1f83364fc9b1b07e7bc014d48637dffd0c1d61eb7cdfe46063e1497aa869a43"
+        "c1f8e3cff8057b550d5e3ba7059e7bb0432b6c464a559395f51408f025704669"
     );
     let upstream: Value =
         serde_json::from_slice(&fs::read(root.join("upstream.json")).expect("upstream identity"))
             .expect("valid upstream identity");
     assert_eq!(
         upstream["commit"],
-        "62baa183c053143bea47ce128cfcab8884b9555d"
+        "f0d651b74715cbfe7e252ffc0e9bd28f5864bf88"
     );
-    assert_eq!(upstream["tree"], "a9840a62a671be7fd7cff9cb24d89529e4404bd1");
+    assert_eq!(upstream["tree"], "4dc72d553c424b364766e59f915787e21d084b49");
 }

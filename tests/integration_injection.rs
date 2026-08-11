@@ -27,7 +27,7 @@ fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do
     if [ "$argument" = "contract" ]; then
-      echo '{{"version":1,"powers":[{{"id":"report","integrations":["cloudflare"]}}]}}'
+      echo '{{"version":1,"actions":[{{"id":"report","integrations":["cloudflare"]}}]}}'
       exit 0
     fi
     if [ "$argument" = "invoke" ]; then
@@ -67,7 +67,7 @@ fn injects_declared_integration_token() {
     let output = run_report(&shim, Some("integration-secret"));
     assert!(
         output.status.success(),
-        "Power test failed: {}",
+        "Action test failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
@@ -85,7 +85,7 @@ fn fails_closed_when_integration_variable_is_missing() {
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("SHIMPZ_INTEGRATION_CLOUDFLARE is required for this Power")
+            .contains("SHIMPZ_INTEGRATION_CLOUDFLARE is required for this Action")
     );
     assert!(
         !capture.exists(),

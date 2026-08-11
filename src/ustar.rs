@@ -103,9 +103,9 @@ fn validate_path(path: &str) -> Result<Vec<&str>, Error> {
 
 fn validate_allowlist(path: &str, components: &[&str]) -> Result<(), Error> {
     match components {
-        ["powers", filename] if power_filename(filename) => Ok(()),
-        ["powers", _] => reject("invalid_entry"),
-        ["powers", ..] => reject("nested_power"),
+        ["actions", filename] if action_filename(filename) => Ok(()),
+        ["actions", _] => reject("invalid_entry"),
+        ["actions", ..] => reject("nested_action"),
         ["icon.png" | "shimpz.toml" | "pyproject.toml"] | ["lib" | "tests", _, ..] => Ok(()),
         _ if matches!(path, "icon.png" | "shimpz.toml" | "pyproject.toml") => Ok(()),
         _ => reject("unknown_root"),
@@ -123,8 +123,8 @@ fn validate_required(entries: &[InputEntry]) -> Result<(), Error> {
     {
         return reject("missing_required_file");
     }
-    if !paths.iter().any(|path| path.starts_with("powers/")) {
-        return reject("missing_power");
+    if !paths.iter().any(|path| path.starts_with("actions/")) {
+        return reject("missing_action");
     }
     Ok(())
 }
@@ -236,7 +236,7 @@ fn portable_segment(segment: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn power_filename(filename: &str) -> bool {
+fn action_filename(filename: &str) -> bool {
     let Some(stem) = filename.strip_suffix(".py") else {
         return false;
     };

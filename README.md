@@ -1,6 +1,6 @@
 # Shimpz CLI
 
-`shimpz` checks and tests file-backed Assistant Powers locally without Docker.
+`shimpz` checks and tests file-backed Assistant Actions locally without Docker.
 It installs a pinned `uv` in its private cache, manages Python 3.14, and runs
 the public `shimpz` Python SDK from the Assistant's `pyproject.toml`.
 
@@ -34,7 +34,7 @@ complete rotating token family. Local credentials are stored in the current
 OS user configuration directory with owner-only permissions.
 
 `shimpz new assistant <name>` creates a minimal Python Assistant with one
-Hello World Power. Python is the default language; it can also be selected
+Hello World Action. Python is the default language; it can also be selected
 explicitly with `--language python`.
 
 `shimpz develop <codex|claude> [path]` starts an interactive coding agent in

@@ -33,10 +33,10 @@ impl Assistant {
         )
     }
 
-    pub(crate) fn invoke(&self, power_id: &str, input: &[u8]) -> Result<String, String> {
+    pub(crate) fn invoke(&self, action_id: &str, input: &[u8]) -> Result<String, String> {
         bridge(
             &self.requirements,
-            ["invoke".as_ref(), self.root.as_os_str(), power_id.as_ref()],
+            ["invoke".as_ref(), self.root.as_os_str(), action_id.as_ref()],
             Some(input),
         )
     }
@@ -114,7 +114,7 @@ fn bridge<const SIZE: usize>(
     if let (Some(source), Some(mut destination)) = (input, child.stdin.take()) {
         destination
             .write_all(source)
-            .map_err(|_| "Power input cannot be sent")?;
+            .map_err(|_| "Action input cannot be sent")?;
     }
     let output = child
         .wait_with_output()

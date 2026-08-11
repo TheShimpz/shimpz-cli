@@ -1,4 +1,4 @@
-//! Verifies one dependency compilation per local Power test.
+//! Verifies one dependency compilation per local Action test.
 
 #![cfg(unix)]
 
@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
-fn compiles_requirements_once_per_power_test() {
+fn compiles_requirements_once_per_action_test() {
     let directory =
         std::env::temp_dir().join(format!("shimpz-compile-once-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
@@ -26,7 +26,7 @@ fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do
     if [ "$argument" = "contract" ]; then
-      echo '{"version":1,"powers":[{"id":"greet","integrations":[]}]}'
+      echo '{"version":1,"actions":[{"id":"greet","integrations":[]}]}'
       exit 0
     fi
     if [ "$argument" = "invoke" ]; then
@@ -58,7 +58,7 @@ exit 1
 
     assert!(
         output.status.success(),
-        "Power test failed: {}",
+        "Action test failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let compiles = fs::read_to_string(log)

@@ -273,8 +273,8 @@ fn collect(root: &Path) -> Result<(Vec<InputEntry>, Vec<String>), Error> {
             Some("icon.png" | "shimpz.toml" | "pyproject.toml") => {
                 collect_entry(root, &child.path(), &mut entries)?;
             }
-            Some("powers") => {
-                collect_powers(root, &child.path(), &mut entries)?;
+            Some("actions") => {
+                collect_actions(root, &child.path(), &mut entries)?;
             }
             Some("lib" | "tests") => {
                 collect_allowed_root(root, &child.path(), &mut entries)?;
@@ -287,7 +287,7 @@ fn collect(root: &Path) -> Result<(Vec<InputEntry>, Vec<String>), Error> {
     Ok((entries, excluded))
 }
 
-fn collect_powers(root: &Path, path: &Path, entries: &mut Vec<InputEntry>) -> Result<(), Error> {
+fn collect_actions(root: &Path, path: &Path, entries: &mut Vec<InputEntry>) -> Result<(), Error> {
     let metadata = fs::symlink_metadata(path).map_err(|_| Error::new("invalid_entry"))?;
     if !metadata.is_dir() {
         return collect_entry_with_metadata(root, path, &metadata, entries);

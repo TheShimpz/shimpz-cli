@@ -13,7 +13,7 @@ Usage:
   shimpz new assistant <name> [--language python]
   shimpz develop <codex|claude> [path] [--yolo]
   shimpz check [--project <path>]
-  shimpz test <power> [--input <json> | --input-file <path>] [--project <path>]
+  shimpz test <action> [--input <json> | --input-file <path>] [--project <path>]
   shimpz publish --visibility <private|public> [--project <path>]
   shimpz install assistant <source-hash> [--team <team-id>]
   shimpz upgrade
@@ -44,7 +44,7 @@ pub(crate) enum Command {
     },
     Test {
         project: PathBuf,
-        power: String,
+        action: String,
         input: Input,
     },
     Publish {
@@ -225,11 +225,11 @@ fn parse_test(arguments: &[String]) -> Result<Action, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
         return Ok(Action::Help);
     }
-    let Some(power) = arguments.first().filter(|value| !value.starts_with('-')) else {
-        return Err("test requires a Power id".into());
+    let Some(action) = arguments.first().filter(|value| !value.starts_with('-')) else {
+        return Err("test requires a Action id".into());
     };
-    if !valid_power_id(power) {
-        return Err("Power id is invalid".into());
+    if !valid_action_id(action) {
+        return Err("Action id is invalid".into());
     }
     let mut project = PathBuf::from(".");
     let mut project_seen = false;
@@ -262,7 +262,7 @@ fn parse_test(arguments: &[String]) -> Result<Action, String> {
     }
     Ok(Action::Run(Command::Test {
         project,
-        power: power.clone(),
+        action: action.clone(),
         input: input.unwrap_or_else(|| Input::Inline("{}".into())),
     }))
 }
@@ -356,7 +356,7 @@ fn unicode(value: OsString) -> Result<String, String> {
         .map_err(|_| "arguments must be valid UTF-8".into())
 }
 
-fn valid_power_id(value: &str) -> bool {
+fn valid_action_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value.starts_with(|character: char| character.is_ascii_lowercase())
@@ -367,7 +367,7 @@ fn valid_power_id(value: &str) -> bool {
 }
 
 fn valid_assistant_name(value: &str) -> bool {
-    valid_power_id(value)
+    valid_action_id(value)
         && value.len() <= 40
         && !value.contains("--")
         && !matches!(
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_file_backed_power_test() {
+    fn parses_a_file_backed_action_test() {
         assert_eq!(
             parse(strings(&[
                 "test",
@@ -545,7 +545,7 @@ mod tests {
             ])),
             Ok(Action::Run(Command::Test {
                 project: PathBuf::from("assistant"),
-                power: "create-dns".into(),
+                action: "create-dns".into(),
                 input: Input::File(PathBuf::from("request.json")),
             }))
         );
@@ -560,10 +560,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_power_ids() {
+    fn rejects_invalid_action_ids() {
         assert_eq!(
             parse(strings(&["test", "CreateDns"])),
-            Err("Power id is invalid".into())
+            Err("Action id is invalid".into())
         );
     }
 

@@ -58,9 +58,9 @@ fn run(command: &Command) -> ExitCode {
         Command::Check { project } => (check(project), Presentation::Success),
         Command::Test {
             project,
-            power,
+            action,
             input,
-        } => (invoke::run(project, power, input), Presentation::Data),
+        } => (invoke::run(project, action, input), Presentation::Data),
         Command::Publish {
             project,
             visibility,
