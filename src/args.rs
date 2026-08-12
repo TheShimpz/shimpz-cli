@@ -226,7 +226,7 @@ fn parse_test(arguments: &[String]) -> Result<Action, String> {
         return Ok(Action::Help);
     }
     let Some(action) = arguments.first().filter(|value| !value.starts_with('-')) else {
-        return Err("test requires a Action id".into());
+        return Err("test requires an Action id".into());
     };
     if !valid_action_id(action) {
         return Err("Action id is invalid".into());

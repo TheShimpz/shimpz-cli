@@ -141,7 +141,7 @@ fn collects_only_direct_python_files_from_actions() {
     )
     .expect("cached bytecode");
     fs::create_dir(actions.join("drafts")).expect("draft directory");
-    fs::write(actions.join("drafts/nested.py"), "not a Action\n").expect("nested draft");
+    fs::write(actions.join("drafts/nested.py"), "not an Action\n").expect("nested draft");
 
     let actual = source_package::build(&temporary.path).expect("filtered source package");
 
