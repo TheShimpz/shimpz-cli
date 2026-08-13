@@ -104,7 +104,7 @@ fn parse_request(value: Option<&Value>) -> Result<HumanRequest, String> {
 fn valid_request_fields(fields: &Map<String, Value>, kind: &str) -> bool {
     let mut expected = BASE_FIELDS.into_iter().collect::<HashSet<_>>();
     match kind {
-        "approval" | "auth:reauth" | "auth:second-factor" | "auth:phishing-resistant" => {}
+        "approval" | "auth:password" | "auth:totp" | "auth:passkey" => {}
         "input:text" | "input:textarea" | "input:password" | "input:phone" => {
             expected.extend([
                 "label",
@@ -252,6 +252,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == "approval"));
+    }
+
+    #[test]
+    fn parses_each_named_authentication_request() {
+        for kind in ["auth:password", "auth:totp", "auth:passkey"] {
+            let source = format!(
+                r#"{{"type":"request","request":{{"kind":"{kind}","ordinal":0,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Authorize","description":"Authorize safely."}}}}"#
+            );
+            let parsed = parse_response(&source).expect("authentication request");
+            assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == kind));
+        }
     }
 
     #[test]
