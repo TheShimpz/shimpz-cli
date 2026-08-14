@@ -24,10 +24,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 const IDENTITY_SCOPE: &str = "identity:read";
+pub(crate) const ASSISTANT_PUBLISH_SCOPE: &str = "assistant:publish";
 const AVAILABLE_SCOPES: [&str; 4] = [
     "identity:read",
     "teams:read",
-    "assistant:publish",
+    ASSISTANT_PUBLISH_SCOPE,
     "assistant:install",
 ];
 
@@ -186,7 +187,7 @@ impl Api {
                 }
             }
         }
-        Err("browser authorization expired; run `shimpz auth` again".into())
+        Err("browser authorization expired; run your command again".into())
     }
 
     fn session(&self, access_token: &str) -> Result<Option<AuthSession>, String> {
@@ -363,7 +364,10 @@ struct DeviceAuthorization {
 
 impl DeviceAuthorization {
     fn validate(&self) -> Result<(), String> {
-        let expected_url = format!("{ORIGIN}/cli/auth?flow={}", self.flow_handle);
+        let expected_url = format!(
+            "{ORIGIN}/cli/auth?flow={}&code={}",
+            self.flow_handle, self.user_code
+        );
         if !valid_handle(&self.flow_handle)
             || !valid_user_code(&self.user_code)
             || self.verification_url != expected_url
@@ -522,31 +526,37 @@ fn valid_user_code(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthSession, DeviceAuthorization, SecretInput, TokenResponse, cumulative_scopes,
-        valid_error_code, valid_user_code,
+        ASSISTANT_PUBLISH_SCOPE, AuthSession, DeviceAuthorization, SecretInput, TokenResponse,
+        cumulative_scopes, valid_error_code, valid_user_code,
     };
 
     #[test]
     fn validates_only_the_production_browser_url() {
-        let valid = DeviceAuthorization {
+        let mut valid = DeviceAuthorization {
             flow_handle: "a".repeat(22),
             device_code: SecretInput("b".repeat(43)),
             user_code: "BCDF-GHJK".into(),
             verification_url: format!(
-                "https://developers.shimpz.com/cli/auth?flow={}",
+                "https://developers.shimpz.com/cli/auth?flow={}&code=BCDF-GHJK",
                 "a".repeat(22)
             ),
             expires_in: 600,
         };
 
         assert!(valid.validate().is_ok());
+
+        valid.verification_url = format!(
+            "https://developers.shimpz.com/cli/auth?flow={}",
+            "a".repeat(22)
+        );
+        assert!(valid.validate().is_err());
     }
 
     #[test]
-    fn requests_only_identity_and_cumulative_command_scopes() {
+    fn publish_auth_requests_identity_and_publish_together() {
         assert_eq!(cumulative_scopes(&[], "identity:read"), ["identity:read"]);
         assert_eq!(
-            cumulative_scopes(&[], "assistant:publish"),
+            cumulative_scopes(&[], ASSISTANT_PUBLISH_SCOPE),
             ["identity:read", "assistant:publish"]
         );
         assert_eq!(

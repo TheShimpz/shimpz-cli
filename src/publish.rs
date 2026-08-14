@@ -15,7 +15,6 @@ use crate::{args::PublicationVisibility, auth, manifest, output, python, source_
 const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publication-consents";
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
-const REQUIRED_SCOPE: &str = "assistant:publish";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const WAIT_TIMEOUT: Duration = Duration::from_mins(30);
@@ -25,7 +24,7 @@ pub(crate) fn run(project: &Path, visibility: PublicationVisibility) -> Result<S
     let package = source_package::build(project)?;
     python::Assistant::open(project)?.contract()?;
     let identity = manifest::PublicationIdentity::parse(&package.manifest)?;
-    let credentials = auth::ensure_authenticated(REQUIRED_SCOPE)?;
+    let credentials = auth::ensure_authenticated(auth::ASSISTANT_PUBLISH_SCOPE)?;
     let api = Api::new();
     output::info("Recording exact Creator consent.");
     output::detail(

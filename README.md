@@ -24,6 +24,7 @@ shimpz develop codex
 shimpz develop claude hello-assistant --yolo
 shimpz check
 shimpz test create-dns --input '{"zone":"example.com"}'
+shimpz publish --visibility public
 shimpz upgrade
 ```
 
@@ -32,6 +33,10 @@ prints the URL and user code in the terminal. `shimpz auth status` validates
 the exact Accounts session online, while `shimpz auth logout` revokes the
 complete rotating token family. Local credentials are stored in the current
 OS user configuration directory with owner-only permissions.
+
+`shimpz publish` validates the Assistant, requests `assistant:publish` in its
+browser authorization when needed, and continues the publication in the same
+command. A separate `shimpz auth` step is not required.
 
 `shimpz new assistant <name>` creates a minimal Python Assistant with one
 Hello World Action. Python is the default language; it can also be selected
