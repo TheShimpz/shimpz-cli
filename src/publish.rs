@@ -61,15 +61,9 @@ fn wait_until_installable(
             return result;
         }
         sleep_before(deadline, POLL_INTERVAL)?;
-        publication = loop {
-            match api.status(credentials, expected_digest, expected_visibility) {
-                Ok(publication) => break publication,
-                Err(PublicationStatusError::RateLimited(retry_after)) => {
-                    sleep_before(deadline, retry_after)?;
-                }
-                Err(PublicationStatusError::Fatal(message)) => return Err(message),
-            }
-        };
+        publication = status_until_ready(deadline, || {
+            api.status(credentials, expected_digest, expected_visibility)
+        })?;
     }
 }
 
@@ -156,27 +150,20 @@ impl Api {
             .header("Authorization", authorization.as_str())
             .call()
             .map_err(|_| PublicationStatusError::Fatal(unavailable()))?;
+        if let Some(retry_after) = publication_retry_after(
+            response.status().as_u16(),
+            response
+                .headers()
+                .get("Retry-After")
+                .and_then(|value| value.to_str().ok()),
+        )
+        .map_err(PublicationStatusError::Fatal)?
+        {
+            return Err(PublicationStatusError::RateLimited(retry_after));
+        }
         match response.status().as_u16() {
             200 => read_publication(&mut response, source_digest, visibility.as_str())
                 .map_err(PublicationStatusError::Fatal),
-            429 => {
-                let retry_after = validate_retry_after(
-                    429,
-                    response
-                        .headers()
-                        .get("Retry-After")
-                        .and_then(|value| value.to_str().ok()),
-                )
-                .map_err(PublicationStatusError::Fatal)?
-                .ok_or_else(|| {
-                    PublicationStatusError::Fatal(
-                        "Developers returned an invalid rate-limit response".into(),
-                    )
-                })?;
-                Err(PublicationStatusError::RateLimited(Duration::from_secs(
-                    retry_after,
-                )))
-            }
             _ => Err(PublicationStatusError::Fatal(status_error(
                 &mut response,
                 "publication status is unavailable",
@@ -188,6 +175,21 @@ impl Api {
 enum PublicationStatusError {
     RateLimited(Duration),
     Fatal(String),
+}
+
+fn status_until_ready(
+    deadline: Instant,
+    mut status: impl FnMut() -> Result<Publication, PublicationStatusError>,
+) -> Result<Publication, String> {
+    loop {
+        match status() {
+            Ok(publication) => return Ok(publication),
+            Err(PublicationStatusError::RateLimited(retry_after)) => {
+                sleep_before(deadline, retry_after)?;
+            }
+            Err(PublicationStatusError::Fatal(message)) => return Err(message),
+        }
+    }
 }
 
 fn sleep_before(deadline: Instant, duration: Duration) -> Result<(), String> {
@@ -324,6 +326,10 @@ fn validate_retry_after(status: u16, value: Option<&str>) -> Result<Option<u64>,
         .filter(|seconds| (1..=3600).contains(seconds))
         .map(Some)
         .ok_or_else(|| "Developers returned an invalid rate-limit response".into())
+}
+
+fn publication_retry_after(status: u16, value: Option<&str>) -> Result<Option<Duration>, String> {
+    validate_retry_after(status, value).map(|seconds| seconds.map(Duration::from_secs))
 }
 
 #[derive(Debug, Deserialize)]
@@ -650,7 +656,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AssistantTestFailure, CreatorConsent, Publication, sleep_before, validate_retry_after,
+        AssistantTestFailure, CreatorConsent, Publication, PublicationStatusError,
+        publication_retry_after, sleep_before, status_until_ready, validate_retry_after,
         wait_timeout,
     };
     use crate::manifest::PublicationIdentity;
@@ -847,5 +854,34 @@ mod tests {
             sleep_before(deadline, Duration::from_secs(1)),
             Err(wait_timeout())
         );
+    }
+
+    #[test]
+    fn retries_only_publication_status_after_a_rate_limit() {
+        let deadline = Instant::now().checked_add(Duration::from_secs(1)).unwrap();
+        let mut calls = 0;
+        let result = status_until_ready(deadline, || {
+            calls += 1;
+            if calls == 1 {
+                Err(PublicationStatusError::RateLimited(Duration::from_millis(
+                    1,
+                )))
+            } else {
+                Ok(publication("queued"))
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(result.build_state, "queued");
+    }
+
+    #[test]
+    fn classifies_only_strict_publication_rate_limits() {
+        assert_eq!(
+            publication_retry_after(429, Some("60")),
+            Ok(Some(Duration::from_mins(1)))
+        );
+        assert_eq!(publication_retry_after(503, Some("60")), Ok(None));
+        assert!(publication_retry_after(429, None).is_err());
     }
 }
