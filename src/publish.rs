@@ -16,7 +16,7 @@ const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publica
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
 const SOURCE_MEDIA_TYPE: &str = "application/vnd.shimpz.source.v1+tar";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const WAIT_TIMEOUT: Duration = Duration::from_mins(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 
@@ -57,12 +57,19 @@ fn wait_until_installable(
             output::progress(&publication.progress_message());
             observed_state = Some(publication.build_state.clone());
         }
-        match publication.terminal_result() {
-            Some(result) => return result,
-            None if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
-            None => return Err("publication wait timed out; run `shimpz publish` again".into()),
+        if let Some(result) = publication.terminal_result() {
+            return result;
         }
-        publication = api.status(credentials, expected_digest, expected_visibility)?;
+        sleep_before(deadline, POLL_INTERVAL)?;
+        publication = loop {
+            match api.status(credentials, expected_digest, expected_visibility) {
+                Ok(publication) => break publication,
+                Err(PublicationStatusError::RateLimited(retry_after)) => {
+                    sleep_before(deadline, retry_after)?;
+                }
+                Err(PublicationStatusError::Fatal(message)) => return Err(message),
+            }
+        };
     }
 }
 
@@ -139,7 +146,7 @@ impl Api {
         credentials: &crate::credentials::Credentials,
         source_digest: &str,
         visibility: PublicationVisibility,
-    ) -> Result<Publication, String> {
+    ) -> Result<Publication, PublicationStatusError> {
         let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
         let url = format!("{PUBLICATIONS_URL}/{source_digest}");
         let mut response = self
@@ -148,15 +155,54 @@ impl Api {
             .header("Accept", "application/json")
             .header("Authorization", authorization.as_str())
             .call()
-            .map_err(|_| unavailable())?;
+            .map_err(|_| PublicationStatusError::Fatal(unavailable()))?;
         match response.status().as_u16() {
-            200 => read_publication(&mut response, source_digest, visibility.as_str()),
-            _ => Err(status_error(
+            200 => read_publication(&mut response, source_digest, visibility.as_str())
+                .map_err(PublicationStatusError::Fatal),
+            429 => {
+                let retry_after = validate_retry_after(
+                    429,
+                    response
+                        .headers()
+                        .get("Retry-After")
+                        .and_then(|value| value.to_str().ok()),
+                )
+                .map_err(PublicationStatusError::Fatal)?
+                .ok_or_else(|| {
+                    PublicationStatusError::Fatal(
+                        "Developers returned an invalid rate-limit response".into(),
+                    )
+                })?;
+                Err(PublicationStatusError::RateLimited(Duration::from_secs(
+                    retry_after,
+                )))
+            }
+            _ => Err(PublicationStatusError::Fatal(status_error(
                 &mut response,
                 "publication status is unavailable",
-            )),
+            ))),
         }
     }
+}
+
+enum PublicationStatusError {
+    RateLimited(Duration),
+    Fatal(String),
+}
+
+fn sleep_before(deadline: Instant, duration: Duration) -> Result<(), String> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(wait_timeout)?;
+    if duration >= remaining {
+        return Err(wait_timeout());
+    }
+    thread::sleep(duration);
+    Ok(())
+}
+
+fn wait_timeout() -> String {
+    "publication wait timed out; run `shimpz publish` again".into()
 }
 
 #[derive(Serialize)]
@@ -601,7 +647,12 @@ fn unavailable() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssistantTestFailure, CreatorConsent, Publication, validate_retry_after};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        AssistantTestFailure, CreatorConsent, Publication, sleep_before, validate_retry_after,
+        wait_timeout,
+    };
     use crate::manifest::PublicationIdentity;
 
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -785,5 +836,16 @@ mod tests {
         for value in [None, Some("0"), Some("3601"), Some("tomorrow")] {
             assert!(validate_retry_after(429, value).is_err());
         }
+    }
+
+    #[test]
+    fn refuses_to_sleep_past_the_publication_deadline() {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            sleep_before(deadline, Duration::from_secs(1)),
+            Err(wait_timeout())
+        );
     }
 }
