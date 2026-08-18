@@ -226,8 +226,6 @@ fn effective_root() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     #[test]
@@ -256,9 +254,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn windows_acl_tool_does_not_apply_drvfs_unix_ownership() {
+        use std::os::unix::fs::PermissionsExt;
+
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("powershell.exe");
+        let root = directory.path().canonicalize().unwrap();
+        let executable = root.join("powershell.exe");
         std::fs::write(&executable, []).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o777)).unwrap();
 
@@ -267,5 +269,11 @@ mod tests {
             Some(executable.clone())
         );
         assert_eq!(trusted_executable(&executable), None);
+        if directory.path() != root {
+            assert_eq!(
+                trusted_windows_executable(&directory.path().join("powershell.exe")),
+                None
+            );
+        }
     }
 }
