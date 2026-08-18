@@ -128,12 +128,11 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates.outputs.token }}
 
   release:
-    needs: [metadata, build, publish]
+    needs: [metadata, build]
     if: >-
       always() &&
       needs.metadata.result == 'success' &&
-      needs.build.result == 'success' &&
-      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       attestations: write
