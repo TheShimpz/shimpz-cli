@@ -270,8 +270,9 @@ impl Context {
             );
         }
         if !marker && inventory.empty() && !self.paths.security.exists() {
-            self.remove_files()?;
-            return Ok("Shimpz Space was already reset. No managed data remains.".into());
+            scheduler::remove(self.profile, &self.paths)?;
+            let preserved = self.remove_files()?;
+            return Ok(reset_outcome(true, &preserved));
         }
         let installed = if marker {
             self.current_installation().ok()
@@ -300,13 +301,7 @@ impl Context {
         }
         scheduler::remove(self.profile, &self.paths)?;
         let preserved = self.remove_files()?;
-        let suffix = if preserved.is_empty() {
-            "No managed Space data remains; the shimpz command and lifecycle lock are retained."
-                .to_owned()
-        } else {
-            format!("Preserved unrecognized content: {}", preserved.join(", "))
-        };
-        Ok(format!("Shimpz Space was reset successfully. {suffix}"))
+        Ok(reset_outcome(false, &preserved))
     }
 
     fn current_installation(&self) -> Result<Installed, String> {
@@ -672,6 +667,21 @@ fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> 
     } else {
         "updated"
     }
+}
+
+fn reset_outcome(already_reset: bool, preserved: &[String]) -> String {
+    let action = if already_reset {
+        "Shimpz Space was already reset."
+    } else {
+        "Shimpz Space was reset successfully."
+    };
+    let suffix = if preserved.is_empty() {
+        "No managed Space data remains; the shimpz command and lifecycle lock are retained."
+            .to_owned()
+    } else {
+        format!("Preserved unrecognized content: {}", preserved.join(", "))
+    };
+    format!("{action} {suffix}")
 }
 
 #[derive(Debug)]
@@ -1101,6 +1111,18 @@ mod tests {
             "updated"
         );
         assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+    }
+
+    #[test]
+    fn reset_outcomes_are_positive_and_report_preserved_content() {
+        assert_eq!(
+            reset_outcome(true, &[]),
+            "Shimpz Space was already reset. No managed Space data remains; the shimpz command and lifecycle lock are retained."
+        );
+        assert_eq!(
+            reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()]),
+            "Shimpz Space was reset successfully. Preserved unrecognized content: /home/ada/.shimpz/notes"
+        );
     }
 
     #[test]

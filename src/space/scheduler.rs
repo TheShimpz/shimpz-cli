@@ -32,7 +32,8 @@ pub(crate) fn remove(profile: HostProfile, paths: &Paths) -> Result<(), String> 
     validate(profile, paths)?;
     match profile {
         HostProfile::Linux | HostProfile::Wsl => {
-            if paths.systemd_timer.exists() || paths.systemd_service.exists() {
+            let present = paths.systemd_timer.exists() || paths.systemd_service.exists();
+            if present {
                 let _ = command::status(
                     Tool::Systemctl,
                     ["--user", "disable", "--now", "shimpz-update.timer"],
@@ -40,7 +41,7 @@ pub(crate) fn remove(profile: HostProfile, paths: &Paths) -> Result<(), String> 
             }
             remove_optional(&paths.systemd_timer)?;
             remove_optional(&paths.systemd_service)?;
-            if Tool::Systemctl.resolve().is_ok() {
+            if present && Tool::Systemctl.resolve().is_ok() {
                 let result = command::status(Tool::Systemctl, ["--user", "daemon-reload"])?;
                 if !result.success() {
                     return Err("systemd did not reload after scheduler removal".into());
