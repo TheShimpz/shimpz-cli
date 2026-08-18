@@ -335,19 +335,22 @@ impl<'a> Pool<'a> {
     fn validate_mount(&self) -> Result<(), String> {
         self.validate_mapping()?;
         let mount = self.paths.pool_mount.to_string_lossy();
-        let source_document =
-            command::output(Tool::Findmnt, ["-rn", "-M", &mount, "-o", "SOURCE"])?;
+        let device_document =
+            command::output(Tool::Findmnt, ["-rn", "-M", &mount, "-o", "MAJ:MIN"])?;
         let filesystem_document =
             command::output(Tool::Findmnt, ["-rn", "-M", &mount, "-o", "FSTYPE"])?;
         let target_document =
             command::output(Tool::Findmnt, ["-rn", "-M", &mount, "-o", "TARGET"])?;
-        let source = one_line(&source_document, "mount source")?;
+        let device = one_line(&device_document, "mount device")?;
         let filesystem = one_line(&filesystem_document, "mount filesystem")?;
         let target = one_line(&target_document, "mount target")?;
-        if source != self.mapping_path().to_string_lossy()
-            || filesystem != "ext4"
-            || target != mount
-        {
+        let mapping = self.mapping_path().metadata().map_err(io_error)?;
+        let expected_device = format!(
+            "{}:{}",
+            rustix::fs::major(mapping.rdev()),
+            rustix::fs::minor(mapping.rdev())
+        );
+        if device != expected_device || filesystem != "ext4" || target != mount {
             return Err("encrypted Local storage mount identity is invalid".into());
         }
         Ok(())
