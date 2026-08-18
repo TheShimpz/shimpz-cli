@@ -2,7 +2,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -372,7 +372,19 @@ impl Context {
             fs::remove_file(&candidate).map_err(io_error)?;
             return Err("the extracted CLI hash does not match the atomic release".into());
         }
-        let mut command = Command::new(&candidate);
+        let previous = self.paths.managed_cli.with_extension("previous");
+        if previous.exists() {
+            return Err("a previous managed CLI compensation artifact remains".into());
+        }
+        if self.paths.managed_cli.exists() {
+            validate_private_cli(&self.paths.managed_cli)?;
+            fs::rename(&self.paths.managed_cli, &previous).map_err(io_error)?;
+        }
+        if let Err(error) = fs::rename(&candidate, &self.paths.managed_cli) {
+            restore_previous_cli(&self.paths.managed_cli, &previous)?;
+            return Err(io_error(error));
+        }
+        let mut command = Command::new(&self.paths.managed_cli);
         if self.paths.marker.exists() {
             command.arg("start");
             if scheduled {
@@ -392,11 +404,16 @@ impl Context {
         let status = command
             .stdin(Stdio::null())
             .status()
-            .map_err(|error| format!("could not start the release-bound CLI: {error}"))?;
-        if !status.success() {
-            return Err("the release-bound CLI did not complete".into());
+            .map_err(|error| format!("could not start the release-bound CLI: {error}"));
+        let completed = status.is_ok_and(|status| status.success());
+        if !completed {
+            restore_previous_cli(&self.paths.managed_cli, &previous)?;
+            return Err(
+                "the release-bound CLI did not complete; the previous CLI was restored".into(),
+            );
         }
-        fs::rename(candidate, &self.paths.managed_cli).map_err(io_error)?;
+        remove_regular_if_present(&previous)?;
+        ensure_public_cli(&self.paths)?;
         Ok(true)
     }
 
@@ -513,6 +530,7 @@ impl Context {
         }
         remove_regular_if_present(&self.paths.managed_cli)?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("candidate"))?;
+        remove_regular_if_present(&self.paths.managed_cli.with_extension("previous"))?;
         if let Some(bin) = self.paths.managed_cli.parent() {
             remove_empty_dir(bin)?;
         }
@@ -580,7 +598,10 @@ fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
     }
     for entry in fs::read_dir(bin).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
-        if path != paths.managed_cli && path != paths.managed_cli.with_extension("candidate") {
+        if path != paths.managed_cli
+            && path != paths.managed_cli.with_extension("candidate")
+            && path != paths.managed_cli.with_extension("previous")
+        {
             return Err("the unmarked managed CLI directory contains unrecognized content".into());
         }
         let metadata = path.symlink_metadata().map_err(io_error)?;
@@ -594,6 +615,51 @@ fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_private_cli(path: &Path) -> Result<(), String> {
+    let metadata = path.symlink_metadata().map_err(io_error)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("the managed CLI artifact ownership or permissions are invalid".into());
+    }
+    Ok(())
+}
+
+fn restore_previous_cli(managed: &Path, previous: &Path) -> Result<(), String> {
+    remove_regular_if_present(managed)?;
+    if previous.exists() {
+        fs::rename(previous, managed).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn ensure_public_cli(paths: &Paths) -> Result<(), String> {
+    if paths.public_cli.exists() {
+        let metadata = paths.public_cli.symlink_metadata().map_err(io_error)?;
+        if metadata.file_type().is_symlink()
+            && fs::read_link(&paths.public_cli).map_err(io_error)? == paths.managed_cli
+        {
+            return Ok(());
+        }
+        return Err("refusing to replace an unowned public shimpz command".into());
+    }
+    let parent = paths
+        .public_cli
+        .parent()
+        .ok_or_else(|| "the public CLI directory is invalid".to_owned())?;
+    if parent.exists() {
+        let metadata = parent.symlink_metadata().map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("the public CLI directory is invalid".into());
+        }
+    } else {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    symlink(&paths.managed_cli, &paths.public_cli).map_err(io_error)
 }
 
 fn recovery_admin_port(paths: &Paths) -> Option<u16> {
@@ -889,5 +955,32 @@ mod tests {
         )
         .unwrap();
         assert!(ensure_install_home(&paths).is_err());
+    }
+
+    #[test]
+    fn public_command_is_only_the_exact_managed_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        fs::write(&paths.managed_cli, "managed").unwrap();
+        ensure_public_cli(&paths).unwrap();
+        assert_eq!(fs::read_link(&paths.public_cli).unwrap(), paths.managed_cli);
+        assert!(ensure_public_cli(&paths).is_ok());
+        fs::remove_file(&paths.public_cli).unwrap();
+        fs::write(&paths.public_cli, "foreign").unwrap();
+        assert!(ensure_public_cli(&paths).is_err());
+    }
+
+    #[test]
+    fn candidate_activation_restores_the_previous_private_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        let previous = paths.managed_cli.with_extension("previous");
+        fs::write(&paths.managed_cli, "candidate").unwrap();
+        fs::write(&previous, "previous").unwrap();
+        restore_previous_cli(&paths.managed_cli, &previous).unwrap();
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "previous");
+        assert!(!previous.exists());
     }
 }
