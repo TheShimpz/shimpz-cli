@@ -153,8 +153,10 @@ impl Context {
     }
 
     fn validate_installation_storage(&self, installed: Installed) -> Result<Installed, String> {
-        if self.profile == HostProfile::Linux && linux::incomplete(&self.paths)? {
-            return Err("the encrypted Local storage provision was interrupted".into());
+        if self.profile == HostProfile::Linux
+            && (!self.paths.security.exists() || linux::incomplete(&self.paths)?)
+        {
+            return Err("the encrypted Local storage transaction was interrupted".into());
         }
         Ok(installed)
     }
@@ -1317,5 +1319,12 @@ mod tests {
         fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
         reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
         assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "restored");
+
+        fs::write(&previous, "previous").unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        let other = paths.managed_cli.parent().unwrap().join("other");
+        fs::write(&other, "other").unwrap();
+        assert!(reconcile_previous_cli(&paths.managed_cli, &other).is_err());
+        assert!(previous.exists());
     }
 }

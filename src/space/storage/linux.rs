@@ -794,9 +794,10 @@ fn reset_incomplete(paths: &Paths) -> Result<(), String> {
             return Err("encrypted Local storage mountpoint is invalid".into());
         }
     }
+    remove_if_regular(&paths.pool_uuid.with_extension("tmp"))?;
+    remove_if_empty(&paths.pool_mount)?;
     remove_if_regular(&paths.pool_image)?;
     remove_if_regular(&paths.storage_marker)?;
-    remove_if_empty(&paths.pool_mount)?;
     remove_if_empty(&paths.security)
 }
 
@@ -952,9 +953,9 @@ fn reset_mapping_identity(
 
 fn remove_pool_files(paths: &Paths) -> Result<(), String> {
     fs::remove_file(&paths.pool_uuid).map_err(cleanup_error)?;
+    fs::remove_dir(&paths.pool_mount).map_err(cleanup_error)?;
     fs::remove_file(&paths.pool_image).map_err(cleanup_error)?;
     fs::remove_file(&paths.storage_marker).map_err(cleanup_error)?;
-    fs::remove_dir(&paths.pool_mount).map_err(cleanup_error)?;
     fs::remove_dir(&paths.security).map_err(cleanup_error)
 }
 
@@ -1025,11 +1026,13 @@ fn validate_security_entries(paths: &Paths) -> Result<(), String> {
         return Err("the encrypted Local storage directory is invalid".into());
     }
     let marker_temporary = paths.storage_marker.with_extension("tmp");
+    let uuid_temporary = paths.pool_uuid.with_extension("tmp");
     let admitted = [
         paths.storage_marker.as_path(),
         marker_temporary.as_path(),
         paths.pool_image.as_path(),
         paths.pool_uuid.as_path(),
+        uuid_temporary.as_path(),
         paths.pool_mount.as_path(),
     ];
     for entry in fs::read_dir(&paths.security).map_err(io_error)? {
@@ -1271,12 +1274,30 @@ mod tests {
         fs::write(&paths.pool_image, "partial").unwrap();
         assert!(incomplete(&paths).unwrap());
         fs::create_dir(&paths.pool_mount).unwrap();
+        fs::write(paths.pool_uuid.with_extension("tmp"), "partial").unwrap();
         assert!(incomplete(&paths).unwrap());
+        fs::remove_file(paths.pool_uuid.with_extension("tmp")).unwrap();
         fs::write(&paths.pool_uuid, "uuid\n").unwrap();
         assert!(!incomplete(&paths).unwrap());
 
         fs::remove_file(&paths.storage_marker).unwrap();
         assert!(incomplete(&paths).is_err());
+    }
+
+    #[test]
+    fn incomplete_reset_finishes_exact_marker_and_empty_residue() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(&paths.security).unwrap();
+        fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&paths.storage_marker, format!("{STORAGE_MARKER}\n")).unwrap();
+        reset_incomplete(&paths).unwrap();
+        assert!(!paths.security.exists());
+
+        fs::create_dir(&paths.security).unwrap();
+        fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
+        reset_incomplete(&paths).unwrap();
+        assert!(!paths.security.exists());
     }
 
     #[cfg(target_os = "linux")]
