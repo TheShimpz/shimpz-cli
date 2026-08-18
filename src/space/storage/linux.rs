@@ -232,6 +232,8 @@ impl<'a> Pool<'a> {
                 OsString::from("-q"),
                 OsString::from("-t"),
                 OsString::from("ext4"),
+                OsString::from("-E"),
+                OsString::from("nodiscard"),
                 OsString::from("-m"),
                 OsString::from("0"),
                 self.mapping_path().as_os_str().to_owned(),
