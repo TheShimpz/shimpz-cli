@@ -734,8 +734,8 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
     let identity = reset_mapping_identity(expected_space_id, &mappings)?;
     if let Some(identity) = identity {
         let pool = Pool::new(paths, &identity)?;
-        pool.validate_mapping()?;
         command::authorize()?;
+        pool.validate_mapping()?;
         if pool.is_mounted()? {
             pool.validate_mount()?;
             Pool::root(Tool::Umount, [paths.pool_mount.as_os_str().to_owned()])?;
