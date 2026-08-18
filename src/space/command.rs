@@ -132,15 +132,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let program = tool.resolve()?;
-    let mut command = if effective_root() {
-        Command::new(&program)
-    } else {
-        let sudo = Tool::Sudo.resolve()?;
-        let mut command = Command::new(sudo);
-        command.arg("--non-interactive").arg(&program);
-        command
-    };
+    let (program, mut command) = privileged_command(tool)?;
     command.args(arguments);
     if passphrase_tty {
         let tty = File::open("/dev/tty").map_err(|_| "encrypted storage requires a terminal")?;
@@ -151,6 +143,39 @@ where
     command
         .status()
         .map_err(|error| format!("could not execute {}: {error}", program.display()))
+}
+
+pub(crate) fn privileged_output<I, S>(tool: Tool, arguments: I) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (program, mut command) = privileged_command(tool)?;
+    let result = command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    if !result.status.success() {
+        return Err(format!(
+            "privileged host command failed: {}",
+            program.display()
+        ));
+    }
+    String::from_utf8(result.stdout).map_err(|_| "host command output was not UTF-8".into())
+}
+
+fn privileged_command(tool: Tool) -> Result<(PathBuf, Command), String> {
+    let program = tool.resolve()?;
+    let command = if effective_root() {
+        Command::new(&program)
+    } else {
+        let sudo = Tool::Sudo.resolve()?;
+        let mut command = Command::new(sudo);
+        command.arg("--non-interactive").arg(&program);
+        command
+    };
+    Ok((program, command))
 }
 
 fn effective_root() -> bool {

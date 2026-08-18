@@ -291,7 +291,7 @@ impl<'a> Pool<'a> {
             .ok_or_else(|| {
                 "encrypted Local storage mapping has invalid loop identity".to_owned()
             })?;
-        let backing = command::output(
+        let backing = command::privileged_output(
             Tool::Losetup,
             ["--noheadings", "--output", "BACK-FILE", device],
         )?;
@@ -443,7 +443,7 @@ impl<'a> Pool<'a> {
     where
         I: IntoIterator<Item = OsString>,
     {
-        command::output(Tool::Luks, arguments)
+        command::privileged_output(Tool::Luks, arguments)
     }
 
     fn is_mounted(&self) -> Result<bool, String> {
