@@ -57,7 +57,7 @@ pub(crate) fn status() -> Result<String, String> {
         return Ok("Shimpz Space is not installed. Nothing needs attention.".into());
     }
     let profile = managed::detect()?;
-    let engine = Engine::connect(profile)?;
+    let engine = Engine::connect(profile, &paths)?;
     let installed = state::read_installed(&paths, profile)?;
     Inventory::inspect(&engine, &paths, profile.storage())?;
     let runtime = engine.run_output([
@@ -103,7 +103,7 @@ impl Context {
         let paths = Paths::discover()?;
         ensure_install_home(&paths)?;
         let profile = managed::detect()?;
-        let engine = Engine::connect(profile)?;
+        let engine = Engine::connect(profile, &paths)?;
         scheduler::validate(profile, &paths)?;
         Ok(Self {
             paths,

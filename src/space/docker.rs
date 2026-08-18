@@ -27,9 +27,9 @@ pub(crate) struct ResolvedRelease {
 }
 
 impl Engine {
-    pub(crate) fn connect(profile: HostProfile) -> Result<Self, String> {
+    pub(crate) fn connect(profile: HostProfile, paths: &Paths) -> Result<Self, String> {
         let docker = Tool::Docker.resolve()?;
-        validate_endpoint(&docker)?;
+        validate_endpoint(&docker, profile, paths)?;
         require_success(
             &docker,
             ["compose", "version"],
@@ -409,25 +409,34 @@ fn status_projection_arguments(
     .collect()
 }
 
-fn validate_endpoint(docker: &Path) -> Result<(), String> {
-    let endpoint = if let Some(configured) = std::env::var_os("DOCKER_HOST") {
-        configured
-            .into_string()
-            .map_err(|_| "DOCKER_HOST is invalid".to_owned())?
+fn validate_endpoint(docker: &Path, profile: HostProfile, paths: &Paths) -> Result<(), String> {
+    let configured = std::env::var_os("DOCKER_HOST");
+    if profile != HostProfile::Linux && configured.is_some() {
+        return Err("DOCKER_HOST cannot select the managed Local Docker engine".into());
+    }
+    let (context, endpoint) = if let Some(configured) = configured {
+        (
+            None,
+            configured
+                .into_string()
+                .map_err(|_| "DOCKER_HOST is invalid".to_owned())?,
+        )
     } else {
         let context = one_line(&output(docker, ["context", "show"])?, "Docker context")?;
-        output(
-            docker,
-            [
-                "context",
-                "inspect",
-                "--format",
-                "{{.Endpoints.docker.Host}}",
-                &context,
-            ],
-        )?
-        .trim()
-        .to_owned()
+        let endpoint = one_line(
+            &output(
+                docker,
+                [
+                    "context",
+                    "inspect",
+                    "--format",
+                    "{{.Endpoints.docker.Host}}",
+                    &context,
+                ],
+            )?,
+            "Docker endpoint",
+        )?;
+        (Some(context), endpoint)
     };
     let socket = endpoint
         .strip_prefix("unix://")
@@ -439,7 +448,38 @@ fn validate_endpoint(docker: &Path) -> Result<(), String> {
     {
         return Err("the Docker socket path is invalid".into());
     }
+    if profile != HostProfile::Linux {
+        let user_home = paths
+            .home
+            .parent()
+            .ok_or_else(|| "the user home is invalid".to_owned())?;
+        validate_managed_endpoint(profile, user_home, context.as_deref(), &endpoint)?;
+    }
     Ok(())
+}
+
+fn validate_managed_endpoint(
+    profile: HostProfile,
+    user_home: &Path,
+    context: Option<&str>,
+    endpoint: &str,
+) -> Result<(), String> {
+    let expected = match profile {
+        HostProfile::MacOs => (
+            "desktop-linux",
+            format!(
+                "unix://{}",
+                user_home.join(".docker/run/docker.sock").display()
+            ),
+        ),
+        HostProfile::Wsl => ("default", "unix:///var/run/docker.sock".to_owned()),
+        HostProfile::Linux => return Err("the managed Docker profile is invalid".into()),
+    };
+    if context == Some(expected.0) && endpoint == expected.1 {
+        Ok(())
+    } else {
+        Err("the managed Local profile requires Docker Desktop's default engine".into())
+    }
 }
 
 fn require_success<I, S>(program: &Path, arguments: I, message: &str) -> Result<(), String>
@@ -533,6 +573,48 @@ mod tests {
         assert!(!version_at_least("25", (25, 0, 0)));
         assert!(!version_at_least("25.0.0.1", (25, 0, 0)));
         assert!(!version_at_least("not-a-version", (25, 0, 0)));
+    }
+
+    #[test]
+    fn managed_profiles_accept_only_their_default_docker_desktop_socket() {
+        let home = Path::new("/Users/ada");
+        assert!(
+            validate_managed_endpoint(
+                HostProfile::MacOs,
+                home,
+                Some("desktop-linux"),
+                "unix:///Users/ada/.docker/run/docker.sock"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_managed_endpoint(
+                HostProfile::Wsl,
+                Path::new("/home/ada"),
+                Some("default"),
+                "unix:///var/run/docker.sock"
+            )
+            .is_ok()
+        );
+        for (profile, context, endpoint) in [
+            (
+                HostProfile::MacOs,
+                Some("default"),
+                "unix:///Users/ada/.docker/run/docker.sock",
+            ),
+            (
+                HostProfile::MacOs,
+                Some("desktop-linux"),
+                "unix:///tmp/docker.sock",
+            ),
+            (
+                HostProfile::Wsl,
+                Some("custom"),
+                "unix:///var/run/docker.sock",
+            ),
+        ] {
+            assert!(validate_managed_endpoint(profile, home, context, endpoint).is_err());
+        }
     }
 
     #[test]
