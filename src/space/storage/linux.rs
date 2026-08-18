@@ -13,6 +13,14 @@ use crate::space::command::{self, Tool};
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
+
+macro_rules! live_trace {
+    ($stage:literal) => {
+        #[cfg(test)]
+        eprintln!("Linux storage live: {}", $stage);
+    };
+}
+
 const VOLUME_SPECS: [(&str, u32, u32, u32); 23] = [
     ("config", 1000, 1000, 0o700),
     ("data", 1000, 1000, 0o700),
@@ -215,12 +223,14 @@ impl<'a> Pool<'a> {
             ],
             true,
         )?;
+        live_trace!("formatted LUKS2 container");
         let uuid = Self::luks_output([
             OsString::from("luksUUID"),
             self.paths.pool_image.as_os_str().to_owned(),
         ])?;
         let uuid = one_line(&uuid, "encrypted Local storage UUID")?;
         write_private(&self.paths.pool_uuid, &format!("{uuid}\n"))?;
+        live_trace!("recorded LUKS2 identity");
         Self::cryptsetup(
             [
                 OsString::from("open"),
@@ -231,7 +241,9 @@ impl<'a> Pool<'a> {
             ],
             true,
         )?;
+        live_trace!("opened device-mapper mapping");
         self.validate_mapping()?;
+        live_trace!("validated device-mapper mapping");
         Self::root(
             Tool::MkfsExt4,
             [
@@ -246,6 +258,7 @@ impl<'a> Pool<'a> {
             ],
             false,
         )?;
+        live_trace!("formatted ext4 filesystem");
         Self::root(
             Tool::Mount,
             [
@@ -256,8 +269,10 @@ impl<'a> Pool<'a> {
             ],
             false,
         )?;
+        live_trace!("mounted ext4 filesystem");
         self.own_mount_root()?;
         self.create_volume_layout()?;
+        live_trace!("created encrypted volume layout");
         self.mounted_valid()
     }
 
