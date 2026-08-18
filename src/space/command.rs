@@ -30,6 +30,7 @@ impl Tool {
             Self::Chown => &["/usr/bin/chown", "/bin/chown"],
             Self::Docker => &[
                 "/usr/bin/docker",
+                "/Applications/Docker.app/Contents/Resources/bin/docker",
                 "/usr/local/bin/docker",
                 "/opt/homebrew/bin/docker",
             ],
