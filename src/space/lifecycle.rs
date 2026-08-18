@@ -518,30 +518,24 @@ impl Context {
 
     fn remove_files(&self) -> Result<Vec<String>, String> {
         self.remove_runtime_files()?;
-        if self.paths.public_cli.exists() {
-            let metadata = self.paths.public_cli.symlink_metadata().map_err(io_error)?;
-            if !metadata.file_type().is_symlink()
-                || fs::read_link(&self.paths.public_cli).map_err(io_error)?
-                    != self.paths.managed_cli
-            {
-                return Err("refusing to remove an unowned public shimpz command".into());
-            }
-            fs::remove_file(&self.paths.public_cli).map_err(io_error)?;
-        }
-        remove_regular_if_present(&self.paths.managed_cli)?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("candidate"))?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("previous"))?;
-        if let Some(bin) = self.paths.managed_cli.parent() {
-            remove_empty_dir(bin)?;
-        }
         remove_regular_if_present(&self.paths.lock)?;
         let mut preserved = Vec::new();
         if self.paths.home.exists() {
             for entry in fs::read_dir(&self.paths.home).map_err(io_error)? {
-                preserved.push(entry.map_err(io_error)?.path().display().to_string());
-            }
-            if preserved.is_empty() {
-                fs::remove_dir(&self.paths.home).map_err(io_error)?;
+                let path = entry.map_err(io_error)?.path();
+                if path
+                    == self
+                        .paths
+                        .managed_cli
+                        .parent()
+                        .expect("managed CLI has a parent")
+                {
+                    validate_unmarked_bin(&self.paths)?;
+                } else {
+                    preserved.push(path.display().to_string());
+                }
             }
         }
         Ok(preserved)
@@ -866,13 +860,6 @@ fn remove_regular_if_present(path: &Path) -> Result<(), String> {
         ));
     }
     fs::remove_file(path).map_err(io_error)
-}
-
-fn remove_empty_dir(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        fs::remove_dir(path).map_err(io_error)?;
-    }
-    Ok(())
 }
 
 fn io_error(error: std::io::Error) -> String {
