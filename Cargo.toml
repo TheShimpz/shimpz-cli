@@ -37,6 +37,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 winapi-util = "0.1.11"
 
 [dev-dependencies]
+serde_yaml = "0.9.34"
 tempfile = "3"
 
 [[bin]]

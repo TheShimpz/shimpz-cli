@@ -229,6 +229,12 @@ impl Context {
         if !started.success() {
             return self.rollback(release, previous);
         }
+        if let Err(storage_error) = self.validate_started_storage(&space_id) {
+            let rollback = self.rollback(release, previous);
+            return match rollback {
+                Ok(outcome) | Err(outcome) => Err(format!("{storage_error}; {outcome}")),
+            };
+        }
         let status =
             state::write_status(&self.paths, release, release_outcome(release, installed))?;
         if self
@@ -305,6 +311,14 @@ impl Context {
             return Err("the installed Local graph is not current".into());
         }
         Ok(installed)
+    }
+
+    fn validate_started_storage(&self, space_id: &str) -> Result<(), String> {
+        if self.profile == HostProfile::Linux {
+            linux::Pool::new(&self.paths, space_id)?.validate_mounted()
+        } else {
+            Ok(())
+        }
     }
 
     fn recover_corrupt(&self, inventory: &Inventory, reason: &str) -> Result<(), String> {

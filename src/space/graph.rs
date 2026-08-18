@@ -2,6 +2,7 @@
 
 const TEMPLATE: &str = include_str!("../../contracts/local-space/compose.yaml");
 const VOLUME_TOKEN: &str = "{{SHIMPZ_VOLUME_DEFINITIONS}}";
+const VOLUME_NOCOPY_TOKEN: &str = "{{SHIMPZ_VOLUME_NOCOPY}}";
 
 pub(crate) const VOLUME_NAMES: [&str; 23] = [
     "config",
@@ -51,11 +52,21 @@ pub(crate) fn render(profile: StorageProfile) -> String {
             volumes.push('\n');
         }
     }
-    TEMPLATE.replace(VOLUME_TOKEN, volumes.trim_end())
+    TEMPLATE.replace(VOLUME_TOKEN, volumes.trim_end()).replace(
+        VOLUME_NOCOPY_TOKEN,
+        match profile {
+            StorageProfile::LinuxLuks => "true",
+            StorageProfile::ManagedDisk => "false",
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_yaml::Value;
+
     use super::*;
 
     #[test]
@@ -64,6 +75,7 @@ mod tests {
             let graph = render(profile);
             assert!(graph.starts_with("name: ${SHIMPZ_PROJECT_NAME"));
             assert!(!graph.contains(VOLUME_TOKEN));
+            assert!(!graph.contains(VOLUME_NOCOPY_TOKEN));
             assert_eq!(graph.matches("container_name:").count(), 8);
             assert_eq!(graph.matches("    driver: none").count(), 8);
             for volume in VOLUME_NAMES {
@@ -83,5 +95,41 @@ mod tests {
         );
         assert!(!managed.contains("      o: bind"));
         assert!(!managed.contains("SHIMPZ_SECURE_VOLUME_ROOT"));
+        assert_eq!(linux.matches("        nocopy: true").count(), 29);
+        assert_eq!(managed.matches("        nocopy: false").count(), 29);
+        assert!(!linux.contains("        nocopy: false"));
+        assert!(!managed.contains("        nocopy: true"));
+    }
+
+    #[test]
+    fn scopes_volume_population_to_the_storage_owner() {
+        for (profile, expected_nocopy) in [
+            (StorageProfile::LinuxLuks, true),
+            (StorageProfile::ManagedDisk, false),
+        ] {
+            let document: Value = serde_yaml::from_str(&render(profile)).unwrap();
+            let services = document["services"].as_mapping().unwrap();
+            let mut sources = BTreeSet::new();
+            let mut mount_count = 0;
+            let mut socket_count = 0;
+            for service in services.values() {
+                for mount in service["volumes"].as_sequence().unwrap() {
+                    let mount_type = mount["type"].as_str().unwrap();
+                    assert!(["volume", "bind"].contains(&mount_type));
+                    if mount_type == "volume" {
+                        mount_count += 1;
+                        sources.insert(mount["source"].as_str().unwrap());
+                        assert_eq!(mount["volume"]["nocopy"].as_bool(), Some(expected_nocopy));
+                    } else {
+                        socket_count += 1;
+                        assert_eq!(mount["target"].as_str(), Some("/var/run/docker.sock"));
+                        assert!(mount.get("volume").is_none());
+                    }
+                }
+            }
+            assert_eq!(mount_count, 29);
+            assert_eq!(socket_count, 1);
+            assert_eq!(sources, VOLUME_NAMES.into_iter().collect::<BTreeSet<_>>());
+        }
     }
 }

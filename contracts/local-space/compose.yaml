@@ -18,7 +18,11 @@ services:
       - no-new-privileges:true
     command: ["account-init"]
     volumes:
-      - account_egress_capability:/run/shimpz-account-egress:rw
+      - type: volume
+        source: account_egress_capability
+        target: /run/shimpz-account-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
@@ -59,22 +63,86 @@ services:
       SHIMPZ_ASSISTANT_EGRESS_CONTAINER: shimpz-assistant-egress
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /var/lib/shimpz-local/assistant-egress
     volumes:
-      - ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}:/var/run/docker.sock:rw
-      - controller_token:/run/shimpz-local:rw
-      - controller_audit:/var/log/shimpz-local:rw
-      - controller_storage:/var/lib/shimpz-local/storage:rw
-      - controller_inference:/var/lib/shimpz-local/inference:rw
-      - controller_action_journal:/var/lib/shimpz-local/action-journal:rw
-      - controller_publications:/var/lib/shimpz-local/publications:rw
-      - controller_cosign_trust:/var/lib/shimpz-local/cosign:rw
-      - controller_assistant_integration_state:/var/lib/shimpz-local/assistant-integrations/state:rw
-      - controller_assistant_integration_key:/var/lib/shimpz-local/assistant-integrations/key:rw
-      - controller_chat_continuation_state:/var/lib/shimpz-local/chat-continuations/state:rw
-      - controller_chat_continuation_key:/var/lib/shimpz-local/chat-continuations/key:rw
-      - assistant_egress_policy:/var/lib/shimpz-local/assistant-egress:rw
-      - brain_runtime_token:/run/shimpz-brain-runtime:rw
-      - supervisor_key:/run/shimpz-local-supervisor:ro
-      - account_egress_capability:/run/shimpz-account-egress:ro
+      - type: bind
+        source: ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}
+        target: /var/run/docker.sock
+      - type: volume
+        source: controller_token
+        target: /run/shimpz-local
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_audit
+        target: /var/log/shimpz-local
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_storage
+        target: /var/lib/shimpz-local/storage
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_inference
+        target: /var/lib/shimpz-local/inference
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_action_journal
+        target: /var/lib/shimpz-local/action-journal
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_publications
+        target: /var/lib/shimpz-local/publications
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_cosign_trust
+        target: /var/lib/shimpz-local/cosign
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_assistant_integration_state
+        target: /var/lib/shimpz-local/assistant-integrations/state
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_assistant_integration_key
+        target: /var/lib/shimpz-local/assistant-integrations/key
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_chat_continuation_state
+        target: /var/lib/shimpz-local/chat-continuations/state
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_chat_continuation_key
+        target: /var/lib/shimpz-local/chat-continuations/key
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: assistant_egress_policy
+        target: /var/lib/shimpz-local/assistant-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: brain_runtime_token
+        target: /run/shimpz-brain-runtime
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: supervisor_key
+        target: /run/shimpz-local-supervisor
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: account_egress_capability
+        target: /run/shimpz-account-egress
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
@@ -128,8 +196,17 @@ services:
       SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
       SHIMPZ_ASSISTANT_EGRESS_LISTEN_BACKLOG: "16"
     volumes:
-      - assistant_egress_policy:/policy:ro
-      - assistant_egress_audit:/var/log/assistant-egress:rw
+      - type: volume
+        source: assistant_egress_policy
+        target: /policy
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: assistant_egress_audit
+        target: /var/log/assistant-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     healthcheck:
@@ -179,7 +256,11 @@ services:
       SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "4"
       SHIMPZ_EGRESS_LISTEN_BACKLOG: "8"
     volumes:
-      - assistant_release_audit:/var/log/assistant-release:rw
+      - type: volume
+        source: assistant_release_audit
+        target: /var/log/assistant-release
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
     healthcheck:
@@ -226,8 +307,17 @@ services:
       com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       com.shimpz.local.kind: account-egress
     volumes:
-      - account_egress_capability:/run/shimpz-account-egress:ro
-      - account_egress_audit:/var/log/account-egress:rw
+      - type: volume
+        source: account_egress_capability
+        target: /run/shimpz-account-egress
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: account_egress_audit
+        target: /var/log/account-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
@@ -280,7 +370,11 @@ services:
       com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       com.shimpz.local.kind: brain-egress
     volumes:
-      - brain_egress_audit:/var/log/brain-egress:rw
+      - type: volume
+        source: brain_egress_audit
+        target: /var/log/brain-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
@@ -332,8 +426,17 @@ services:
       SHIMPZ_BRAIN_RUNTIME_TOKEN_FILE: /run/shimpz-brain-runtime/token
       SHIMPZ_BRAIN_RUNTIME_STATE: /var/lib/shimpz-brain-runtime/checkpoints.sqlite3
     volumes:
-      - brain_runtime_token:/run/shimpz-brain-runtime:ro
-      - brain_runtime_state:/var/lib/shimpz-brain-runtime:rw
+      - type: volume
+        source: brain_runtime_token
+        target: /run/shimpz-brain-runtime
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: brain_runtime_state
+        target: /var/lib/shimpz-brain-runtime
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
@@ -377,11 +480,33 @@ services:
       SHIMPZ_TEAM_CREDENTIALS_ENABLED: "0"
       SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
     volumes:
-      - config:/repo
-      - data:/data
-      - controller_token:/run/shimpz-local:ro
-      - supervisor_key:/run/shimpz-local-supervisor:rw
-      - release_status:/run/shimpz-local-release:ro
+      - type: volume
+        source: config
+        target: /repo
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: data
+        target: /data
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_token
+        target: /run/shimpz-local
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: supervisor_key
+        target: /run/shimpz-local-supervisor
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: release_status
+        target: /run/shimpz-local-release
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
     healthcheck:

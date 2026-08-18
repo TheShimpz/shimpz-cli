@@ -123,6 +123,10 @@ impl<'a> Pool<'a> {
         Ok(Admission::Verified)
     }
 
+    pub(crate) fn validate_mounted(&self) -> Result<(), String> {
+        self.mounted_valid_unprivileged()
+    }
+
     pub(crate) fn reset(&self) -> Result<(), String> {
         if !self.paths.security.exists() {
             return Ok(());
@@ -699,6 +703,7 @@ mod tests {
         assert_eq!(VOLUME_SPECS.len(), crate::space::graph::VOLUME_NAMES.len());
         for (index, spec) in VOLUME_SPECS.iter().enumerate() {
             assert_eq!(spec.0, crate::space::graph::VOLUME_NAMES[index]);
+            assert!([0o700, 0o750].contains(&spec.3));
         }
     }
 
