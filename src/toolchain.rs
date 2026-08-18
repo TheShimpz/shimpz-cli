@@ -162,26 +162,42 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(unix)]
-    fn uv_shim(version: &str, name: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("shimpz-uv-{name}-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let shim = directory.join("uv");
+    struct UvShim {
+        _directory: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn uv_shim(version: &str) -> UvShim {
+        let executable = std::env::current_exe().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("shimpz-uv-")
+            .tempdir_in(executable.parent().unwrap())
+            .unwrap();
+        let shim = directory.path().join("uv");
         fs::write(&shim, format!("#!/bin/sh\necho 'uv {version}'\n")).unwrap();
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
-        shim
+        UvShim {
+            _directory: directory,
+            path: shim,
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn rejects_uv_with_mismatched_version() {
-        assert!(verify_version(&uv_shim("0.0.1", "mismatch")).is_err());
+        let shim = uv_shim("0.0.1");
+        assert_eq!(
+            verify_version(&shim.path),
+            Err("managed uv version does not match the pinned release".into())
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn accepts_uv_matching_the_pinned_version() {
-        assert!(verify_version(&uv_shim(UV_VERSION, "matching")).is_ok());
+        let shim = uv_shim(UV_VERSION);
+        verify_version(&shim.path).unwrap();
     }
 
     #[test]
