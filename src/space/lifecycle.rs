@@ -151,6 +151,11 @@ impl Context {
         let release = self
             .engine
             .resolve_release(options.release.as_deref(), &self.paths.home)?;
+        if options.release.is_none()
+            && state::failed_release_matches(&self.paths, &release.reference)?
+        {
+            return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
+        }
         if options.release.is_none() && self.handoff_if_needed(&release, options.scheduled)? {
             return Ok("The release-bound CLI completed reconciliation.".into());
         }
@@ -224,15 +229,8 @@ impl Context {
         if !started.success() {
             return self.rollback(release, previous);
         }
-        let status = state::write_status(
-            &self.paths,
-            release,
-            if installed.is_some() {
-                "updated"
-            } else {
-                "current"
-            },
-        )?;
+        let status =
+            state::write_status(&self.paths, release, release_outcome(release, installed))?;
         if self
             .engine
             .project_release_status(&release.metadata.admin, status.as_bytes())
@@ -243,6 +241,7 @@ impl Context {
         remove_backup(previous)?;
         state::write_marker(&self.paths)?;
         scheduler::install(self.profile, &self.paths)?;
+        remove_regular_if_present(&self.paths.failed_release)?;
         Ok(format!(
             "Shimpz Space is ready.\nAdmin http://127.0.0.1:{port}\nRelease {} (ordinal {})",
             release.reference, release.metadata.ordinal
@@ -266,6 +265,12 @@ impl Context {
         } else {
             None
         };
+        if !inventory.empty() && installed.is_none() {
+            return Err(
+                "the current Local Space cannot be authenticated safely; run shimpz install for bounded recovery"
+                    .into(),
+            );
+        }
         if !inventory.empty()
             && let Some(current) = &installed
         {
@@ -440,11 +445,15 @@ impl Context {
         release: &ResolvedRelease,
         backup: Option<Backup>,
     ) -> Result<String, String> {
+        let memory_error = state::remember_failed_release(&self.paths, release).err();
         let _ = self
             .engine
             .compose(&self.paths, ["down", "--remove-orphans"]);
         let Some(backup) = backup else {
             state::write_status(&self.paths, release, "rollback-needed")?;
+            if memory_error.is_some() {
+                return Err("the fresh Local release failed and could not be remembered".into());
+            }
             return Err("the fresh Local release did not become healthy".into());
         };
         fs::rename(&backup.compose, &self.paths.compose).map_err(io_error)?;
@@ -471,6 +480,13 @@ impl Context {
             ],
         )?;
         state::write_status(&self.paths, release, "rollback-needed")?;
+        if memory_error.is_some() {
+            scheduler::remove(self.profile, &self.paths)?;
+            return Err(
+                "the previous release was restored, but automatic updates were disabled because the failed release could not be remembered"
+                    .into(),
+            );
+        }
         if restored.success() {
             Err("the update failed; the previous healthy release was restored".into())
         } else {
@@ -546,6 +562,14 @@ impl Context {
             }
         }
         Ok(preserved)
+    }
+}
+
+fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> &'static str {
+    if installed.is_some_and(|current| current.release_ref == release.reference) {
+        "current"
+    } else {
+        "updated"
     }
 }
 
@@ -915,6 +939,23 @@ mod tests {
         assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_err());
         assert!(validate_forward_release(&release(2, 'c'), Some(&installed)).is_err());
         assert!(validate_forward_release(&release(1, 'a'), None).is_ok());
+    }
+
+    #[test]
+    fn reports_fresh_and_changed_releases_as_updated() {
+        let current = release(2, 'b');
+        let installed = Installed {
+            space_id: "space-0123456789abcdef01234567".into(),
+            release_ref: current.reference.clone(),
+            ordinal: 2,
+            port: 7777,
+        };
+        assert_eq!(release_outcome(&current, Some(&installed)), "current");
+        assert_eq!(
+            release_outcome(&release(3, 'c'), Some(&installed)),
+            "updated"
+        );
+        assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
     }
 
     #[test]

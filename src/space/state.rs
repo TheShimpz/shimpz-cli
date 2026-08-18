@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use super::docker::ResolvedRelease;
@@ -254,6 +254,41 @@ pub(crate) fn write_status(
     Ok(document)
 }
 
+pub(crate) fn remember_failed_release(
+    paths: &Paths,
+    release: &ResolvedRelease,
+) -> Result<(), String> {
+    write_private(
+        &paths.failed_release,
+        &format!("release={}\n", release.reference),
+    )
+}
+
+pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result<bool, String> {
+    if !paths.failed_release.exists() {
+        return Ok(false);
+    }
+    let metadata = paths.failed_release.symlink_metadata().map_err(io_error)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() > 256
+    {
+        return Err("the failed Local release record is invalid".into());
+    }
+    let document = fs::read_to_string(&paths.failed_release)
+        .map_err(|_| "the failed Local release record is unreadable".to_owned())?;
+    let recorded = document
+        .strip_prefix("release=")
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| !value.contains('\n'))
+        .filter(|value| super::release::valid_release_ref(value))
+        .ok_or_else(|| "the failed Local release record is malformed".to_owned())?;
+    Ok(recorded == release_ref)
+}
+
 pub(crate) fn random_space_id() -> Result<String, String> {
     let mut source =
         File::open("/dev/urandom").map_err(|_| "the system random source is unavailable")?;
@@ -459,5 +494,29 @@ mod tests {
             fs::write(&paths.environment, invalid).unwrap();
             assert!(read_installed(&paths, HostProfile::Linux).is_err());
         }
+    }
+
+    #[test]
+    fn remembers_only_one_private_failed_release_digest() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let release = release();
+        assert!(!failed_release_matches(&paths, &release.reference).unwrap());
+        remember_failed_release(&paths, &release).unwrap();
+        assert!(failed_release_matches(&paths, &release.reference).unwrap());
+        assert!(
+            !failed_release_matches(
+                &paths,
+                &format!(
+                    "{}@sha256:{}",
+                    super::super::release::RELEASE_REPOSITORY,
+                    "1".repeat(64)
+                )
+            )
+            .unwrap()
+        );
+        fs::write(&paths.failed_release, "release=invalid\n").unwrap();
+        assert!(failed_release_matches(&paths, &release.reference).is_err());
     }
 }
