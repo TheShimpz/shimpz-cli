@@ -24,7 +24,7 @@ macro_rules! live_trace {
 const VOLUME_SPECS: [(&str, u32, u32, u32); 23] = [
     ("config", 1000, 1000, 0o700),
     ("data", 1000, 1000, 0o700),
-    ("controller_token", 10001, 10010, 0o750),
+    ("controller_token", 10001, 10010, 0o2750),
     ("controller_audit", 10001, 10001, 0o700),
     ("controller_storage", 10001, 10001, 0o700),
     ("controller_inference", 10001, 10001, 0o700),
@@ -40,12 +40,12 @@ const VOLUME_SPECS: [(&str, u32, u32, u32); 23] = [
     ("controller_assistant_integration_key", 10001, 10001, 0o700),
     ("controller_chat_continuation_state", 10001, 10001, 0o700),
     ("controller_chat_continuation_key", 10001, 10001, 0o700),
-    ("supervisor_key", 1000, 10021, 0o750),
+    ("supervisor_key", 0, 10021, 0o2770),
     ("release_status", 1000, 1000, 0o700),
     ("assistant_egress_policy", 10001, 10017, 0o750),
     ("assistant_egress_audit", 10005, 10005, 0o700),
     ("assistant_release_audit", 10004, 10004, 0o700),
-    ("account_egress_capability", 10006, 10022, 0o750),
+    ("account_egress_capability", 0, 10022, 0o750),
     ("account_egress_audit", 10006, 10006, 0o700),
     ("brain_egress_audit", 10001, 10001, 0o700),
     ("brain_runtime_token", 10001, 10016, 0o750),
@@ -375,7 +375,7 @@ impl<'a> Pool<'a> {
                 || !metadata.is_dir()
                 || metadata.uid() != uid
                 || metadata.gid() != gid
-                || metadata.permissions().mode() & 0o777 != mode
+                || metadata.permissions().mode() & 0o7777 != mode
             {
                 return Err(format!("encrypted Local volume layout is invalid: {name}"));
             }
@@ -703,8 +703,13 @@ mod tests {
         assert_eq!(VOLUME_SPECS.len(), crate::space::graph::VOLUME_NAMES.len());
         for (index, spec) in VOLUME_SPECS.iter().enumerate() {
             assert_eq!(spec.0, crate::space::graph::VOLUME_NAMES[index]);
-            assert!([0o700, 0o750].contains(&spec.3));
+            assert_eq!(spec.3 & 0o007, 0);
+            assert_eq!(spec.3 & !0o7777, 0);
         }
+        assert!(VOLUME_SPECS.contains(&("controller_token", 10001, 10010, 0o2750)));
+        assert!(VOLUME_SPECS.contains(&("supervisor_key", 0, 10021, 0o2770)));
+        assert!(VOLUME_SPECS.contains(&("assistant_egress_policy", 10001, 10017, 0o750)));
+        assert!(VOLUME_SPECS.contains(&("account_egress_capability", 0, 10022, 0o750)));
     }
 
     #[cfg(target_os = "linux")]
