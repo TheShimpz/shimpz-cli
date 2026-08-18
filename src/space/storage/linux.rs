@@ -260,7 +260,7 @@ impl<'a> Pool<'a> {
             self.provision()?;
             return Ok(Admission::Verified);
         }
-        self.validate_metadata()?;
+        validate_metadata(self.paths)?;
         if scheduled {
             if !self.is_mounted()? {
                 return Ok(Admission::Locked);
@@ -305,35 +305,6 @@ impl<'a> Pool<'a> {
 
     pub(crate) fn validate_mounted(&self) -> Result<(), String> {
         self.mounted_valid_unprivileged()
-    }
-
-    pub(crate) fn reset(&self) -> Result<(), String> {
-        if !self.paths.security.exists() {
-            return Ok(());
-        }
-        validate_security_entries(self.paths)?;
-        self.validate_metadata()?;
-        let mapping = self.mapping_path();
-        if mapping.exists() {
-            self.validate_mapping()?;
-            command::authorize()?;
-            if self.is_mounted()? {
-                self.validate_mount()?;
-                Self::root(Tool::Umount, [self.paths.pool_mount.as_os_str().to_owned()])?;
-            }
-            Self::cryptsetup([OsString::from("close"), OsString::from(self.mapping_name())])?;
-            if mapping.exists() {
-                return Err("the encrypted Local storage mapping remained open".into());
-            }
-        } else if self.is_mounted()? {
-            return Err("refusing to unmount Local storage without its owned mapping".into());
-        }
-        fs::remove_file(&self.paths.pool_uuid).map_err(cleanup_error)?;
-        fs::remove_file(&self.paths.pool_image).map_err(cleanup_error)?;
-        fs::remove_file(&self.paths.storage_marker).map_err(cleanup_error)?;
-        fs::remove_dir(&self.paths.pool_mount).map_err(cleanup_error)?;
-        fs::remove_dir(&self.paths.security).map_err(cleanup_error)?;
-        Ok(())
     }
 
     fn provision(&self) -> Result<(), String> {
@@ -449,43 +420,8 @@ impl<'a> Pool<'a> {
         self.mounted_valid()
     }
 
-    fn validate_metadata(&self) -> Result<(), String> {
-        exact_regular_file(&self.paths.storage_marker)?;
-        exact_regular_file(&self.paths.pool_image)?;
-        exact_regular_file(&self.paths.pool_uuid)?;
-        if fs::read_to_string(&self.paths.storage_marker).map_err(io_error)?
-            != format!("{STORAGE_MARKER}\n")
-        {
-            return Err("encrypted Local storage marker is invalid".into());
-        }
-        let expected_document = fs::read_to_string(&self.paths.pool_uuid).map_err(io_error)?;
-        let expected = one_line(&expected_document, "pool UUID")?;
-        let actual_document = command::output(
-            Tool::Luks,
-            [
-                OsString::from("luksUUID"),
-                self.paths.pool_image.as_os_str().to_owned(),
-            ],
-        )?;
-        let actual = one_line(&actual_document, "pool UUID")?;
-        if expected != actual {
-            return Err("encrypted Local storage UUID does not match".into());
-        }
-        let dump = command::output(
-            Tool::Luks,
-            [
-                OsString::from("luksDump"),
-                self.paths.pool_image.as_os_str().to_owned(),
-            ],
-        )?;
-        if !luks_dump_valid(&dump) {
-            return Err("encrypted Local storage parameters are invalid".into());
-        }
-        Ok(())
-    }
-
     fn validate_mapping(&self) -> Result<(), String> {
-        self.validate_metadata()?;
+        validate_metadata(self.paths)?;
         let status = Self::luks_output([
             OsString::from("status"),
             OsString::from(self.mapping_name()),
@@ -559,7 +495,7 @@ impl<'a> Pool<'a> {
 
     #[cfg(target_os = "linux")]
     fn validate_mapping_unprivileged(&self) -> Result<(), String> {
-        self.validate_metadata()?;
+        validate_metadata(self.paths)?;
         let mapping = self.mapping_path().metadata().map_err(io_error)?;
         if !mapping.file_type().is_block_device() {
             return Err("encrypted Local storage mapping is not a block device".into());
@@ -734,6 +670,175 @@ impl<'a> Pool<'a> {
     fn mapping_path(&self) -> PathBuf {
         Path::new("/dev/mapper").join(self.mapping_name())
     }
+}
+
+pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<(), String> {
+    if !paths.security.exists() {
+        return Ok(());
+    }
+    if expected_space_id.is_some_and(|value| !valid_space_id(value)) {
+        return Err("the Local Space identity is invalid".into());
+    }
+    validate_security_entries(paths)?;
+    validate_metadata(paths)?;
+    let mappings = discover_pool_mappings(paths)?;
+    let identity = reset_mapping_identity(expected_space_id, &mappings)?;
+    if let Some(identity) = identity {
+        let pool = Pool::new(paths, &identity)?;
+        pool.validate_mapping()?;
+        command::authorize()?;
+        if pool.is_mounted()? {
+            pool.validate_mount()?;
+            Pool::root(Tool::Umount, [paths.pool_mount.as_os_str().to_owned()])?;
+        }
+        Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())])?;
+        if pool.mapping_path().exists() {
+            return Err("the encrypted Local storage mapping remained open".into());
+        }
+    } else if command::status(
+        Tool::Mountpoint,
+        ["--quiet", &paths.pool_mount.to_string_lossy()],
+    )?
+    .success()
+    {
+        return Err("refusing to unmount Local storage without its owned mapping".into());
+    }
+    remove_pool_files(paths)
+}
+
+fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
+    let pool = paths.pool_image.canonicalize().map_err(io_error)?;
+    let recorded_uuid = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
+    let recorded_uuid = one_line(&recorded_uuid, "pool UUID")?.replace('-', "");
+    let mut identities = Vec::new();
+    let blocks = fs::read_dir("/sys/class/block")
+        .map_err(|_| "the host block-device inventory is unavailable".to_owned())?;
+    for entry in blocks {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.strip_prefix("loop").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            continue;
+        }
+        let backing = entry.path().join("loop/backing_file");
+        let Ok(backing) = fs::read_to_string(backing) else {
+            continue;
+        };
+        let Ok(backing) = PathBuf::from(backing.trim_end()).canonicalize() else {
+            continue;
+        };
+        if backing != pool {
+            continue;
+        }
+        let mut holders = fs::read_dir(entry.path().join("holders")).map_err(|_| {
+            "the encrypted Local storage holder inventory is unavailable".to_owned()
+        })?;
+        let mut found_holder = false;
+        for holder in &mut holders {
+            found_holder = true;
+            let holder = holder.map_err(io_error)?;
+            identities.push(validate_discovered_mapping(
+                paths,
+                &recorded_uuid,
+                &holder.path(),
+            )?);
+        }
+        if !found_holder {
+            return Err("the encrypted Local storage has a foreign open loop device".into());
+        }
+    }
+    identities.sort();
+    identities.dedup();
+    Ok(identities)
+}
+
+fn validate_discovered_mapping(
+    paths: &Paths,
+    recorded_uuid: &str,
+    holder: &Path,
+) -> Result<String, String> {
+    let name_document = fs::read_to_string(holder.join("dm/name"))
+        .map_err(|_| "the encrypted Local storage mapping name is unavailable".to_owned())?;
+    let name = one_line(&name_document, "device-mapper name")?;
+    let suffix = name
+        .strip_prefix("shimpz-")
+        .filter(|value| {
+            value.len() == 24
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| "the encrypted Local storage has a foreign mapping name".to_owned())?;
+    let dm_uuid_document = fs::read_to_string(holder.join("dm/uuid"))
+        .map_err(|_| "the encrypted Local storage mapping UUID is unavailable".to_owned())?;
+    let dm_uuid = one_line(&dm_uuid_document, "device-mapper UUID")?;
+    if dm_uuid != format!("CRYPT-LUKS2-{recorded_uuid}-{name}") {
+        return Err("the encrypted Local storage mapping UUID is invalid".into());
+    }
+    let identity = format!("space-{suffix}");
+    Pool::new(paths, &identity)?.validate_mapping_unprivileged()?;
+    Ok(identity)
+}
+
+fn reset_mapping_identity(
+    expected: Option<&str>,
+    discovered: &[String],
+) -> Result<Option<String>, String> {
+    let identity = match discovered {
+        [] => None,
+        [identity] => Some(identity.clone()),
+        _ => return Err("the encrypted Local storage mapping identity is ambiguous".into()),
+    };
+    if expected.is_some() && expected != identity.as_deref() && identity.is_some() {
+        return Err("the encrypted Local storage mapping identity does not match the Space".into());
+    }
+    Ok(identity)
+}
+
+fn remove_pool_files(paths: &Paths) -> Result<(), String> {
+    fs::remove_file(&paths.pool_uuid).map_err(cleanup_error)?;
+    fs::remove_file(&paths.pool_image).map_err(cleanup_error)?;
+    fs::remove_file(&paths.storage_marker).map_err(cleanup_error)?;
+    fs::remove_dir(&paths.pool_mount).map_err(cleanup_error)?;
+    fs::remove_dir(&paths.security).map_err(cleanup_error)
+}
+
+fn validate_metadata(paths: &Paths) -> Result<(), String> {
+    exact_regular_file(&paths.storage_marker)?;
+    exact_regular_file(&paths.pool_image)?;
+    exact_regular_file(&paths.pool_uuid)?;
+    if fs::read_to_string(&paths.storage_marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n")
+    {
+        return Err("encrypted Local storage marker is invalid".into());
+    }
+    let expected_document = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
+    let expected = one_line(&expected_document, "pool UUID")?;
+    let actual_document = command::output(
+        Tool::Luks,
+        [
+            OsString::from("luksUUID"),
+            paths.pool_image.as_os_str().to_owned(),
+        ],
+    )?;
+    let actual = one_line(&actual_document, "pool UUID")?;
+    if expected != actual {
+        return Err("encrypted Local storage UUID does not match".into());
+    }
+    let dump = command::output(
+        Tool::Luks,
+        [
+            OsString::from("luksDump"),
+            paths.pool_image.as_os_str().to_owned(),
+        ],
+    )?;
+    if !luks_dump_valid(&dump) {
+        return Err("encrypted Local storage parameters are invalid".into());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -922,6 +1027,37 @@ mod tests {
         assert!(VOLUME_SPECS.contains(&("account_egress_capability", 0, 10022, 0o750)));
     }
 
+    #[test]
+    fn reset_identity_accepts_only_zero_or_one_matching_mapping() {
+        let expected = "space-0123456789abcdef01234567";
+        assert_eq!(reset_mapping_identity(Some(expected), &[]).unwrap(), None);
+        assert_eq!(
+            reset_mapping_identity(None, &[expected.to_owned()]).unwrap(),
+            Some(expected.to_owned())
+        );
+        assert_eq!(
+            reset_mapping_identity(Some(expected), &[expected.to_owned()]).unwrap(),
+            Some(expected.to_owned())
+        );
+        assert!(
+            reset_mapping_identity(
+                Some("space-aaaaaaaaaaaaaaaaaaaaaaaa"),
+                &[expected.to_owned()]
+            )
+            .is_err()
+        );
+        assert!(
+            reset_mapping_identity(
+                None,
+                &[
+                    expected.to_owned(),
+                    "space-aaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+                ]
+            )
+            .is_err()
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires real LUKS, loop, mount, sudo, and a controlling terminal"]
@@ -939,8 +1075,8 @@ mod tests {
         Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())]).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
-        pool.reset().unwrap();
-        pool.reset().unwrap();
+        reset(&paths, Some(pool.space_id)).unwrap();
+        reset(&paths, None).unwrap();
         assert!(!paths.security.exists());
     }
 }

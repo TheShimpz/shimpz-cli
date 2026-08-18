@@ -288,9 +288,8 @@ impl Context {
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
             let space_id = installed
                 .map(|current| current.space_id)
-                .or(inventory.space_id)
-                .ok_or_else(|| "the encrypted Space identity is unavailable".to_owned())?;
-            linux::Pool::new(&self.paths, &space_id)?.reset()?;
+                .or(inventory.space_id);
+            linux::reset(&self.paths, space_id.as_deref())?;
         }
         scheduler::remove(self.profile, &self.paths)?;
         let preserved = self.remove_files()?;
@@ -345,9 +344,7 @@ impl Context {
         };
         remaining.remove(&self.engine)?;
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
-            let identity =
-                space_id.ok_or_else(|| "the encrypted Space identity is unavailable".to_owned())?;
-            linux::Pool::new(&self.paths, &identity)?.reset()?;
+            linux::reset(&self.paths, space_id.as_deref())?;
         }
         self.remove_runtime_files()?;
         output::info("Corrupt Local Space removed; continuing with a fresh installation.");
