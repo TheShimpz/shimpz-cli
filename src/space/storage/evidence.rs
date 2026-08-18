@@ -109,7 +109,9 @@ mod tests {
             Ok(HostProfile::MacOs)
         );
         assert_eq!(HostProfile::Linux.storage(), StorageProfile::LinuxLuks);
+        assert_eq!(HostProfile::Linux.name(), "linux-luks");
         assert_eq!(HostProfile::Wsl.storage(), StorageProfile::ManagedDisk);
+        assert_eq!(HostProfile::Wsl.name(), "windows-wsl");
         assert_eq!(HostProfile::MacOs.name(), "macos-filevault");
         for evidence in [
             ("linux", "aarch64", false, false, "systemd"),

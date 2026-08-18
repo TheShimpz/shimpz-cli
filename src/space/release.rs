@@ -140,6 +140,7 @@ mod tests {
     #[test]
     fn rejects_unknown_missing_duplicate_and_retired_fields() {
         for invalid in [
+            "malformed".into(),
             valid().replace("schema=local-v2\n", "schema=local-v1\n"),
             valid().replace("ordinal=42\n", ""),
             format!("{}unknown=value\n", valid()),
