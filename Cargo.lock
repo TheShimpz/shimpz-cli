@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "shimpz-cli"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "anstream",
  "anstyle",

@@ -230,6 +230,8 @@ impl<'a> Pool<'a> {
             Tool::MkfsExt4,
             [
                 OsString::from("-q"),
+                OsString::from("-t"),
+                OsString::from("ext4"),
                 OsString::from("-m"),
                 OsString::from("0"),
                 self.mapping_path().as_os_str().to_owned(),
