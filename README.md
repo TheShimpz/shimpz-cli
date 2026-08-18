@@ -25,6 +25,10 @@ shimpz assistant develop claude hello-assistant --yolo
 shimpz assistant check
 shimpz assistant run create-dns --input '{"zone":"example.com"}'
 shimpz assistant publish --visibility public
+shimpz install
+shimpz status
+shimpz start
+shimpz reset
 shimpz upgrade
 ```
 
@@ -51,8 +55,17 @@ Assistant development guide from `https://developers.shimpz.com/assistant.md`.
 The agent keeps its normal permission protections unless `--yolo` is explicitly
 provided.
 
-`shimpz upgrade` checks the latest stable GitHub release and replaces the
-current executable only when a newer version is available.
+`shimpz install` installs or reconciles the complete Local Space from one atomic,
+digest-pinned release. `shimpz status` reports it, `shimpz start` reconciles it,
+and `shimpz reset` removes its exact owned state. A corrupt prior installation
+is removed only after an exact interactive `Yes`; benign absence is successful.
+Linux storage is LUKS2-backed, macOS requires FileVault protection for Docker's
+default data disk, and WSL2 requires the default Docker data disk on a fully
+protected BitLocker volume.
+
+`shimpz upgrade` checks the latest stable GitHub release and replaces a
+standalone executable only when a newer version is available. A Space-managed
+CLI is updated exclusively by the atomic Local release.
 
 Integration tokens are read from environment variables and never accepted as CLI
 arguments. For example, Integration `cloudflare` uses
