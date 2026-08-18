@@ -265,43 +265,8 @@ impl Engine {
             return Err("the Local release status volume is not owned by this Space".into());
         }
         let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release");
-        let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
-        let arguments = [
-            "run",
-            "--rm",
-            "--platform",
-            self.platform,
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--user",
-            "1000:1000",
-            "--cpuset-cpus",
-            &self.cpuset,
-            "--cpus",
-            "0.25",
-            "--memory",
-            "64m",
-            "--memory-swap",
-            "64m",
-            "--pids-limit",
-            "32",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=8m",
-            "--mount",
-            &mount,
-            "--entrypoint",
-            "/opt/venv/bin/python",
-            admin_image,
-            "-c",
-            script,
-        ];
+        let arguments =
+            status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image);
         let mut child = Command::new(&self.docker)
             .args(arguments)
             .stdin(Stdio::piped())
@@ -393,6 +358,55 @@ impl Engine {
         }
         Ok(first)
     }
+}
+
+fn status_projection_arguments(
+    platform: &str,
+    cpuset: &str,
+    mount: &str,
+    admin_image: &str,
+) -> Vec<OsString> {
+    let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
+    [
+        "run",
+        "--rm",
+        "--interactive",
+        "--platform",
+        platform,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--user",
+        "1000:1000",
+        "--cpuset-cpus",
+        cpuset,
+        "--cpus",
+        "0.25",
+        "--memory",
+        "64m",
+        "--memory-swap",
+        "64m",
+        "--pids-limit",
+        "32",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=8m",
+        "--mount",
+        mount,
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        admin_image,
+        "-c",
+        script,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 fn validate_endpoint(docker: &Path) -> Result<(), String> {
@@ -535,5 +549,19 @@ mod tests {
             "ghcr.io/theshimpz/shimpz-admin:stable",
             "ghcr.io/theshimpz/shimpz-admin"
         ));
+    }
+
+    #[test]
+    fn static_status_projection_requests_stdin_without_a_tty() {
+        let arguments = status_projection_arguments(
+            "linux/amd64",
+            "0-3",
+            "type=volume,src=release,dst=/run/release",
+            &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
+        );
+
+        assert_eq!(arguments[0], "run");
+        assert_eq!(arguments[2], "--interactive");
+        assert!(arguments.iter().all(|argument| argument != "--tty"));
     }
 }
