@@ -13,7 +13,6 @@ mod output;
 mod publish;
 mod python;
 mod source_package;
-#[cfg(test)]
 mod space;
 mod toolchain;
 mod upgrade;
@@ -78,6 +77,17 @@ fn run(command: &Command) -> ExitCode {
             install::run(source_digest, team.as_deref()),
             Presentation::Success,
         ),
+        Command::Install(options) => (
+            space::lifecycle::install(options),
+            if options.print_graph.is_some() {
+                Presentation::Data
+            } else {
+                Presentation::Success
+            },
+        ),
+        Command::Reset => (space::lifecycle::reset(), Presentation::Success),
+        Command::Start(options) => (space::lifecycle::start(options), Presentation::Success),
+        Command::Status => (space::lifecycle::status(), Presentation::Info),
         Command::Upgrade => (upgrade::run(), Presentation::Success),
     };
     match result {

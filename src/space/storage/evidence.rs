@@ -2,7 +2,7 @@
 
 use super::super::graph::StorageProfile;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostProfile {
     Linux,
     MacOs,

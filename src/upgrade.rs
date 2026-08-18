@@ -7,11 +7,33 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const ARCHIVE_BINARY_PATH: &str = "shimpz-{{ version }}-{{ target }}/{{ bin }}";
 
 pub(crate) fn run() -> Result<String, String> {
+    refuse_managed_space_cli()?;
     let latest = latest_release()?;
     if !newer_than_current(&latest.version)? {
         return Ok(format!("shimpz {CURRENT_VERSION} is already up to date."));
     }
     install(&latest)
+}
+
+fn refuse_managed_space_cli() -> Result<(), String> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Ok(());
+    };
+    let managed = home.join(".shimpz/bin/shimpz");
+    let marker = home.join(".shimpz/.shimpz-space");
+    if marker.exists()
+        && managed.exists()
+        && std::env::current_exe()
+            .ok()
+            .and_then(|path| path.canonicalize().ok())
+            == managed.canonicalize().ok()
+    {
+        return Err(
+            "this CLI is managed by Shimpz Space; run shimpz install to reconcile its atomic release"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn latest_release() -> Result<Release, String> {

@@ -3,9 +3,18 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-const TOP_LEVEL_COMMANDS: [&str; 3] = ["assistant", "auth", "upgrade"];
+const TOP_LEVEL_COMMANDS: [&str; 7] = [
+    "assistant",
+    "auth",
+    "install",
+    "reset",
+    "start",
+    "status",
+    "upgrade",
+];
 
-pub(crate) const USAGE: &str = "Usage: shimpz <assistant|auth|upgrade> [options]";
+pub(crate) const USAGE: &str =
+    "Usage: shimpz <assistant|auth|install|reset|start|status|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
@@ -17,6 +26,10 @@ Usage:
   shimpz assistant publish --visibility <private|public> [--project <path>]
   shimpz assistant install <source-digest> [--team <team-id>]
   shimpz auth [login|status|logout]
+  shimpz install
+  shimpz start
+  shimpz status
+  shimpz reset
   shimpz upgrade
   shimpz --help
   shimpz --version
@@ -33,7 +46,31 @@ pub(crate) enum Invocation {
 pub(crate) enum Command {
     Auth(AuthAction),
     Assistant(AssistantCommand),
+    Install(SpaceInstall),
+    Reset,
+    Start(SpaceStart),
+    Status,
     Upgrade,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SpaceInstall {
+    pub(crate) release: Option<String>,
+    pub(crate) print_graph: Option<GraphProfile>,
+    pub(crate) candidate: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphProfile {
+    LinuxLuks,
+    ManagedDisk,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SpaceStart {
+    pub(crate) scheduled: bool,
+    pub(crate) release: Option<String>,
+    pub(crate) candidate: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -118,9 +155,112 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
     match command.as_str() {
         "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
+        "install" => parse_space_install(rest),
+        "reset" => parse_no_options(rest, Command::Reset, "reset"),
+        "start" => parse_space_start(rest),
+        "status" => parse_no_options(rest, Command::Status, "status"),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
+}
+
+fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
+    match arguments {
+        [] => Ok(Invocation::Execute(Command::Install(SpaceInstall {
+            release: None,
+            print_graph: None,
+            candidate: false,
+        }))),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
+        [option, profile] if option == "--print-graph" => {
+            let print_graph = match profile.as_str() {
+                "linux-luks" => GraphProfile::LinuxLuks,
+                "managed-disk" => GraphProfile::ManagedDisk,
+                _ => return Err("--print-graph requires linux-luks or managed-disk".into()),
+            };
+            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                release: None,
+                print_graph: Some(print_graph),
+                candidate: false,
+            })))
+        }
+        [option, release] if option == "--release" && valid_release_ref(release) => {
+            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                release: Some(release.clone()),
+                print_graph: None,
+                candidate: false,
+            })))
+        }
+        [option, release, candidate]
+            if option == "--release"
+                && candidate == "--candidate"
+                && valid_release_ref(release) =>
+        {
+            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                release: Some(release.clone()),
+                print_graph: None,
+                candidate: true,
+            })))
+        }
+        [option, _] if option == "--release" => {
+            Err("the Local release reference is invalid".into())
+        }
+        [option] if option == "--release" || option == "--print-graph" => {
+            Err(format!("{option} requires a value"))
+        }
+        _ => Err("install accepts no public options".into()),
+    }
+}
+
+fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
+    let (scheduled, release, candidate) = match arguments {
+        [] => (false, None, false),
+        [option] if option == "--help" || option == "-h" => return Ok(Invocation::Help),
+        [option] if option == "--scheduled" => (true, None, false),
+        [release_option, release, candidate_option]
+            if release_option == "--release"
+                && candidate_option == "--candidate"
+                && valid_release_ref(release) =>
+        {
+            (false, Some(release.clone()), true)
+        }
+        [scheduled_option, release_option, release, candidate_option]
+            if scheduled_option == "--scheduled"
+                && release_option == "--release"
+                && candidate_option == "--candidate"
+                && valid_release_ref(release) =>
+        {
+            (true, Some(release.clone()), true)
+        }
+        _ => return Err("start accepts no public options".into()),
+    };
+    Ok(Invocation::Execute(Command::Start(SpaceStart {
+        scheduled,
+        release,
+        candidate,
+    })))
+}
+
+fn parse_no_options(
+    arguments: &[String],
+    command: Command,
+    name: &str,
+) -> Result<Invocation, String> {
+    match arguments {
+        [] => Ok(Invocation::Execute(command)),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
+        _ => Err(format!("{name} accepts no options")),
+    }
+}
+
+fn valid_release_ref(value: &str) -> bool {
+    const PREFIX: &str = "ghcr.io/theshimpz/shimpz-local-release@sha256:";
+    value.strip_prefix(PREFIX).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
@@ -710,7 +850,7 @@ mod tests {
 
     #[test]
     fn keeps_assistant_operations_out_of_the_top_level() {
-        for retired in ["new", "develop", "check", "test", "publish", "install"] {
+        for retired in ["new", "develop", "check", "test", "publish"] {
             assert_eq!(parse(strings(&[retired])), Err("unknown command".into()));
         }
         assert_eq!(
@@ -725,7 +865,18 @@ mod tests {
 
     #[test]
     fn keeps_the_top_level_command_set_closed() {
-        assert_eq!(TOP_LEVEL_COMMANDS, ["assistant", "auth", "upgrade"]);
+        assert_eq!(
+            TOP_LEVEL_COMMANDS,
+            [
+                "assistant",
+                "auth",
+                "install",
+                "reset",
+                "start",
+                "status",
+                "upgrade"
+            ]
+        );
         assert_eq!(
             USAGE,
             format!("Usage: shimpz <{}> [options]", TOP_LEVEL_COMMANDS.join("|"))
@@ -734,6 +885,91 @@ mod tests {
             assert_ne!(parse(strings(&[current])), Err("unknown command".into()),);
         }
         assert_eq!(parse(strings(&["space"])), Err("unknown command".into()),);
+    }
+
+    #[test]
+    fn parses_the_complete_space_lifecycle_without_a_space_alias() {
+        assert_eq!(
+            parse(strings(&["install"])),
+            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                release: None,
+                print_graph: None,
+                candidate: false,
+            })))
+        );
+        assert_eq!(
+            parse(strings(&["start"])),
+            Ok(Invocation::Execute(Command::Start(SpaceStart {
+                scheduled: false,
+                release: None,
+                candidate: false,
+            })))
+        );
+        assert_eq!(
+            parse(strings(&["status"])),
+            Ok(Invocation::Execute(Command::Status))
+        );
+        assert_eq!(
+            parse(strings(&["reset"])),
+            Ok(Invocation::Execute(Command::Reset))
+        );
+        assert_eq!(
+            parse(strings(&["space", "install"])),
+            Err("unknown command".into())
+        );
+    }
+
+    #[test]
+    fn strictly_parses_hidden_reconciliation_syntax() {
+        let release = format!(
+            "ghcr.io/theshimpz/shimpz-local-release@sha256:{}",
+            "a".repeat(64)
+        );
+        assert_eq!(
+            parse(strings(&["start", "--scheduled"])),
+            Ok(Invocation::Execute(Command::Start(SpaceStart {
+                scheduled: true,
+                release: None,
+                candidate: false,
+            })))
+        );
+        assert_eq!(
+            parse(vec![
+                "install".into(),
+                "--release".into(),
+                release.clone().into(),
+                "--candidate".into(),
+            ]),
+            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                release: Some(release.clone()),
+                print_graph: None,
+                candidate: true,
+            })))
+        );
+        assert_eq!(
+            parse(vec![
+                "start".into(),
+                "--scheduled".into(),
+                "--release".into(),
+                release.into(),
+                "--candidate".into(),
+            ]),
+            Ok(Invocation::Execute(Command::Start(SpaceStart {
+                scheduled: true,
+                release: Some(format!(
+                    "ghcr.io/theshimpz/shimpz-local-release@sha256:{}",
+                    "a".repeat(64)
+                )),
+                candidate: true,
+            })))
+        );
+        assert!(!HELP.contains("--scheduled"));
+        assert!(!HELP.contains("--candidate"));
+        assert_eq!(
+            parse(strings(&["install", "--candidate"])),
+            Err("install accepts no public options".into())
+        );
+        assert!(!HELP.contains("--release"));
     }
 
     #[test]
