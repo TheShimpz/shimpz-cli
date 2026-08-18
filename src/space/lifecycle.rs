@@ -470,10 +470,21 @@ impl Context {
         fs::rename(&backup.compose, &self.paths.compose).map_err(io_error)?;
         fs::rename(&backup.environment, &self.paths.environment).map_err(io_error)?;
         let installed = state::read_installed(&self.paths, self.profile)?;
-        match self.ensure_storage(&installed.space_id, false, false)? {
+        match self.ensure_storage(&installed.space_id, false, self.scheduled)? {
             linux::Admission::Verified => {}
             linux::Admission::Locked => {
-                return Err("the previous release storage remained locked".into());
+                state::write_status(&self.paths, release, "rollback-needed")?;
+                if memory_error.is_some() {
+                    scheduler::remove(self.profile, &self.paths)?;
+                    return Err(
+                        "the previous release remained stopped because storage was locked, and automatic updates were disabled because the failed release could not be remembered"
+                            .into(),
+                    );
+                }
+                return Err(
+                    "the update failed; the previous release remained stopped because encrypted storage was locked"
+                        .into(),
+                );
             }
         }
         let restored = self.engine.compose(
