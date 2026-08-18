@@ -13,6 +13,8 @@ mod output;
 mod publish;
 mod python;
 mod source_package;
+#[cfg(test)]
+mod space;
 mod toolchain;
 mod upgrade;
 mod ustar;

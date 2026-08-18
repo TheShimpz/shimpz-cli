@@ -1,0 +1,439 @@
+name: ${SHIMPZ_PROJECT_NAME:?CLI must pin SHIMPZ_PROJECT_NAME}
+
+services:
+  shimpz-account-egress-init:
+    container_name: shimpz-account-egress-init
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    command: ["account-init"]
+    volumes:
+      - account_egress_capability:/run/shimpz-account-egress:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "0.25"
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 32
+    logging:
+      driver: none
+
+  team:
+    container_name: shimpz-team
+    image: ${SHIMPZ_TEAM_IMAGE:?CLI must pin SHIMPZ_TEAM_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "${SHIMPZ_DOCKER_GID:?CLI must bind the Docker socket group}"
+      - "10016"
+      - "10017"
+      - "10021"
+      - "10022"
+    environment:
+      SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      SHIMPZ_BRAIN_RUNTIME_URL: http://brain:8080
+      SHIMPZ_BRAIN_RUNTIME_TOKEN_FILE: /run/shimpz-brain-runtime/token
+      SHIMPZ_LOCAL_ACTION_JOURNAL_PATH: /var/lib/shimpz-local/action-journal/journal.sqlite3
+      SHIMPZ_LOCAL_CHAT_CONTINUATIONS_STATE_PATH: /var/lib/shimpz-local/chat-continuations/state/continuations.json
+      SHIMPZ_LOCAL_CHAT_CONTINUATIONS_KEY_PATH: /var/lib/shimpz-local/chat-continuations/key/aes256.key
+      SHIMPZ_OAUTH_BROKER_PROXY_HOST: shimpz-account-egress
+      SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
+      SHIMPZ_ASSISTANT_EGRESS_CONTAINER: shimpz-assistant-egress
+      SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /var/lib/shimpz-local/assistant-egress
+    volumes:
+      - ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}:/var/run/docker.sock:rw
+      - controller_token:/run/shimpz-local:rw
+      - controller_audit:/var/log/shimpz-local:rw
+      - controller_storage:/var/lib/shimpz-local/storage:rw
+      - controller_inference:/var/lib/shimpz-local/inference:rw
+      - controller_action_journal:/var/lib/shimpz-local/action-journal:rw
+      - controller_publications:/var/lib/shimpz-local/publications:rw
+      - controller_cosign_trust:/var/lib/shimpz-local/cosign:rw
+      - controller_assistant_integration_state:/var/lib/shimpz-local/assistant-integrations/state:rw
+      - controller_assistant_integration_key:/var/lib/shimpz-local/assistant-integrations/key:rw
+      - controller_chat_continuation_state:/var/lib/shimpz-local/chat-continuations/state:rw
+      - controller_chat_continuation_key:/var/lib/shimpz-local/chat-continuations/key:rw
+      - assistant_egress_policy:/var/lib/shimpz-local/assistant-egress:rw
+      - brain_runtime_token:/run/shimpz-brain-runtime:rw
+      - supervisor_key:/run/shimpz-local-supervisor:ro
+      - account_egress_capability:/run/shimpz-account-egress:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "1.0"
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    stop_grace_period: 15s
+    logging:
+      driver: none
+    depends_on:
+      shimpz-account-egress-init:
+        condition: service_completed_successfully
+      shimpz-assistant-egress:
+        condition: service_started
+      shimpz-assistant-release:
+        condition: service_healthy
+      shimpz-account-egress:
+        condition: service_healthy
+    networks:
+      - control
+      - brain_runtime
+      - account_egress
+      - assistant_release
+
+  shimpz-assistant-egress:
+    container_name: shimpz-assistant-egress
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10005:10005"
+    command: ["assistant"]
+    group_add:
+      - "10017"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.shimpz.local.managed: "1"
+      com.shimpz.local.profile: local-v1
+      com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      com.shimpz.local.kind: assistant-egress
+    environment:
+      SHIMPZ_ASSISTANT_EGRESS_PORT: "8889"
+      SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /policy
+      SHIMPZ_ASSISTANT_EGRESS_AUDIT_LOG: /var/log/assistant-egress/audit.jsonl
+      SHIMPZ_ASSISTANT_EGRESS_MAX_CONCURRENCY: "64"
+      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
+      SHIMPZ_ASSISTANT_EGRESS_LISTEN_BACKLOG: "16"
+    volumes:
+      - assistant_egress_policy:/policy:ro
+      - assistant_egress_audit:/var/log/assistant-egress:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    healthcheck:
+      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "assistant"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "1.0"
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 512
+        hard: 512
+    stop_grace_period: 15s
+    logging:
+      driver: none
+    networks:
+      - assistant_egress_out
+
+  shimpz-assistant-release:
+    container_name: shimpz-assistant-release
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10004:10004"
+    command: ["release"]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.shimpz.local.managed: "1"
+      com.shimpz.local.profile: local-v1
+      com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      com.shimpz.local.kind: assistant-release
+    environment:
+      SHIMPZ_EGRESS_ALLOW: developers.shimpz.com,ghcr.io,tuf-repo-cdn.sigstore.dev,rekor.sigstore.dev,pkg-containers.githubusercontent.com
+      SHIMPZ_EGRESS_AUDIT_LOG: /var/log/assistant-release/audit.jsonl
+      SHIMPZ_EGRESS_MAX_CONCURRENCY: "16"
+      SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "4"
+      SHIMPZ_EGRESS_LISTEN_BACKLOG: "8"
+    volumes:
+      - assistant_release_audit:/var/log/assistant-release:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m
+    healthcheck:
+      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "release"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "0.5"
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    ulimits:
+      nofile:
+        soft: 256
+        hard: 256
+    stop_grace_period: 15s
+    logging:
+      driver: none
+    networks:
+      - assistant_release
+      - assistant_release_out
+
+  shimpz-account-egress:
+    container_name: shimpz-account-egress
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10006:10006"
+    command: ["account"]
+    group_add:
+      - "10022"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.shimpz.local.managed: "1"
+      com.shimpz.local.profile: local-v1
+      com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      com.shimpz.local.kind: account-egress
+    volumes:
+      - account_egress_capability:/run/shimpz-account-egress:ro
+      - account_egress_audit:/var/log/account-egress:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "0.5"
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    ulimits:
+      nofile:
+        soft: 256
+        hard: 256
+    stop_grace_period: 15s
+    depends_on:
+      shimpz-account-egress-init:
+        condition: service_completed_successfully
+    logging:
+      driver: none
+    networks:
+      - account_egress
+      - account_egress_out
+    healthcheck:
+      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "account"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  shimpz-brain-egress:
+    container_name: shimpz-brain-egress
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10001:10001"
+    command: ["brain"]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SHIMPZ_EGRESS_AUDIT_LOG: /var/log/brain-egress/audit.jsonl
+      SHIMPZ_EGRESS_MAX_CONCURRENCY: "64"
+      SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
+      SHIMPZ_EGRESS_LISTEN_BACKLOG: "16"
+    labels:
+      com.shimpz.local.managed: "1"
+      com.shimpz.local.profile: local-v1
+      com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      com.shimpz.local.kind: brain-egress
+    volumes:
+      - brain_egress_audit:/var/log/brain-egress:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "1.0"
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 512
+        hard: 512
+    stop_grace_period: 15s
+    logging:
+      driver: none
+    networks:
+      - brain_egress
+      - brain_egress_out
+    healthcheck:
+      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "brain"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  brain:
+    container_name: shimpz-brain
+    image: ${SHIMPZ_BRAIN_IMAGE:?CLI must pin SHIMPZ_BRAIN_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10001:10001"
+    group_add:
+      - "10016"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      LANGCHAIN_TRACING_V2: "false"
+      LANGSMITH_TRACING: "false"
+      HTTPS_PROXY: http://shimpz-brain-egress:8888
+      HTTP_PROXY: http://shimpz-brain-egress:8888
+      https_proxy: http://shimpz-brain-egress:8888
+      http_proxy: http://shimpz-brain-egress:8888
+      NO_PROXY: localhost,127.0.0.1,::1
+      no_proxy: localhost,127.0.0.1,::1
+      SHIMPZ_BRAIN_RUNTIME_TOKEN_FILE: /run/shimpz-brain-runtime/token
+      SHIMPZ_BRAIN_RUNTIME_STATE: /var/lib/shimpz-brain-runtime/checkpoints.sqlite3
+    volumes:
+      - brain_runtime_token:/run/shimpz-brain-runtime:ro
+      - brain_runtime_state:/var/lib/shimpz-brain-runtime:rw
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "2.0"
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 15s
+    depends_on:
+      team:
+        condition: service_healthy
+      shimpz-brain-egress:
+        condition: service_healthy
+    logging:
+      driver: none
+    networks:
+      - brain_runtime
+      - brain_egress
+
+  admin:
+    container_name: shimpz-admin
+    image: ${SHIMPZ_ADMIN_IMAGE:?CLI must pin SHIMPZ_ADMIN_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "1000:1000"
+    group_add:
+      - "10010"
+      - "10021"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${SHIMPZ_PORT:-7777}:4600"
+    environment:
+      SHIMPZ_ADMIN_PROFILE: local
+      SHIMPZ_TEAM_URL: http://team:7077
+      SHIMPZ_TEAM_TOKEN_FILE: /run/shimpz-local/token
+      SHIMPZ_TEAM_CREDENTIALS_ENABLED: "0"
+      SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
+    volumes:
+      - config:/repo
+      - data:/data
+      - controller_token:/run/shimpz-local:ro
+      - supervisor_key:/run/shimpz-local-supervisor:rw
+      - release_status:/run/shimpz-local-release:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; request=urllib.request.Request('http://127.0.0.1:4600/api/session', method='POST'); urllib.request.urlopen(request, timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+    cpus: "2.0"
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    stop_grace_period: 15s
+    depends_on:
+      team:
+        condition: service_healthy
+      brain:
+        condition: service_healthy
+    logging:
+      driver: none
+    networks:
+      - control
+      - egress
+
+volumes:
+{{SHIMPZ_VOLUME_DEFINITIONS}}
+
+networks:
+  control:
+    driver: bridge
+    internal: true
+  brain_runtime:
+    driver: bridge
+    internal: true
+  brain_egress:
+    driver: bridge
+    internal: true
+  brain_egress_out:
+    driver: bridge
+  assistant_egress_out:
+    driver: bridge
+  assistant_release:
+    driver: bridge
+    internal: true
+  assistant_release_out:
+    driver: bridge
+  account_egress:
+    driver: bridge
+    internal: true
+  account_egress_out:
+    driver: bridge
+  egress:
+    driver: bridge
