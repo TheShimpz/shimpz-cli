@@ -425,7 +425,9 @@ impl<'a> Pool<'a> {
         let mapping = self.mapping_path().metadata().map_err(io_error)?;
         let expected_device = mapping_device_identity(&mapping);
         if device != expected_device || filesystem != "ext4" || target != mount {
-            return Err("encrypted Local storage mount identity is invalid".into());
+            return Err(format!(
+                "encrypted Local storage mount identity is invalid (device {device}, expected {expected_device}; filesystem {filesystem}; target {target}, expected {mount})"
+            ));
         }
         Ok(())
     }
