@@ -55,9 +55,21 @@ impl Tool {
         self.candidates()
             .iter()
             .map(Path::new)
-            .find_map(trusted_executable)
+            .find_map(|path| match self {
+                Self::PowerShell => trusted_windows_executable(path),
+                _ => trusted_executable(path),
+            })
             .ok_or_else(|| format!("required host tool is unavailable: {self:?}"))
     }
+}
+
+fn trusted_windows_executable(path: &Path) -> Option<PathBuf> {
+    let metadata = path.symlink_metadata().ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    (canonical == path).then_some(canonical)
 }
 
 fn trusted_executable(path: &Path) -> Option<PathBuf> {
@@ -214,6 +226,8 @@ fn effective_root() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -239,5 +253,19 @@ mod tests {
             assert!(tool.candidates().iter().all(|path| path.starts_with('/')));
             assert!(tool.candidates().iter().all(|path| !path.contains("..")));
         }
+    }
+
+    #[test]
+    fn windows_acl_tool_does_not_apply_drvfs_unix_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("powershell.exe");
+        std::fs::write(&executable, []).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        assert_eq!(
+            trusted_windows_executable(&executable),
+            Some(executable.clone())
+        );
+        assert_eq!(trusted_executable(&executable), None);
     }
 }
