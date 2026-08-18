@@ -294,7 +294,8 @@ impl Context {
         scheduler::remove(self.profile, &self.paths)?;
         let preserved = self.remove_files()?;
         let suffix = if preserved.is_empty() {
-            "No managed Space data remains; the shimpz command is retained.".to_owned()
+            "No managed Space data remains; the shimpz command and lifecycle lock are retained."
+                .to_owned()
         } else {
             format!("Preserved unrecognized content: {}", preserved.join(", "))
         };
@@ -565,7 +566,6 @@ impl Context {
         self.remove_runtime_files()?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("candidate"))?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("previous"))?;
-        remove_regular_if_present(&self.paths.lock)?;
         let mut preserved = Vec::new();
         if self.paths.home.exists() {
             for entry in fs::read_dir(&self.paths.home).map_err(io_error)? {

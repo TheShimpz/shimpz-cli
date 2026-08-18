@@ -31,8 +31,19 @@ impl Lock {
             .create(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&paths.lock)
             .map_err(|error| format!("could not open the Local lifecycle lock: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("could not inspect the Local lifecycle lock: {error}"))?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.permissions().mode() & 0o777 != 0o600
+        {
+            return Err("the Local lifecycle lock is invalid".into());
+        }
         rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| "another Shimpz lifecycle operation is already running".to_owned())?;
         Ok(Self { file })
@@ -388,6 +399,8 @@ fn io_error(error: std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::space::release::Release;
 
@@ -425,6 +438,20 @@ mod tests {
             })),
             Ok(7777)
         );
+    }
+
+    #[test]
+    fn retains_one_private_lifecycle_lock_inode() {
+        let home = tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        {
+            let _lock = Lock::acquire(&paths).unwrap();
+            let metadata = paths.lock.metadata().unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(metadata.nlink(), 1);
+        }
+        assert!(paths.lock.is_file());
+        let _lock = Lock::acquire(&paths).unwrap();
     }
 
     #[test]
