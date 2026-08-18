@@ -467,10 +467,7 @@ fn validate_managed_endpoint(
     let expected = match profile {
         HostProfile::MacOs => (
             "desktop-linux",
-            format!(
-                "unix://{}",
-                user_home.join(".docker/run/docker.sock").display()
-            ),
+            format!("unix://{}/.docker/run/docker.sock", user_home.display()),
         ),
         HostProfile::Wsl => ("default", "unix:///var/run/docker.sock".to_owned()),
         HostProfile::Linux => return Err("the managed Docker profile is invalid".into()),
