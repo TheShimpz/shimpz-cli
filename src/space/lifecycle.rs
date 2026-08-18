@@ -98,6 +98,13 @@ struct Context {
     scheduled: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdminAttestation {
+    Running { port: u16 },
+    Stopped,
+    Absent,
+}
+
 impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
@@ -325,20 +332,22 @@ impl Context {
         if self.scheduled {
             return Err(reason.into());
         }
-        self.start_admin_if_present();
+        let admin = self.prepare_admin_for_recovery()?;
         let names = inventory.container_names(&self.engine)?;
         let confirmed = recovery_prompt(reason, inventory, &names)?;
         if !confirmed {
             return Err("the corrupt Local Space was preserved; nothing changed".into());
         }
-        let admin_port = recovery_admin_port(&self.paths);
-        let admin_is_live = admin_port.is_some_and(admin_available);
-        if admin_is_live {
-            authenticated_admin_reset(admin_port.expect("checked"))?;
+        let admin_port = match admin {
+            AdminAttestation::Running { port } if admin_available(port) => Some(port),
+            _ => None,
+        };
+        if let Some(port) = admin_port {
+            authenticated_admin_reset(port)?;
         }
         scheduler::remove(self.profile, &self.paths)?;
         let space_id = inventory.space_id.clone();
-        let remaining = if admin_is_live {
+        let remaining = if admin_port.is_some() {
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?
         } else {
             inventory.clone()
@@ -518,32 +527,84 @@ impl Context {
     }
 
     fn start_admin_for_reset(&self) -> Result<(), String> {
-        self.start_admin_if_present();
-        if admin_available(state::read_installed(&self.paths, self.profile)?.port) {
-            Ok(())
-        } else {
-            Err(
-                "the Local Supervisor is unavailable; run shimpz install for bounded recovery"
-                    .into(),
-            )
+        self.start_container_if_present("shimpz-team")?;
+        let mut attestation = self.admin_attestation()?;
+        if attestation == AdminAttestation::Stopped {
+            let status = self.engine.run_status(["start", "shimpz-admin"])?;
+            if !status.success() {
+                return Err("the owned Admin container could not be started".into());
+            }
+            attestation = self.admin_attestation()?;
+        }
+        let expected = state::read_installed(&self.paths, self.profile)?.port;
+        if attestation == (AdminAttestation::Running { port: expected })
+            && admin_available(expected)
+        {
+            return Ok(());
+        }
+        Err("the Local Supervisor is unavailable; run shimpz install for bounded recovery".into())
+    }
+
+    fn prepare_admin_for_recovery(&self) -> Result<AdminAttestation, String> {
+        let mut attestation = self.admin_attestation()?;
+        if attestation == AdminAttestation::Absent {
+            return Ok(attestation);
+        }
+        if self.start_container_if_present("shimpz-team").is_err() {
+            output::info(
+                "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
+            );
+            return Ok(AdminAttestation::Stopped);
+        }
+        if attestation == AdminAttestation::Stopped {
+            let started = self
+                .engine
+                .run_status(["start", "shimpz-admin"])
+                .is_ok_and(|status| status.success());
+            if !started {
+                output::info(
+                    "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
+                );
+                return Ok(AdminAttestation::Stopped);
+            }
+            attestation = self.admin_attestation()?;
+        }
+        Ok(attestation)
+    }
+
+    fn start_container_if_present(&self, name: &str) -> Result<(), String> {
+        let state = self.engine.run_output([
+            "inspect",
+            "--type=container",
+            "--format",
+            "{{.State.Running}}",
+            name,
+        ]);
+        match state.as_deref().map(str::trim) {
+            Err(_) | Ok("true") => Ok(()),
+            Ok("false") => {
+                let status = self.engine.run_status(["start", name])?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("the owned container could not be started: {name}"))
+                }
+            }
+            Ok(_) => Err(format!("the owned container state is malformed: {name}")),
         }
     }
 
-    fn start_admin_if_present(&self) {
-        for name in ["shimpz-team", "shimpz-admin"] {
-            if self
-                .engine
-                .run_output([
-                    "inspect",
-                    "--type=container",
-                    "--format",
-                    "{{.State.Running}}",
-                    name,
-                ])
-                .is_ok_and(|value| value.trim() == "false")
-            {
-                let _ = self.engine.run_status(["start", name]);
-            }
+    fn admin_attestation(&self) -> Result<AdminAttestation, String> {
+        let record = self.engine.run_output([
+            "inspect",
+            "--type=container",
+            "--format",
+            "{{.State.Running}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{json .HostConfig.PortBindings}}",
+            "shimpz-admin",
+        ]);
+        match record {
+            Ok(record) => parse_admin_attestation(&record),
+            Err(_) => Ok(AdminAttestation::Absent),
         }
     }
 
@@ -709,21 +770,65 @@ fn ensure_public_cli(paths: &Paths) -> Result<(), String> {
     symlink(&paths.managed_cli, &paths.public_cli).map_err(io_error)
 }
 
-fn recovery_admin_port(paths: &Paths) -> Option<u16> {
-    let Ok(document) = fs::read_to_string(&paths.environment) else {
-        return None;
-    };
-    if document.len() > 8_192 || document.contains('\r') {
-        return None;
+fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
+    if record.len() > 4_096 || record.contains('\r') {
+        return Err("the owned Admin listener attestation is malformed".into());
     }
-    let values: Vec<_> = document
-        .lines()
-        .filter_map(|line| line.strip_prefix("SHIMPZ_PORT="))
-        .collect();
-    if values.len() != 1 {
-        return None;
+    let mut lines = record.lines();
+    let line = lines
+        .next()
+        .filter(|line| !line.is_empty() && lines.next().is_none())
+        .ok_or_else(|| "the owned Admin listener attestation is malformed".to_owned())?;
+    let fields: Vec<_> = line.splitn(4, '|').collect();
+    if fields.len() != 4 || fields[1] != "shimpz-space" || fields[2] != "admin" {
+        return Err("the owned Admin listener identity is invalid".into());
     }
-    values[0].parse::<u16>().ok().filter(|port| *port >= 1024)
+    let binding_map = serde_json::from_str::<serde_json::Value>(fields[3])
+        .map_err(|_| "the owned Admin listener binding is malformed".to_owned())?;
+    let binding_map = binding_map
+        .as_object()
+        .filter(|bindings| bindings.len() == 1 && bindings.contains_key("4600/tcp"))
+        .ok_or_else(|| "the owned Admin listener binding is invalid".to_owned())?;
+    let bindings = binding_map["4600/tcp"]
+        .as_array()
+        .filter(|bindings| !bindings.is_empty() && bindings.len() <= 2)
+        .ok_or_else(|| "the owned Admin listener binding is invalid".to_owned())?;
+    let mut port = None;
+    let mut ipv4 = false;
+    for binding in bindings {
+        let binding = binding
+            .as_object()
+            .filter(|binding| {
+                binding.len() == 2
+                    && binding.contains_key("HostIp")
+                    && binding.contains_key("HostPort")
+            })
+            .ok_or_else(|| "the owned Admin listener binding is malformed".to_owned())?;
+        let host = binding["HostIp"]
+            .as_str()
+            .filter(|host| matches!(*host, "127.0.0.1" | "::1"))
+            .ok_or_else(|| "the owned Admin listener is not loopback-only".to_owned())?;
+        let current = binding["HostPort"]
+            .as_str()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value >= 1024)
+            .ok_or_else(|| "the owned Admin listener port is invalid".to_owned())?;
+        if port.is_some_and(|expected| expected != current) || (host == "127.0.0.1" && ipv4) {
+            return Err("the owned Admin listener binding is ambiguous".into());
+        }
+        port = Some(current);
+        ipv4 |= host == "127.0.0.1";
+    }
+    if !ipv4 {
+        return Err("the owned Admin listener has no IPv4 loopback binding".into());
+    }
+    match fields[0] {
+        "true" => Ok(AdminAttestation::Running {
+            port: port.expect("a valid binding has a port"),
+        }),
+        "false" => Ok(AdminAttestation::Stopped),
+        _ => Err("the owned Admin container state is malformed".into()),
+    }
 }
 
 fn validate_forward_release(
@@ -981,16 +1086,39 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_one_bounded_recovery_port() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::write(&paths.environment, "SHIMPZ_PORT=7777\n").unwrap();
-        assert_eq!(recovery_admin_port(&paths), Some(7777));
-        fs::write(&paths.environment, "SHIMPZ_PORT=80\n").unwrap();
-        assert_eq!(recovery_admin_port(&paths), None);
-        fs::write(&paths.environment, "SHIMPZ_PORT=7777\nSHIMPZ_PORT=8888\n").unwrap();
-        assert_eq!(recovery_admin_port(&paths), None);
+    fn accepts_only_an_attested_loopback_admin_listener() {
+        assert_eq!(
+            parse_admin_attestation(
+                "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Running { port: 7777 })
+        );
+        assert_eq!(
+            parse_admin_attestation(
+                "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"},{\"HostIp\":\"::1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Running { port: 7777 })
+        );
+        assert_eq!(
+            parse_admin_attestation(
+                "false|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Stopped)
+        );
+        for invalid in [
+            "true|foreign|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|team|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"::1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"80\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"},{\"HostIp\":\"::1\",\"HostPort\":\"8888\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}],\"80/tcp\":[]}",
+            "true|shimpz-space|admin|null",
+            "true|shimpz-space|admin|{}",
+            "maybe|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+        ] {
+            assert!(parse_admin_attestation(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
