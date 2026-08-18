@@ -234,10 +234,10 @@ impl Context {
             ],
         )?;
         if !started.success() {
-            return self.rollback(release, previous);
+            return self.rollback(release, &space_id, previous);
         }
         if let Err(storage_error) = self.validate_started_storage(&space_id) {
-            let rollback = self.rollback(release, previous);
+            let rollback = self.rollback(release, &space_id, previous);
             return match rollback {
                 Ok(outcome) | Err(outcome) => Err(format!("{storage_error}; {outcome}")),
             };
@@ -249,7 +249,7 @@ impl Context {
             .project_release_status(&release.metadata.admin, status.as_bytes())
             .is_err()
         {
-            return self.rollback(release, previous);
+            return self.rollback(release, &space_id, previous);
         }
         remove_backup(previous)?;
         state::write_marker(&self.paths)?;
@@ -464,19 +464,24 @@ impl Context {
     fn rollback(
         &self,
         release: &ResolvedRelease,
+        space_id: &str,
         backup: Option<Backup>,
     ) -> Result<String, String> {
-        let memory_error = state::remember_failed_release(&self.paths, release).err();
         let _ = self
             .engine
             .compose(&self.paths, ["down", "--remove-orphans"]);
         let Some(backup) = backup else {
-            state::write_status(&self.paths, release, "rollback-needed")?;
-            if memory_error.is_some() {
-                return Err("the fresh Local release failed and could not be remembered".into());
-            }
-            return Err("the fresh Local release did not become healthy".into());
+            return match self.compensate_fresh_failure(space_id) {
+                Ok(()) => Err(
+                    "the fresh Local release did not become healthy; its partial state was removed, so installation can be retried"
+                        .into(),
+                ),
+                Err(cleanup) => Err(format!(
+                    "the fresh Local release did not become healthy; compensation also failed: {cleanup}"
+                )),
+            };
         };
+        let memory_error = state::remember_failed_release(&self.paths, release).err();
         fs::rename(&backup.compose, &self.paths.compose).map_err(io_error)?;
         fs::rename(&backup.environment, &self.paths.environment).map_err(io_error)?;
         let installed = state::read_installed(&self.paths, self.profile)?;
@@ -524,6 +529,19 @@ impl Context {
         } else {
             Err("the update and its rollback both failed".into())
         }
+    }
+
+    fn compensate_fresh_failure(&self, space_id: &str) -> Result<(), String> {
+        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        inventory.remove(&self.engine)?;
+        let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        if !remaining.empty() {
+            return Err("managed Docker residue remains after fresh-install compensation".into());
+        }
+        if self.profile == HostProfile::Linux && self.paths.security.exists() {
+            linux::reset(&self.paths, Some(space_id))?;
+        }
+        self.remove_runtime_files()
     }
 
     fn start_admin_for_reset(&self) -> Result<(), String> {
