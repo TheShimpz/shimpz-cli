@@ -1686,6 +1686,7 @@ dependencies = [
  "crc32fast",
  "libc",
  "memsafe",
+ "nix",
  "rpassword",
  "rustix",
  "self_update",

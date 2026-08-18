@@ -9,6 +9,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use memsafe::Secret;
+use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustix::termios::{LocalModes, OptionalActions, QueueSelector, Termios};
 
 use super::evidence::luks_dump_valid;
@@ -78,6 +79,10 @@ struct EchoRestoration<'a> {
     original: Option<Termios>,
 }
 
+struct SignalMaskRestoration {
+    original: Option<SigSet>,
+}
+
 impl EchoRestoration<'_> {
     fn restore(mut self) -> Result<(), String> {
         let original = self.original.as_ref().expect("terminal state is present");
@@ -96,6 +101,48 @@ impl Drop for EchoRestoration<'_> {
     }
 }
 
+impl SignalMaskRestoration {
+    fn block() -> Result<Self, String> {
+        let blocked = termination_signals();
+        let original = blocked
+            .thread_swap_mask(SigmaskHow::SIG_BLOCK)
+            .map_err(|_| "encrypted storage terminal signals could not be blocked".to_owned())?;
+        Ok(Self {
+            original: Some(original),
+        })
+    }
+
+    fn restore(mut self) -> Result<(), String> {
+        self.original
+            .as_ref()
+            .expect("signal mask is present")
+            .thread_set_mask()
+            .map_err(|_| "encrypted storage terminal signals could not be restored".to_owned())?;
+        self.original.take();
+        Ok(())
+    }
+}
+
+impl Drop for SignalMaskRestoration {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.take() {
+            let _ = original.thread_set_mask();
+        }
+    }
+}
+
+fn termination_signals() -> SigSet {
+    [
+        Signal::SIGHUP,
+        Signal::SIGINT,
+        Signal::SIGQUIT,
+        Signal::SIGTERM,
+        Signal::SIGTSTP,
+    ]
+    .into_iter()
+    .collect()
+}
+
 impl LockedPassphrase {
     fn prompt(label: &str) -> Result<Self, String> {
         let tty = OpenOptions::new()
@@ -108,6 +155,7 @@ impl LockedPassphrase {
             .write_all(label.as_bytes())
             .and_then(|()| output.flush())
             .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
+        let signals = SignalMaskRestoration::block()?;
         let original = rustix::termios::tcgetattr(&tty)
             .map_err(|_| "encrypted storage terminal state is unavailable".to_owned())?;
         let mut hidden = original.clone();
@@ -126,6 +174,7 @@ impl LockedPassphrase {
             .write_all(b"\n")
             .and_then(|()| output.flush())
             .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
+        signals.restore()?;
         result
     }
 
@@ -989,6 +1038,22 @@ mod tests {
         assert!(first.matches(&mut matching).unwrap());
         assert!(!first.matches(&mut different).unwrap());
         assert!(!first.matches(&mut shorter).unwrap());
+    }
+
+    #[test]
+    fn blocks_terminal_termination_until_echo_is_restored() {
+        let signals = termination_signals();
+        for signal in [
+            Signal::SIGHUP,
+            Signal::SIGINT,
+            Signal::SIGQUIT,
+            Signal::SIGTERM,
+            Signal::SIGTSTP,
+        ] {
+            assert!(signals.contains(signal));
+        }
+        assert!(!signals.contains(Signal::SIGKILL));
+        assert!(!signals.contains(Signal::SIGSTOP));
     }
 
     #[test]
