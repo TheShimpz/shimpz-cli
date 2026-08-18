@@ -2,14 +2,14 @@
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use memsafe::Secret;
-use zeroize::Zeroizing;
+use rustix::termios::{LocalModes, OptionalActions, QueueSelector, Termios};
 
 use super::evidence::luks_dump_valid;
 use crate::space::command::{self, Tool};
@@ -17,6 +17,7 @@ use crate::space::paths::{Paths, STORAGE_MARKER};
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PASSPHRASE_BYTES: usize = 1_024;
+const PASSPHRASE_BUFFER_BYTES: usize = MAX_PASSPHRASE_BYTES + 1;
 
 macro_rules! live_trace {
     ($stage:literal) => {
@@ -68,30 +69,98 @@ pub(crate) struct Pool<'a> {
 }
 
 struct LockedPassphrase {
-    secret: Secret<MAX_PASSPHRASE_BYTES>,
+    secret: Secret<PASSPHRASE_BUFFER_BYTES>,
     length: usize,
+}
+
+struct EchoRestoration<'a> {
+    tty: &'a fs::File,
+    original: Option<Termios>,
+}
+
+impl EchoRestoration<'_> {
+    fn restore(mut self) -> Result<(), String> {
+        let original = self.original.as_ref().expect("terminal state is present");
+        rustix::termios::tcsetattr(self.tty, OptionalActions::Now, original)
+            .map_err(|_| "encrypted storage terminal state could not be restored".to_owned())?;
+        self.original.take();
+        Ok(())
+    }
+}
+
+impl Drop for EchoRestoration<'_> {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.take() {
+            let _ = rustix::termios::tcsetattr(self.tty, OptionalActions::Now, &original);
+        }
+    }
 }
 
 impl LockedPassphrase {
     fn prompt(label: &str) -> Result<Self, String> {
-        let input = Zeroizing::new(
-            rpassword::prompt_password(label)
-                .map_err(|_| "could not read the encrypted storage passphrase".to_owned())?,
-        );
-        Self::from_input(input)
+        let tty = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| "encrypted storage requires a terminal".to_owned())?;
+        let mut output = &tty;
+        output
+            .write_all(label.as_bytes())
+            .and_then(|()| output.flush())
+            .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
+        let original = rustix::termios::tcgetattr(&tty)
+            .map_err(|_| "encrypted storage terminal state is unavailable".to_owned())?;
+        let mut hidden = original.clone();
+        hidden
+            .local_modes
+            .remove(LocalModes::ECHO | LocalModes::ECHONL);
+        rustix::termios::tcsetattr(&tty, OptionalActions::Now, &hidden)
+            .map_err(|_| "encrypted storage terminal could not disable echo".to_owned())?;
+        let restoration = EchoRestoration {
+            tty: &tty,
+            original: Some(original),
+        };
+        let result = Self::read_from(&tty);
+        restoration.restore()?;
+        output
+            .write_all(b"\n")
+            .and_then(|()| output.flush())
+            .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
+        result
     }
 
-    fn from_input(mut input: Zeroizing<String>) -> Result<Self, String> {
-        validate_passphrase(input.as_bytes())?;
-        let length = input.len();
-        let source = std::mem::take(&mut *input).into_bytes();
-        match Secret::from_bytes(source) {
-            Ok(secret) => Ok(Self { secret, length }),
-            Err((source, _)) => {
-                drop(Zeroizing::new(source));
-                Err("encrypted storage passphrase memory could not be protected".into())
+    fn read_from(tty: &fs::File) -> Result<Self, String> {
+        let mut secret = Secret::new_with(|_| {})
+            .map_err(|_| "encrypted storage passphrase memory could not be protected".to_owned())?;
+        let length = {
+            let mut buffer = secret
+                .write()
+                .map_err(|_| "encrypted storage passphrase memory is unavailable".to_owned())?;
+            let mut reader = tty;
+            let count = reader
+                .read(&mut buffer[..])
+                .map_err(|_| "could not read the encrypted storage passphrase".to_owned())?;
+            match terminated_passphrase_length(&buffer[..count]) {
+                Ok(length) => {
+                    buffer[length..count].fill(0);
+                    length
+                }
+                Err(error) => {
+                    let _ = rustix::termios::tcflush(tty, QueueSelector::IFlush);
+                    return Err(error);
+                }
             }
-        }
+        };
+        Ok(Self { secret, length })
+    }
+
+    #[cfg(test)]
+    fn from_test_input(value: &[u8]) -> Result<Self, String> {
+        validate_passphrase(value)?;
+        let length = value.len();
+        let secret = Secret::new_with(|buffer| buffer[..length].copy_from_slice(value))
+            .map_err(|_| "encrypted storage passphrase memory could not be protected".to_owned())?;
+        Ok(Self { secret, length })
     }
 
     fn matches(&mut self, other: &mut Self) -> Result<bool, String> {
@@ -126,6 +195,18 @@ impl LockedPassphrase {
             Err("encrypted Local storage operation failed".into())
         }
     }
+}
+
+fn terminated_passphrase_length(value: &[u8]) -> Result<usize, String> {
+    let without_newline = value
+        .strip_suffix(b"\n")
+        .or_else(|| value.strip_suffix(b"\r"))
+        .ok_or_else(|| "encrypted storage passphrase is too long".to_owned())?;
+    let passphrase = without_newline
+        .strip_suffix(b"\r")
+        .unwrap_or(without_newline);
+    validate_passphrase(passphrase)?;
+    Ok(passphrase.len())
 }
 
 fn validate_passphrase(value: &[u8]) -> Result<(), String> {
@@ -788,15 +869,18 @@ mod tests {
             assert!(validate_passphrase(&invalid).is_err());
         }
         assert!(validate_passphrase(&vec![b'a'; MAX_PASSPHRASE_BYTES]).is_ok());
+        assert_eq!(terminated_passphrase_length(b"correct horse\n"), Ok(13));
+        assert_eq!(terminated_passphrase_length(b"correct horse\r\n"), Ok(13));
+        assert!(terminated_passphrase_length(b"unterminated").is_err());
 
-        let mut first = LockedPassphrase::from_input(Zeroizing::new("correct horse".into()))
+        let mut first = LockedPassphrase::from_test_input(b"correct horse")
             .expect("passphrase should be locked");
-        let mut matching = LockedPassphrase::from_input(Zeroizing::new("correct horse".into()))
+        let mut matching = LockedPassphrase::from_test_input(b"correct horse")
             .expect("passphrase should be locked");
-        let mut different = LockedPassphrase::from_input(Zeroizing::new("wrong battery".into()))
+        let mut different = LockedPassphrase::from_test_input(b"wrong battery")
             .expect("passphrase should be locked");
-        let mut shorter = LockedPassphrase::from_input(Zeroizing::new("short".into()))
-            .expect("passphrase should be locked");
+        let mut shorter =
+            LockedPassphrase::from_test_input(b"short").expect("passphrase should be locked");
         assert!(first.matches(&mut matching).unwrap());
         assert!(!first.matches(&mut different).unwrap());
         assert!(!first.matches(&mut shorter).unwrap());
