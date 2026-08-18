@@ -511,7 +511,17 @@ impl Context {
                 "--remove-orphans",
             ],
         )?;
-        state::write_status(&self.paths, release, "rollback-needed")?;
+        let status = state::write_status(&self.paths, release, "rollback-needed")?;
+        if restored.success()
+            && self
+                .engine
+                .project_release_status(&release.metadata.admin, status.as_bytes())
+                .is_err()
+        {
+            output::warning(
+                "the previous release was restored, but Admin could not receive the rollback status",
+            );
+        }
         if memory_error.is_some() {
             scheduler::remove(self.profile, &self.paths)?;
             return Err(
