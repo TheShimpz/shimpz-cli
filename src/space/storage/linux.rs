@@ -777,7 +777,11 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
         let Ok(backing) = fs::read_to_string(backing) else {
             continue;
         };
-        let Ok(backing) = PathBuf::from(backing.trim_end()).canonicalize() else {
+        let backing = backing.trim_end();
+        if deleted_backing_is_pool(backing, &paths.pool_image) {
+            return Err("the encrypted Local storage has a deleted open backing file".into());
+        }
+        let Ok(backing) = PathBuf::from(backing).canonicalize() else {
             continue;
         };
         if backing != pool {
@@ -803,6 +807,12 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
     identities.sort();
     identities.dedup();
     Ok(identities)
+}
+
+fn deleted_backing_is_pool(value: &str, pool_image: &Path) -> bool {
+    value
+        .strip_suffix(" (deleted)")
+        .is_some_and(|path| Path::new(path) == pool_image)
 }
 
 fn validate_discovered_mapping(
@@ -1123,6 +1133,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_the_owned_pool_when_sysfs_reports_a_deleted_backing() {
+        let pool = Path::new("/home/ada/.shimpz/security/local-data.luks");
+        assert!(deleted_backing_is_pool(
+            "/home/ada/.shimpz/security/local-data.luks (deleted)",
+            pool
+        ));
+        assert!(!deleted_backing_is_pool(
+            "/home/other/local-data.luks (deleted)",
+            pool
+        ));
+        assert!(!deleted_backing_is_pool(
+            "/home/ada/.shimpz/security/local-data.luks",
+            pool
+        ));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires real LUKS, loop, mount, sudo, and a controlling terminal"]
@@ -1140,7 +1167,7 @@ mod tests {
         Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())]).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
-        reset(&paths, Some(pool.space_id)).unwrap();
+        reset(&paths, None).unwrap();
         reset(&paths, None).unwrap();
         assert!(!paths.security.exists());
     }
