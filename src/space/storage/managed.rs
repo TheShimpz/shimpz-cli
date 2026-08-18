@@ -31,8 +31,16 @@ pub(crate) fn verify(profile: HostProfile, paths: &Paths) -> Result<(), String> 
 }
 
 fn verify_macos(paths: &Paths) -> Result<(), String> {
-    let active = command::status(Tool::FileVault, ["isactive"])?;
-    if !active.success() {
+    verify_macos_with(paths, || {
+        command::status(Tool::FileVault, ["isactive"]).map(|status| status.success())
+    })
+}
+
+fn verify_macos_with<F>(paths: &Paths, filevault_active: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<bool, String>,
+{
+    if !filevault_active()? {
         return Err("FileVault is not active".into());
     }
     verify_macos_disk(paths)
@@ -92,6 +100,16 @@ mod tests {
         assert!(!BITLOCKER_QUERY.contains("SHIMPZ"));
     }
 
+    #[test]
+    fn macos_admission_denies_inactive_filevault_before_disk_inspection() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        assert_eq!(
+            verify_macos_with(&paths, || Ok(false)),
+            Err("FileVault is not active".to_owned())
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires the native macOS filesystem layout"]
@@ -103,7 +121,7 @@ mod tests {
             .join("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw");
         std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
         std::fs::write(&disk, []).unwrap();
-        verify_macos_disk(&paths).unwrap();
+        verify_macos_with(&paths, || Ok(true)).unwrap();
     }
 
     #[cfg(target_os = "windows")]
