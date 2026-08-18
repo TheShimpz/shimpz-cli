@@ -279,7 +279,7 @@ impl Context {
         }
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
-        if self.profile == HostProfile::Linux {
+        if self.profile == HostProfile::Linux && self.paths.security.exists() {
             let space_id = installed
                 .map(|current| current.space_id)
                 .or(inventory.space_id)
@@ -289,7 +289,7 @@ impl Context {
         scheduler::remove(self.profile, &self.paths)?;
         let preserved = self.remove_files()?;
         let suffix = if preserved.is_empty() {
-            "No managed files remain.".to_owned()
+            "No managed Space data remains; the shimpz command is retained.".to_owned()
         } else {
             format!("Preserved unrecognized content: {}", preserved.join(", "))
         };

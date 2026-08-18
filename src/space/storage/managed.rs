@@ -35,6 +35,10 @@ fn verify_macos(paths: &Paths) -> Result<(), String> {
     if !active.success() {
         return Err("FileVault is not active".into());
     }
+    verify_macos_disk(paths)
+}
+
+fn verify_macos_disk(paths: &Paths) -> Result<(), String> {
     let disk = paths
         .home
         .parent()
@@ -86,5 +90,42 @@ mod tests {
         assert!(BITLOCKER_QUERY.contains("Get-BitLockerVolume -MountPoint $root"));
         assert!(!BITLOCKER_QUERY.contains("Invoke-Expression"));
         assert!(!BITLOCKER_QUERY.contains("SHIMPZ"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the native macOS filesystem layout"]
+    fn native_macos_proves_the_exact_docker_disk_filesystem() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        let disk = home
+            .path()
+            .join("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw");
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, []).unwrap();
+        verify_macos_disk(&paths).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires native Windows PowerShell and the BitLocker provider"]
+    fn native_windows_executes_the_exact_bitlocker_query_and_parser() {
+        let local = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA is required");
+        let disk = Path::new(&local).join("Docker/wsl/data/docker_data.vhdx");
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        if !disk.exists() {
+            std::fs::write(&disk, []).unwrap();
+        }
+        let result = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", BITLOCKER_QUERY])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let record = String::from_utf8(result.stdout).unwrap();
+        let fields: Vec<_> = record.trim().split('|').collect();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0], "shimpz-bitlocker-v1");
+        let expected = fields[1] == "FullyEncrypted" && fields[2] == "On" && fields[3] == "100";
+        assert_eq!(bitlocker_record_valid(&record), expected);
     }
 }

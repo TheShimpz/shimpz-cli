@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::evidence::luks_dump_valid;
@@ -70,11 +70,15 @@ impl<'a> Pool<'a> {
             return Ok(Admission::Verified);
         }
         self.validate_metadata()?;
-        if self.mounted_valid().is_ok() {
+        if scheduled {
+            if !self.is_mounted()? {
+                return Ok(Admission::Locked);
+            }
+            self.mounted_valid_unprivileged()?;
             return Ok(Admission::Verified);
         }
-        if scheduled {
-            return Ok(Admission::Locked);
+        if self.mounted_valid().is_ok() {
+            return Ok(Admission::Verified);
         }
         command::authorize()?;
         if self.mapping_path().exists() {
@@ -256,18 +260,24 @@ impl<'a> Pool<'a> {
         }
         let expected_document = fs::read_to_string(&self.paths.pool_uuid).map_err(io_error)?;
         let expected = one_line(&expected_document, "pool UUID")?;
-        let actual_document = Self::luks_output([
-            OsString::from("luksUUID"),
-            self.paths.pool_image.as_os_str().to_owned(),
-        ])?;
+        let actual_document = command::output(
+            Tool::Luks,
+            [
+                OsString::from("luksUUID"),
+                self.paths.pool_image.as_os_str().to_owned(),
+            ],
+        )?;
         let actual = one_line(&actual_document, "pool UUID")?;
         if expected != actual {
             return Err("encrypted Local storage UUID does not match".into());
         }
-        let dump = Self::luks_output([
-            OsString::from("luksDump"),
-            self.paths.pool_image.as_os_str().to_owned(),
-        ])?;
+        let dump = command::output(
+            Tool::Luks,
+            [
+                OsString::from("luksDump"),
+                self.paths.pool_image.as_os_str().to_owned(),
+            ],
+        )?;
         if !luks_dump_valid(&dump) {
             return Err("encrypted Local storage parameters are invalid".into());
         }
@@ -306,6 +316,16 @@ impl<'a> Pool<'a> {
 
     fn mounted_valid(&self) -> Result<(), String> {
         self.validate_mount()?;
+        self.validate_volume_layout()
+    }
+
+    fn mounted_valid_unprivileged(&self) -> Result<(), String> {
+        self.validate_mapping_unprivileged()?;
+        self.validate_mount_identity()?;
+        self.validate_volume_layout()
+    }
+
+    fn validate_volume_layout(&self) -> Result<(), String> {
         let metadata = self.paths.pool_mount.metadata().map_err(io_error)?;
         if metadata.uid() != rustix::process::getuid().as_raw()
             || metadata.gid() != rustix::process::getgid().as_raw()
@@ -334,6 +354,56 @@ impl<'a> Pool<'a> {
 
     fn validate_mount(&self) -> Result<(), String> {
         self.validate_mapping()?;
+        self.validate_mount_identity()
+    }
+
+    fn validate_mapping_unprivileged(&self) -> Result<(), String> {
+        self.validate_metadata()?;
+        let mapping = self.mapping_path().metadata().map_err(io_error)?;
+        if !mapping.file_type().is_block_device() {
+            return Err("encrypted Local storage mapping is not a block device".into());
+        }
+        let major = rustix::fs::major(mapping.rdev());
+        let minor = rustix::fs::minor(mapping.rdev());
+        let sys_device = PathBuf::from(format!("/sys/dev/block/{major}:{minor}"));
+        let name_document = fs::read_to_string(sys_device.join("dm/name")).map_err(io_error)?;
+        if one_line(&name_document, "device-mapper name")? != self.mapping_name() {
+            return Err("encrypted Local storage mapping identity is invalid".into());
+        }
+        let mut slaves = fs::read_dir(sys_device.join("slaves")).map_err(io_error)?;
+        let slave = slaves
+            .next()
+            .transpose()
+            .map_err(io_error)?
+            .ok_or_else(|| "encrypted Local storage mapping has no loop device".to_owned())?;
+        if slaves.next().transpose().map_err(io_error)?.is_some() {
+            return Err("encrypted Local storage mapping has ambiguous backing".into());
+        }
+        let slave = slave
+            .file_name()
+            .into_string()
+            .ok()
+            .filter(|value| {
+                value.strip_prefix("loop").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            })
+            .ok_or_else(|| {
+                "encrypted Local storage mapping has invalid loop identity".to_owned()
+            })?;
+        let backing_document =
+            fs::read_to_string(format!("/sys/class/block/{slave}/loop/backing_file"))
+                .map_err(io_error)?;
+        let backing = PathBuf::from(one_line(&backing_document, "loop backing file")?);
+        if backing.canonicalize().map_err(io_error)?
+            != self.paths.pool_image.canonicalize().map_err(io_error)?
+        {
+            return Err("encrypted Local storage mapping has foreign backing".into());
+        }
+        Ok(())
+    }
+
+    fn validate_mount_identity(&self) -> Result<(), String> {
         let mount = self.paths.pool_mount.to_string_lossy();
         let device_document =
             command::output(Tool::Findmnt, ["-rn", "-M", &mount, "-o", "MAJ:MIN"])?;
@@ -595,5 +665,36 @@ mod tests {
         for (index, spec) in VOLUME_SPECS.iter().enumerate() {
             assert_eq!(spec.0, crate::space::graph::VOLUME_NAMES[index]);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires real LUKS, loop, mount, sudo, and a controlling terminal"]
+    fn live_pool_provisions_locks_reopens_and_resets_idempotently() {
+        let home = std::env::var_os("SHIMPZ_LINUX_STORAGE_TEST_HOME")
+            .map(PathBuf::from)
+            .expect("SHIMPZ_LINUX_STORAGE_TEST_HOME is required");
+        fs::create_dir_all(&home).unwrap();
+        let paths = Paths::under(&home).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let pool = Pool::new(&paths, "space-0123456789abcdef01234567").unwrap();
+        assert_eq!(pool.ensure(true, false).unwrap(), Admission::Verified);
+        pool.validate_mount().unwrap();
+        Pool::root(
+            Tool::Umount,
+            [paths.pool_mount.as_os_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        Pool::cryptsetup(
+            [OsString::from("close"), OsString::from(pool.mapping_name())],
+            false,
+        )
+        .unwrap();
+        assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
+        assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
+        pool.reset().unwrap();
+        pool.reset().unwrap();
+        assert!(!paths.security.exists());
     }
 }
