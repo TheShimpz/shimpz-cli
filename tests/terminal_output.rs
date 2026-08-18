@@ -12,6 +12,41 @@ fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
 
+fn stdout(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+#[test]
+fn help_exposes_the_resource_first_assistant_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(help.contains("shimpz assistant run <action-id>"));
+    assert!(help.contains("shimpz assistant install <source-digest>"));
+    assert!(!help.contains("shimpz test"));
+    assert!(!help.contains("shimpz install assistant"));
+}
+
+#[test]
+fn retired_assistant_spellings_fail_at_the_process_boundary() {
+    for arguments in [
+        &["test", "hello-world"][..],
+        &["install", "assistant"][..],
+        &["assistant", "test", "hello-world"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+            .args(arguments)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+    }
+}
+
 #[test]
 fn redirected_diagnostics_are_plain_and_keep_text_labels() {
     let output = invalid_command()
@@ -53,7 +88,7 @@ fn no_color_takes_priority_over_forced_color() {
 #[test]
 fn untrusted_diagnostics_cannot_inject_terminal_controls() {
     let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
-        .args(["new", "assistant", "demo", "--\u{1b}[2J"])
+        .args(["assistant", "new", "demo", "--\u{1b}[2J"])
         .env("NO_COLOR", "1")
         .output()
         .unwrap();

@@ -47,12 +47,12 @@ jobs:
           cargo build --locked
           bin="target/debug/shimpz"
           test "${RUNNER_OS}" = "Windows" && bin="${bin}.exe"
-          "${bin}" check --project tests/fixtures/assistant
-          test "$("${bin}" test greet --project tests/fixtures/assistant --input '{"name":"Ada"}')" = '{"message":"Hello, Ada"}'
+          "${bin}" assistant check --project tests/fixtures/assistant
+          test "$("${bin}" assistant run greet --project tests/fixtures/assistant --input '{"name":"Ada"}')" = '{"message":"Hello, Ada"}'
           export SHIMPZ_INTEGRATION_CLOUDFLARE=smoke-token-0123
-          # shimpz test report exposes only a non-secret derived token length.
-          test "$("${bin}" test report --project tests/fixtures/assistant --input '{}')" = '{"token_length":16}'
-          if env -u SHIMPZ_INTEGRATION_CLOUDFLARE "${bin}" test report --project tests/fixtures/assistant --input '{}' 2>error.log; then
+          # shimpz assistant run report exposes only a non-secret derived token length.
+          test "$("${bin}" assistant run report --project tests/fixtures/assistant --input '{}')" = '{"token_length":16}'
+          if env -u SHIMPZ_INTEGRATION_CLOUDFLARE "${bin}" assistant run report --project tests/fixtures/assistant --input '{}' 2>error.log; then
             echo 'expected the missing-integration failure' >&2
             exit 1
           fi

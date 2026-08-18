@@ -3,35 +3,40 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) const USAGE: &str =
-    "Usage: shimpz <auth|new|develop|check|test|publish|install|upgrade> [options]";
+pub(crate) const USAGE: &str = "Usage: shimpz <assistant|auth|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
 
 Usage:
+  shimpz assistant new <name> [--language python]
+  shimpz assistant develop <codex|claude> [path] [--yolo]
+  shimpz assistant check [--project <path>]
+  shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]
+  shimpz assistant publish --visibility <private|public> [--project <path>]
+  shimpz assistant install <source-digest> [--team <team-id>]
   shimpz auth [login|status|logout]
-  shimpz new assistant <name> [--language python]
-  shimpz develop <codex|claude> [path] [--yolo]
-  shimpz check [--project <path>]
-  shimpz test <action> [--input <json> | --input-file <path>] [--project <path>]
-  shimpz publish --visibility <private|public> [--project <path>]
-  shimpz install assistant <source-hash> [--team <team-id>]
   shimpz upgrade
   shimpz --help
   shimpz --version
 ";
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum Action {
+pub(crate) enum Invocation {
     Help,
     Version,
-    Run(Command),
+    Execute(Command),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Command {
     Auth(AuthAction),
-    NewAssistant {
+    Assistant(AssistantCommand),
+    Upgrade,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum AssistantCommand {
+    New {
         name: String,
     },
     Develop {
@@ -42,7 +47,7 @@ pub(crate) enum Command {
     Check {
         project: PathBuf,
     },
-    Test {
+    Run {
         project: PathBuf,
         action: String,
         input: Input,
@@ -51,11 +56,10 @@ pub(crate) enum Command {
         project: PathBuf,
         visibility: PublicationVisibility,
     },
-    InstallAssistant {
+    Install {
         source_digest: String,
         team: Option<String>,
     },
-    Upgrade,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,32 +97,43 @@ pub(crate) enum Input {
     Stdin,
 }
 
-pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
+pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, String> {
     let values = arguments
         .into_iter()
         .map(unicode)
         .collect::<Result<Vec<_>, _>>()?;
     let Some((command, rest)) = values.split_first() else {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     };
     match command.as_str() {
-        "-h" | "--help" | "help" => Ok(Action::Help),
-        "-V" | "--version" | "version" => Ok(Action::Version),
+        "-h" | "--help" | "help" => Ok(Invocation::Help),
+        "-V" | "--version" | "version" => Ok(Invocation::Version),
+        "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
-        "new" => parse_new(rest),
-        "develop" => parse_develop(rest),
-        "check" => parse_check(rest),
-        "test" => parse_test(rest),
-        "publish" => parse_publish(rest),
-        "install" => parse_install(rest),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
 }
 
-fn parse_develop(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
+    let Some((operation, rest)) = arguments.split_first() else {
+        return Err("assistant requires an operation".into());
+    };
+    match operation.as_str() {
+        "-h" | "--help" | "help" => Ok(Invocation::Help),
+        "new" => parse_assistant_new(rest),
+        "develop" => parse_assistant_develop(rest),
+        "check" => parse_assistant_check(rest),
+        "run" => parse_assistant_run(rest),
+        "publish" => parse_assistant_publish(rest),
+        "install" => parse_assistant_install(rest),
+        _ => Err("unknown assistant operation".into()),
+    }
+}
+
+fn parse_assistant_develop(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
     let Some((agent, options)) = arguments.split_first() else {
         return Err("develop requires codex or claude".into());
@@ -144,37 +159,30 @@ fn parse_develop(arguments: &[String]) -> Result<Action, String> {
             project = Some(PathBuf::from(option));
         }
     }
-    Ok(Action::Run(Command::Develop {
-        agent,
-        project: project.unwrap_or_else(|| PathBuf::from(".")),
-        yolo,
-    }))
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Develop {
+            agent,
+            project: project.unwrap_or_else(|| PathBuf::from(".")),
+            yolo,
+        },
+    )))
 }
 
-fn parse_auth(arguments: &[String]) -> Result<Action, String> {
+fn parse_auth(arguments: &[String]) -> Result<Invocation, String> {
     let action = match arguments {
         [] => AuthAction::Login,
         [action] if action == "login" => AuthAction::Login,
         [action] if action == "status" => AuthAction::Status,
         [action] if action == "logout" => AuthAction::Logout,
-        [option] if option == "--help" || option == "-h" => return Ok(Action::Help),
+        [option] if option == "--help" || option == "-h" => return Ok(Invocation::Help),
         _ => return Err("auth accepts login, status, or logout".into()),
     };
-    Ok(Action::Run(Command::Auth(action)))
+    Ok(Invocation::Execute(Command::Auth(action)))
 }
 
-fn parse_new(arguments: &[String]) -> Result<Action, String> {
-    match arguments.split_first() {
-        Some((option, _)) if option == "--help" || option == "-h" => Ok(Action::Help),
-        Some((resource, rest)) if resource == "assistant" => parse_new_assistant(rest),
-        Some(_) => Err("new only supports assistant".into()),
-        None => Err("new requires a resource".into()),
-    }
-}
-
-fn parse_new_assistant(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant_new(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
     let mut name = None;
     let mut language = None;
@@ -192,15 +200,17 @@ fn parse_new_assistant(arguments: &[String]) -> Result<Action, String> {
         } else if argument.starts_with('-') {
             return Err(format!("unknown option {argument}"));
         } else if name.replace(argument.clone()).is_some() {
-            return Err("new assistant accepts one name".into());
+            return Err("assistant new accepts one name".into());
         }
         index += 1;
     }
-    let name = name.ok_or_else(|| "new assistant requires a name".to_owned())?;
+    let name = name.ok_or_else(|| "assistant new requires a name".to_owned())?;
     if !valid_assistant_name(&name) {
         return Err("Assistant name is invalid".into());
     }
-    Ok(Action::Run(Command::NewAssistant { name }))
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::New { name },
+    )))
 }
 
 fn set_language(language: &mut Option<String>, value: &str) -> Result<(), String> {
@@ -213,20 +223,22 @@ fn set_language(language: &mut Option<String>, value: &str) -> Result<(), String
     Ok(())
 }
 
-fn parse_check(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant_check(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
     let project = project_option(arguments)?;
-    Ok(Action::Run(Command::Check { project }))
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Check { project },
+    )))
 }
 
-fn parse_test(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant_run(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
     let Some(action) = arguments.first().filter(|value| !value.starts_with('-')) else {
-        return Err("test requires an Action id".into());
+        return Err("assistant run requires an Action id".into());
     };
     if !valid_action_id(action) {
         return Err("Action id is invalid".into());
@@ -260,24 +272,26 @@ fn parse_test(arguments: &[String]) -> Result<Action, String> {
         }
         index += 2;
     }
-    Ok(Action::Run(Command::Test {
-        project,
-        action: action.clone(),
-        input: input.unwrap_or_else(|| Input::Inline("{}".into())),
-    }))
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Run {
+            project,
+            action: action.clone(),
+            input: input.unwrap_or_else(|| Input::Inline("{}".into())),
+        },
+    )))
 }
 
-fn parse_upgrade(arguments: &[String]) -> Result<Action, String> {
+fn parse_upgrade(arguments: &[String]) -> Result<Invocation, String> {
     match arguments {
-        [] => Ok(Action::Run(Command::Upgrade)),
-        [option] if option == "--help" || option == "-h" => Ok(Action::Help),
+        [] => Ok(Invocation::Execute(Command::Upgrade)),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
         _ => Err("upgrade accepts no options".into()),
     }
 }
 
-fn parse_publish(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant_publish(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
     let mut project = PathBuf::from(".");
     let mut project_seen = false;
@@ -305,40 +319,39 @@ fn parse_publish(arguments: &[String]) -> Result<Action, String> {
         }
         index += 2;
     }
-    let visibility = visibility.ok_or_else(|| "publish requires --visibility".to_owned())?;
-    Ok(Action::Run(Command::Publish {
-        project,
-        visibility,
-    }))
+    let visibility =
+        visibility.ok_or_else(|| "assistant publish requires --visibility".to_owned())?;
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Publish {
+            project,
+            visibility,
+        },
+    )))
 }
 
-fn parse_install(arguments: &[String]) -> Result<Action, String> {
+fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Action::Help);
+        return Ok(Invocation::Help);
     }
-    let Some((resource, rest)) = arguments.split_first() else {
-        return Err("install requires a resource".into());
-    };
-    if resource != "assistant" {
-        return Err("install only supports assistant".into());
-    }
-    let Some(source_digest) = rest.first().filter(|value| !value.starts_with('-')) else {
-        return Err("install assistant requires a source hash".into());
+    let Some(source_digest) = arguments.first().filter(|value| !value.starts_with('-')) else {
+        return Err("assistant install requires a source digest".into());
     };
     if !valid_sha256_digest(source_digest) {
-        return Err("Assistant source hash is invalid".into());
+        return Err("Assistant source digest is invalid".into());
     }
-    let team = match &rest[1..] {
+    let team = match &arguments[1..] {
         [] => None,
         [option, value] if option == "--team" && valid_team_id(value) => Some(value.clone()),
         [option, _] if option == "--team" => return Err("Team id is invalid".into()),
         [option] if option == "--team" => return Err("--team requires a value".into()),
-        _ => return Err("install assistant accepts only --team <team-id>".into()),
+        _ => return Err("assistant install accepts only --team <team-id>".into()),
     };
-    Ok(Action::Run(Command::InstallAssistant {
-        source_digest: source_digest.clone(),
-        team,
-    }))
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Install {
+            source_digest: source_digest.clone(),
+            team,
+        },
+    )))
 }
 
 fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
@@ -346,7 +359,7 @@ fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
         [] => Ok(PathBuf::from(".")),
         [option, value] if option == "--project" => Ok(PathBuf::from(value)),
         [option] if option == "--project" => Err("--project requires a value".into()),
-        _ => Err("check accepts only --project <path>".into()),
+        _ => Err("assistant check accepts only --project <path>".into()),
     }
 }
 
@@ -403,10 +416,12 @@ mod tests {
     #[test]
     fn parses_check_with_the_current_project() {
         assert_eq!(
-            parse(strings(&["check"])),
-            Ok(Action::Run(Command::Check {
-                project: PathBuf::from(".")
-            }))
+            parse(strings(&["assistant", "check"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Check {
+                    project: PathBuf::from(".")
+                }
+            )))
         );
     }
 
@@ -414,19 +429,19 @@ mod tests {
     fn parses_auth_with_login_as_the_default() {
         assert_eq!(
             parse(strings(&["auth"])),
-            Ok(Action::Run(Command::Auth(AuthAction::Login)))
+            Ok(Invocation::Execute(Command::Auth(AuthAction::Login)))
         );
         assert_eq!(
             parse(strings(&["auth", "login"])),
-            Ok(Action::Run(Command::Auth(AuthAction::Login)))
+            Ok(Invocation::Execute(Command::Auth(AuthAction::Login)))
         );
         assert_eq!(
             parse(strings(&["auth", "status"])),
-            Ok(Action::Run(Command::Auth(AuthAction::Status)))
+            Ok(Invocation::Execute(Command::Auth(AuthAction::Status)))
         );
         assert_eq!(
             parse(strings(&["auth", "logout"])),
-            Ok(Action::Run(Command::Auth(AuthAction::Logout)))
+            Ok(Invocation::Execute(Command::Auth(AuthAction::Logout)))
         );
         assert_eq!(
             parse(strings(&["auth", "token"])),
@@ -438,63 +453,83 @@ mod tests {
     fn parses_a_new_python_assistant() {
         assert_eq!(
             parse(strings(&[
-                "new",
                 "assistant",
+                "new",
                 "hello-assistant",
                 "--language=python"
             ])),
-            Ok(Action::Run(Command::NewAssistant {
-                name: "hello-assistant".into()
-            }))
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::New {
+                    name: "hello-assistant".into()
+                }
+            )))
         );
         assert_eq!(
-            parse(strings(&["new", "assistant", "hello-assistant"])),
-            Ok(Action::Run(Command::NewAssistant {
-                name: "hello-assistant".into()
-            }))
+            parse(strings(&["assistant", "new", "hello-assistant"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::New {
+                    name: "hello-assistant".into()
+                }
+            )))
         );
     }
 
     #[test]
     fn parses_a_safe_or_yolo_development_session() {
         assert_eq!(
-            parse(strings(&["develop", "codex"])),
-            Ok(Action::Run(Command::Develop {
-                agent: DeveloperAgent::Codex,
-                project: PathBuf::from("."),
-                yolo: false,
-            }))
+            parse(strings(&["assistant", "develop", "codex"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Develop {
+                    agent: DeveloperAgent::Codex,
+                    project: PathBuf::from("."),
+                    yolo: false,
+                }
+            )))
         );
         assert_eq!(
-            parse(strings(&["develop", "claude", "assistant", "--yolo",])),
-            Ok(Action::Run(Command::Develop {
-                agent: DeveloperAgent::Claude,
-                project: PathBuf::from("assistant"),
-                yolo: true,
-            }))
+            parse(strings(&[
+                "assistant",
+                "develop",
+                "claude",
+                "assistant",
+                "--yolo",
+            ])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Develop {
+                    agent: DeveloperAgent::Claude,
+                    project: PathBuf::from("assistant"),
+                    yolo: true,
+                }
+            )))
         );
     }
 
     #[test]
     fn rejects_invalid_development_session_options() {
         assert_eq!(
-            parse(strings(&["develop"])),
+            parse(strings(&["assistant", "develop"])),
             Err("develop requires codex or claude".into())
         );
         assert_eq!(
-            parse(strings(&["develop", "cursor"])),
+            parse(strings(&["assistant", "develop", "cursor"])),
             Err("develop supports only codex or claude".into())
         );
         assert_eq!(
-            parse(strings(&["develop", "codex", "--project"])),
+            parse(strings(&["assistant", "develop", "codex", "--project"])),
             Err("unknown option --project".into())
         );
         assert_eq!(
-            parse(strings(&["develop", "codex", "--yolo", "--yolo"])),
+            parse(strings(&[
+                "assistant",
+                "develop",
+                "codex",
+                "--yolo",
+                "--yolo",
+            ])),
             Err("--yolo was repeated".into())
         );
         assert_eq!(
-            parse(strings(&["develop", "codex", "one", "two"])),
+            parse(strings(&["assistant", "develop", "codex", "one", "two",])),
             Err("develop accepts one project path".into())
         );
     }
@@ -502,13 +537,13 @@ mod tests {
     #[test]
     fn rejects_invalid_new_assistant_arguments() {
         assert_eq!(
-            parse(strings(&["new", "assistant", "Hello"])),
+            parse(strings(&["assistant", "new", "Hello"])),
             Err("Assistant name is invalid".into())
         );
         assert_eq!(
             parse(strings(&[
-                "new",
                 "assistant",
+                "new",
                 "hello",
                 "--language",
                 "typescript"
@@ -516,8 +551,8 @@ mod tests {
             Err("only python is supported".into())
         );
         assert_eq!(
-            parse(strings(&["new", "assistant", "one", "two"])),
-            Err("new assistant accepts one name".into())
+            parse(strings(&["assistant", "new", "one", "two"])),
+            Err("assistant new accepts one name".into())
         );
         for name in [
             "postgres",
@@ -526,35 +561,44 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert_eq!(
-                parse(strings(&["new", "assistant", name])),
+                parse(strings(&["assistant", "new", name])),
                 Err("Assistant name is invalid".into())
             );
         }
     }
 
     #[test]
-    fn parses_a_file_backed_action_test() {
+    fn parses_a_file_backed_action_run() {
         assert_eq!(
             parse(strings(&[
-                "test",
+                "assistant",
+                "run",
                 "create-dns",
                 "--input-file",
                 "request.json",
                 "--project",
                 "assistant"
             ])),
-            Ok(Action::Run(Command::Test {
-                project: PathBuf::from("assistant"),
-                action: "create-dns".into(),
-                input: Input::File(PathBuf::from("request.json")),
-            }))
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Run {
+                    project: PathBuf::from("assistant"),
+                    action: "create-dns".into(),
+                    input: Input::File(PathBuf::from("request.json")),
+                }
+            )))
         );
     }
 
     #[test]
     fn rejects_secrets_and_unknown_options() {
         assert_eq!(
-            parse(strings(&["test", "create-dns", "--account", "token"])),
+            parse(strings(&[
+                "assistant",
+                "run",
+                "create-dns",
+                "--account",
+                "token",
+            ])),
             Err("unknown option --account".into())
         );
     }
@@ -562,7 +606,7 @@ mod tests {
     #[test]
     fn rejects_invalid_action_ids() {
         assert_eq!(
-            parse(strings(&["test", "CreateDns"])),
+            parse(strings(&["assistant", "run", "CreateDns"])),
             Err("Action id is invalid".into())
         );
     }
@@ -571,7 +615,7 @@ mod tests {
     fn parses_upgrade_without_options() {
         assert_eq!(
             parse(strings(&["upgrade"])),
-            Ok(Action::Run(Command::Upgrade))
+            Ok(Invocation::Execute(Command::Upgrade))
         );
         assert_eq!(
             parse(strings(&["upgrade", "--force"])),
@@ -583,60 +627,115 @@ mod tests {
     fn parses_assistant_install_with_an_optional_team() {
         let digest = format!("sha256:{}", "a".repeat(64));
         assert_eq!(
-            parse(strings(&["install", "assistant", &digest])),
-            Ok(Action::Run(Command::InstallAssistant {
-                source_digest: digest.clone(),
-                team: None,
-            }))
+            parse(strings(&["assistant", "install", &digest])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Install {
+                    source_digest: digest.clone(),
+                    team: None,
+                },
+            )))
         );
         assert_eq!(
             parse(strings(&[
-                "install",
                 "assistant",
+                "install",
                 &digest,
                 "--team",
                 "team_1"
             ])),
-            Ok(Action::Run(Command::InstallAssistant {
-                source_digest: digest,
-                team: Some("team_1".into()),
-            }))
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Install {
+                    source_digest: digest,
+                    team: Some("team_1".into()),
+                },
+            )))
         );
     }
 
     #[test]
     fn parses_publish_with_a_project_or_current_directory() {
         assert_eq!(
-            parse(strings(&["publish", "--visibility", "private"])),
-            Ok(Action::Run(Command::Publish {
-                project: PathBuf::from("."),
-                visibility: PublicationVisibility::Private,
-            }))
+            parse(strings(&[
+                "assistant",
+                "publish",
+                "--visibility",
+                "private",
+            ])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Publish {
+                    project: PathBuf::from("."),
+                    visibility: PublicationVisibility::Private,
+                }
+            )))
         );
         assert_eq!(
             parse(strings(&[
+                "assistant",
                 "publish",
                 "--project",
                 "hello",
                 "--visibility",
                 "public"
             ])),
-            Ok(Action::Run(Command::Publish {
-                project: PathBuf::from("hello"),
-                visibility: PublicationVisibility::Public,
-            }))
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Publish {
+                    project: PathBuf::from("hello"),
+                    visibility: PublicationVisibility::Public,
+                }
+            )))
         );
         assert_eq!(
-            parse(strings(&["publish", "--project"])),
+            parse(strings(&["assistant", "publish", "--project"])),
             Err("--project requires a value".into())
         );
         assert_eq!(
-            parse(strings(&["publish"])),
-            Err("publish requires --visibility".into())
+            parse(strings(&["assistant", "publish"])),
+            Err("assistant publish requires --visibility".into())
         );
         assert_eq!(
-            parse(strings(&["publish", "--visibility", "listed"])),
+            parse(strings(
+                &["assistant", "publish", "--visibility", "listed",]
+            )),
             Err("visibility must be private or public".into())
         );
+    }
+
+    #[test]
+    fn keeps_assistant_operations_out_of_the_top_level() {
+        for retired in ["new", "develop", "check", "test", "publish", "install"] {
+            assert_eq!(parse(strings(&[retired])), Err("unknown command".into()));
+        }
+        assert_eq!(
+            parse(strings(&["assistant"])),
+            Err("assistant requires an operation".into())
+        );
+        assert_eq!(
+            parse(strings(&["assistant", "test"])),
+            Err("unknown assistant operation".into())
+        );
+    }
+
+    #[test]
+    fn help_exposes_only_resource_first_assistant_operations() {
+        for current in [
+            "shimpz assistant new",
+            "shimpz assistant develop",
+            "shimpz assistant check",
+            "shimpz assistant run",
+            "shimpz assistant publish",
+            "shimpz assistant install",
+        ] {
+            assert!(HELP.contains(current));
+        }
+        for retired in [
+            "shimpz new assistant",
+            "shimpz develop",
+            "shimpz check",
+            "shimpz test",
+            "shimpz publish",
+            "shimpz install assistant",
+        ] {
+            assert!(!HELP.contains(retired));
+        }
     }
 }

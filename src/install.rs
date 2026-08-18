@@ -1,4 +1,4 @@
-//! Install one published Assistant by immutable source hash.
+//! Install one published Assistant by immutable source digest.
 
 use std::time::Duration;
 

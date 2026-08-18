@@ -23,19 +23,19 @@ mod source_package_tests;
 use std::env;
 use std::process::ExitCode;
 
-use args::{Action, AuthAction, Command};
+use args::{AssistantCommand, AuthAction, Command, Invocation};
 
 fn main() -> ExitCode {
     match args::parse(env::args_os().skip(1)) {
-        Ok(Action::Help) => {
+        Ok(Invocation::Help) => {
             output::plain(args::HELP.trim_end());
             ExitCode::SUCCESS
         }
-        Ok(Action::Version) => {
+        Ok(Invocation::Version) => {
             output::plain(&format!("shimpz {}", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
-        Ok(Action::Run(command)) => run(&command),
+        Ok(Invocation::Execute(command)) => run(&command),
         Err(message) => {
             output::error(&message);
             output::warning(args::USAGE);
@@ -49,26 +49,30 @@ fn run(command: &Command) -> ExitCode {
         Command::Auth(AuthAction::Login) => (auth::login(), Presentation::Success),
         Command::Auth(AuthAction::Status) => (auth::status(), Presentation::Info),
         Command::Auth(AuthAction::Logout) => (auth::logout(), Presentation::Success),
-        Command::NewAssistant { name } => (new_assistant::run(name), Presentation::Success),
-        Command::Develop {
+        Command::Assistant(AssistantCommand::New { name }) => {
+            (new_assistant::run(name), Presentation::Success)
+        }
+        Command::Assistant(AssistantCommand::Develop {
             agent,
             project,
             yolo,
-        } => (develop::run(*agent, project, *yolo), Presentation::Success),
-        Command::Check { project } => (check(project), Presentation::Success),
-        Command::Test {
+        }) => (develop::run(*agent, project, *yolo), Presentation::Success),
+        Command::Assistant(AssistantCommand::Check { project }) => {
+            (check(project), Presentation::Success)
+        }
+        Command::Assistant(AssistantCommand::Run {
             project,
             action,
             input,
-        } => (invoke::run(project, action, input), Presentation::Data),
-        Command::Publish {
+        }) => (invoke::run(project, action, input), Presentation::Data),
+        Command::Assistant(AssistantCommand::Publish {
             project,
             visibility,
-        } => (publish::run(project, *visibility), Presentation::Success),
-        Command::InstallAssistant {
+        }) => (publish::run(project, *visibility), Presentation::Success),
+        Command::Assistant(AssistantCommand::Install {
             source_digest,
             team,
-        } => (
+        }) => (
             install::run(source_digest, team.as_deref()),
             Presentation::Success,
         ),

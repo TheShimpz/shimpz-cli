@@ -63,7 +63,7 @@ pub(crate) fn run(name: &str) -> Result<String, String> {
     }
     create(root, name)?;
     Ok(format!(
-        "Created Python Assistant at {name}.\n\nNext:\n  cd {name}\n  shimpz check\n  shimpz test hello-world --input '{{\"name\":\"World\"}}'"
+        "Created Python Assistant at {name}.\n\nNext:\n  cd {name}\n  shimpz assistant check\n  shimpz assistant run hello-world --input '{{\"name\":\"World\"}}'"
     ))
 }
 
@@ -153,8 +153,8 @@ Python and the SDK, generates the machine contract in memory, and runs Actions w
 ## Local checks
 
 ```console
-shimpz check
-shimpz test hello-world --input '{{\"name\":\"World\"}}'
+shimpz assistant check
+shimpz assistant run hello-world --input '{{\"name\":\"World\"}}'
 ```
 "
     )
@@ -228,6 +228,10 @@ mod tests {
         let manifest = fs::read_to_string(root.join("shimpz.toml")).unwrap();
         assert!(manifest.contains("id = \"hello-assistant\""));
         assert!(manifest.contains("name = \"Hello Assistant\""));
+        let readme = fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(readme.contains("shimpz assistant check"));
+        assert!(readme.contains("shimpz assistant run hello-world"));
+        assert!(!readme.contains("shimpz test"));
         assert!(
             fs::read(root.join("icon.png"))
                 .unwrap()
@@ -256,6 +260,18 @@ mod tests {
 
         assert!(error.ends_with("already exists"));
         assert_eq!(fs::read_to_string(original).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn reports_only_current_assistant_commands_after_creation() {
+        let temporary = TemporaryDirectory::new();
+        let root = temporary.path.join("hello");
+
+        let success = run(root.to_str().unwrap()).unwrap();
+
+        assert!(success.contains("shimpz assistant check"));
+        assert!(success.contains("shimpz assistant run hello-world"));
+        assert!(!success.contains("shimpz test"));
     }
 
     fn walk_files(root: &Path) -> BTreeSet<String> {

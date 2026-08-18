@@ -1,4 +1,4 @@
-//! Verifies one dependency compilation per local Action test.
+//! Verifies one dependency compilation per local Action run.
 
 #![cfg(unix)]
 
@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
-fn compiles_requirements_once_per_action_test() {
+fn compiles_requirements_once_per_action_run() {
     let directory =
         std::env::temp_dir().join(format!("shimpz-compile-once-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
@@ -44,7 +44,8 @@ exit 1
 
     let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
         .args([
-            "test",
+            "assistant",
+            "run",
             "greet",
             "--project",
             project,
@@ -58,7 +59,7 @@ exit 1
 
     assert!(
         output.status.success(),
-        "Action test failed: {}",
+        "Action run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let compiles = fs::read_to_string(log)
@@ -68,6 +69,6 @@ exit 1
         .count();
     assert_eq!(
         compiles, 1,
-        "exactly one `uv pip compile` per `shimpz test`"
+        "exactly one `uv pip compile` per `shimpz assistant run`"
     );
 }

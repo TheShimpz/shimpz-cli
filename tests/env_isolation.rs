@@ -42,7 +42,7 @@ fn action_subprocess_cannot_read_integration_or_ambient_secrets() {
     }
     fs::write(project.join("icon.png"), BASE64.decode(ICON).unwrap()).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_shimpz"))
-        .args(["check", "--project"])
+        .args(["assistant", "check", "--project"])
         .arg(&project)
         .env("SHIMPZ_UV", &fake_uv)
         .env("SHIMPZ_INTEGRATION_CLOUDFLARE", "leaky-token")

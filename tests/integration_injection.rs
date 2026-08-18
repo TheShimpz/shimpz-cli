@@ -50,7 +50,15 @@ fn run_report(shim: &Path, token: Option<&str>) -> Output {
     let project = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/assistant");
     let mut command = Command::new(env!("CARGO_BIN_EXE_shimpz"));
     command
-        .args(["test", "report", "--project", project, "--input", "{}"])
+        .args([
+            "assistant",
+            "run",
+            "report",
+            "--project",
+            project,
+            "--input",
+            "{}",
+        ])
         .env("SHIMPZ_UV", shim)
         .env_remove("NO_COLOR")
         .env("CLICOLOR_FORCE", "1");
@@ -67,7 +75,7 @@ fn injects_declared_integration_token() {
     let output = run_report(&shim, Some("integration-secret"));
     assert!(
         output.status.success(),
-        "Action test failed: {}",
+        "Action run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(

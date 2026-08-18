@@ -1,6 +1,6 @@
 # Shimpz CLI
 
-`shimpz` checks and tests file-backed Assistant Actions locally without Docker.
+`shimpz` checks and runs file-backed Assistant Actions locally without Docker.
 It installs a pinned `uv` in its private cache, manages Python 3.14, and runs
 the public `shimpz` Python SDK from the Assistant's `pyproject.toml`.
 
@@ -19,12 +19,13 @@ Releases. Both installation paths provide the `shimpz` command.
 
 ```console
 shimpz auth
-shimpz new assistant hello-assistant
-shimpz develop codex
-shimpz develop claude hello-assistant --yolo
-shimpz check
-shimpz test create-dns --input '{"zone":"example.com"}'
-shimpz publish --visibility public
+shimpz assistant new hello-assistant
+shimpz assistant develop codex
+shimpz assistant develop claude hello-assistant --yolo
+shimpz assistant check
+shimpz assistant run create-dns --input '{"zone":"example.com"}'
+shimpz assistant publish --visibility public
+shimpz assistant install <source-digest> [--team <team-id>]
 shimpz upgrade
 ```
 
@@ -34,15 +35,15 @@ the exact Accounts session online, while `shimpz auth logout` revokes the
 complete rotating token family. Local credentials are stored in the current
 OS user configuration directory with owner-only permissions.
 
-`shimpz publish` validates the Assistant, requests `assistant:publish` in its
+`shimpz assistant publish` validates the Assistant, requests `assistant:publish` in its
 browser authorization when needed, and continues the publication in the same
 command. A separate `shimpz auth` step is not required.
 
-`shimpz new assistant <name>` creates a minimal Python Assistant with one
+`shimpz assistant new <name>` creates a minimal Python Assistant with one
 Hello World Action. Python is the default language; it can also be selected
 explicitly with `--language python`.
 
-`shimpz develop <codex|claude> [path]` starts an interactive coding agent in
+`shimpz assistant develop <codex|claude> [path]` starts an interactive coding agent in
 the current directory, or in the optional path, with the versioned Shimpz
 Assistant development guide from `https://developers.shimpz.com/assistant.md`.
 The agent keeps its normal permission protections unless `--yolo` is explicitly

@@ -204,7 +204,7 @@ fn sleep_before(deadline: Instant, duration: Duration) -> Result<(), String> {
 }
 
 fn wait_timeout() -> String {
-    "publication wait timed out; run `shimpz publish` again".into()
+    "publication wait timed out; run `shimpz assistant publish` again".into()
 }
 
 #[derive(Serialize)]
