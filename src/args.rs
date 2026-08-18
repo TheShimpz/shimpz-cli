@@ -119,7 +119,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
         "upgrade" => parse_upgrade(rest),
-        _ => unreachable!("validated top-level command"),
+        _ => Err("unknown command".into()),
     }
 }
 
@@ -726,7 +726,10 @@ mod tests {
     #[test]
     fn keeps_the_top_level_command_set_closed() {
         assert_eq!(TOP_LEVEL_COMMANDS, ["assistant", "auth", "upgrade"]);
-        assert!(USAGE.contains(&TOP_LEVEL_COMMANDS.join("|")));
+        assert_eq!(
+            USAGE,
+            format!("Usage: shimpz <{}> [options]", TOP_LEVEL_COMMANDS.join("|"))
+        );
         for current in TOP_LEVEL_COMMANDS {
             assert_ne!(parse(strings(&[current])), Err("unknown command".into()),);
         }
