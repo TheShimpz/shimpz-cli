@@ -3,6 +3,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+const TOP_LEVEL_COMMANDS: [&str; 3] = ["assistant", "auth", "upgrade"];
+
 pub(crate) const USAGE: &str = "Usage: shimpz <assistant|auth|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Fast local tooling for Shimpz Assistants.
@@ -106,12 +108,18 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         return Ok(Invocation::Help);
     };
     match command.as_str() {
-        "-h" | "--help" | "help" => Ok(Invocation::Help),
-        "-V" | "--version" | "version" => Ok(Invocation::Version),
+        "-h" | "--help" | "help" => return Ok(Invocation::Help),
+        "-V" | "--version" | "version" => return Ok(Invocation::Version),
+        _ => {}
+    }
+    if !TOP_LEVEL_COMMANDS.contains(&command.as_str()) {
+        return Err("unknown command".into());
+    }
+    match command.as_str() {
         "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
         "upgrade" => parse_upgrade(rest),
-        _ => Err("unknown command".into()),
+        _ => unreachable!("validated top-level command"),
     }
 }
 
@@ -713,6 +721,16 @@ mod tests {
             parse(strings(&["assistant", "test"])),
             Err("unknown assistant operation".into())
         );
+    }
+
+    #[test]
+    fn keeps_the_top_level_command_set_closed() {
+        assert_eq!(TOP_LEVEL_COMMANDS, ["assistant", "auth", "upgrade"]);
+        assert!(USAGE.contains(&TOP_LEVEL_COMMANDS.join("|")));
+        for current in TOP_LEVEL_COMMANDS {
+            assert_ne!(parse(strings(&[current])), Err("unknown command".into()),);
+        }
+        assert_eq!(parse(strings(&["space"])), Err("unknown command".into()),);
     }
 
     #[test]

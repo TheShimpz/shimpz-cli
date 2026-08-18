@@ -29,10 +29,11 @@
 - An Action is declared by and addressed through an Assistant project. Execute one Action with
   `shimpz assistant run <action-id>`; do not create `shimpz test` or a top-level `action` namespace while Action has
   no independent lifecycle. Reserve `test` for engineering test suites.
-- Top-level commands are limited to CLI-wide or session-wide operations and explicitly admitted Space-root
-  operations. The current top-level command set is `assistant`, `auth`, and `upgrade`; help and version flags are
-  syntax, not product resources. Expanding this set requires an explicit ontology and authority review plus parser
-  tests that prove the resulting closed set.
+- Top-level commands are limited to CLI-wide or session-wide operations. A Space-root operation may elide `space`
+  only when it acts on the complete managed Space and the current architecture explicitly admits that surface. The
+  current top-level command set is `assistant`, `auth`, and `upgrade`; help and version flags are syntax, not product
+  resources. Expanding this set requires an explicit ontology and authority review plus parser tests that prove the
+  resulting closed set.
 - CLI placement never transfers domain authority. Preserve the producing service, authorizing principal, exact
   target, response binding, and fail-closed ambiguity checks behind every command.
 - Retired command spellings are rejected rather than accepted through aliases, fallbacks, or hidden compatibility
