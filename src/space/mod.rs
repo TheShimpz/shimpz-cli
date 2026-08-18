@@ -2,3 +2,4 @@
 
 pub(crate) mod graph;
 pub(crate) mod release;
+pub(crate) mod storage;
