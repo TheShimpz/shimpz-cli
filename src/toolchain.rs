@@ -55,14 +55,14 @@ fn verify_version(executable: &Path) -> Result<(), String> {
     if !output.status.success() {
         return Err("managed uv cannot report its version".into());
     }
-    if String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .nth(1)
-        != Some(UV_VERSION)
-    {
+    if !reports_pinned_version(&output.stdout) {
         return Err("managed uv version does not match the pinned release".into());
     }
     Ok(())
+}
+
+fn reports_pinned_version(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).split_whitespace().nth(1) == Some(UV_VERSION)
 }
 
 fn cache_directory() -> Result<PathBuf, String> {
@@ -156,48 +156,26 @@ mod tests {
     use std::collections::BTreeSet;
     use std::ffi::{OsStr, OsString};
 
-    #[cfg(unix)]
-    use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    #[cfg(unix)]
-    struct UvShim {
-        _directory: tempfile::TempDir,
-        path: PathBuf,
-    }
-
-    #[cfg(unix)]
-    fn uv_shim(version: &str) -> UvShim {
-        let executable = std::env::current_exe().unwrap();
-        let directory = tempfile::Builder::new()
-            .prefix("shimpz-uv-")
-            .tempdir_in(executable.parent().unwrap())
-            .unwrap();
-        let shim = directory.path().join("uv");
-        fs::write(&shim, format!("#!/bin/sh\necho 'uv {version}'\n")).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
-        UvShim {
-            _directory: directory,
-            path: shim,
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
     fn rejects_uv_with_mismatched_version() {
-        let shim = uv_shim("0.0.1");
-        assert_eq!(
-            verify_version(&shim.path),
-            Err("managed uv version does not match the pinned release".into())
-        );
+        assert!(!reports_pinned_version(b"uv 0.0.1\n"));
+        assert!(!reports_pinned_version(b"uv\n"));
+        assert!(!reports_pinned_version(b"uv \xff\n"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn accepts_uv_matching_the_pinned_version() {
-        let shim = uv_shim(UV_VERSION);
-        verify_version(&shim.path).unwrap();
+        assert!(reports_pinned_version(
+            format!("uv {UV_VERSION}\n").as_bytes()
+        ));
+    }
+
+    #[test]
+    fn rejects_an_unavailable_uv_executable() {
+        assert_eq!(
+            verify_version(Path::new("/shimpz-test-missing-uv")),
+            Err("managed uv cannot report its version".into())
+        );
     }
 
     #[test]
