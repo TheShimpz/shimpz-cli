@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -124,26 +125,47 @@ pub(crate) fn authorize() -> Result<(), String> {
     }
 }
 
-pub(crate) fn privileged_status<I, S>(
+pub(crate) fn privileged_status<I, S>(tool: Tool, arguments: I) -> Result<ExitStatus, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (program, mut command) = privileged_command(tool)?;
+    command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))
+}
+
+pub(crate) fn privileged_status_with_input<I, S>(
     tool: Tool,
     arguments: I,
-    passphrase_tty: bool,
+    input: &[u8],
 ) -> Result<ExitStatus, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let (program, mut command) = privileged_command(tool)?;
-    command.args(arguments);
-    if passphrase_tty {
-        let tty = File::open("/dev/tty").map_err(|_| "encrypted storage requires a terminal")?;
-        command.stdin(tty);
-    } else {
-        command.stdin(Stdio::null());
-    }
-    command
-        .status()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))
+    let mut child = command
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| "privileged command input is unavailable".to_owned())?
+        .write_all(input)
+        .map_err(|_| "privileged command input failed".to_owned());
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    write_result?;
+    Ok(status)
 }
 
 pub(crate) fn privileged_output<I, S>(tool: Tool, arguments: I) -> Result<String, String>

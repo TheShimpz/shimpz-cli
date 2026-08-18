@@ -1010,6 +1010,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memsafe"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcf2b4d7a25d60474415c3ed174d37baac2881182484cce3cd765536e17301cf"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1667,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "shimpz-cli"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1675,6 +1685,7 @@ dependencies = [
  "base64",
  "crc32fast",
  "libc",
+ "memsafe",
  "rpassword",
  "rustix",
  "self_update",

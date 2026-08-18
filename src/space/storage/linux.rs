@@ -8,11 +8,15 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use memsafe::Secret;
+use zeroize::Zeroizing;
+
 use super::evidence::luks_dump_valid;
 use crate::space::command::{self, Tool};
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_PASSPHRASE_BYTES: usize = 1_024;
 
 macro_rules! live_trace {
     ($stage:literal) => {
@@ -63,6 +67,102 @@ pub(crate) struct Pool<'a> {
     space_id: &'a str,
 }
 
+struct LockedPassphrase {
+    secret: Secret<MAX_PASSPHRASE_BYTES>,
+    length: usize,
+}
+
+impl LockedPassphrase {
+    fn prompt(label: &str) -> Result<Self, String> {
+        let input = Zeroizing::new(
+            rpassword::prompt_password(label)
+                .map_err(|_| "could not read the encrypted storage passphrase".to_owned())?,
+        );
+        Self::from_input(input)
+    }
+
+    fn from_input(mut input: Zeroizing<String>) -> Result<Self, String> {
+        validate_passphrase(input.as_bytes())?;
+        let length = input.len();
+        let source = std::mem::take(&mut *input).into_bytes();
+        match Secret::from_bytes(source) {
+            Ok(secret) => Ok(Self { secret, length }),
+            Err((source, _)) => {
+                drop(Zeroizing::new(source));
+                Err("encrypted storage passphrase memory could not be protected".into())
+            }
+        }
+    }
+
+    fn matches(&mut self, other: &mut Self) -> Result<bool, String> {
+        if self.length != other.length {
+            return Ok(false);
+        }
+        let left = self
+            .secret
+            .read()
+            .map_err(|_| "encrypted storage passphrase memory is unavailable".to_owned())?;
+        let right = other
+            .secret
+            .read()
+            .map_err(|_| "encrypted storage passphrase memory is unavailable".to_owned())?;
+        Ok(left[..self.length] == right[..other.length])
+    }
+
+    fn run_cryptsetup<I>(&mut self, operation: &str, arguments: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
+        let arguments = cryptsetup_secret_arguments(operation, self.length, arguments);
+        let secret = self
+            .secret
+            .read()
+            .map_err(|_| "encrypted storage passphrase memory is unavailable".to_owned())?;
+        let result =
+            command::privileged_status_with_input(Tool::Luks, arguments, &secret[..self.length])?;
+        if result.success() {
+            Ok(())
+        } else {
+            Err("encrypted Local storage operation failed".into())
+        }
+    }
+}
+
+fn validate_passphrase(value: &[u8]) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_PASSPHRASE_BYTES
+        || value.contains(&b'\n')
+        || value.contains(&b'\r')
+    {
+        return Err("encrypted storage passphrase is invalid".into());
+    }
+    Ok(())
+}
+
+fn cryptsetup_secret_arguments<I>(operation: &str, length: usize, arguments: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut result = vec![
+        OsString::from(operation),
+        OsString::from("--key-file"),
+        OsString::from("-"),
+        OsString::from("--keyfile-size"),
+        OsString::from(length.to_string()),
+    ];
+    result.extend(arguments);
+    result
+}
+
+fn new_passphrase() -> Result<LockedPassphrase, String> {
+    let mut passphrase = LockedPassphrase::prompt("New encrypted storage passphrase: ")?;
+    let mut confirmation = LockedPassphrase::prompt("Confirm encrypted storage passphrase: ")?;
+    if !passphrase.matches(&mut confirmation)? {
+        return Err("encrypted storage passphrases do not match".into());
+    }
+    Ok(passphrase)
+}
+
 impl<'a> Pool<'a> {
     pub(crate) fn new(paths: &'a Paths, space_id: &'a str) -> Result<Self, String> {
         if !valid_space_id(space_id) {
@@ -94,15 +194,15 @@ impl<'a> Pool<'a> {
         if self.mapping_path().exists() {
             self.validate_mapping()?;
         } else {
-            Self::cryptsetup(
+            let mut passphrase = LockedPassphrase::prompt("Encrypted storage passphrase: ")?;
+            passphrase.run_cryptsetup(
+                "open",
                 [
-                    OsString::from("open"),
                     OsString::from("--type"),
                     OsString::from("luks2"),
                     self.paths.pool_image.as_os_str().to_owned(),
                     OsString::from(self.mapping_name()),
                 ],
-                true,
             )?;
             self.validate_mapping()?;
         }
@@ -115,7 +215,6 @@ impl<'a> Pool<'a> {
                     self.mapping_path().as_os_str().to_owned(),
                     self.paths.pool_mount.as_os_str().to_owned(),
                 ],
-                false,
             )?;
             self.own_mount_root()?;
         }
@@ -139,16 +238,9 @@ impl<'a> Pool<'a> {
             command::authorize()?;
             if self.is_mounted()? {
                 self.validate_mount()?;
-                Self::root(
-                    Tool::Umount,
-                    [self.paths.pool_mount.as_os_str().to_owned()],
-                    false,
-                )?;
+                Self::root(Tool::Umount, [self.paths.pool_mount.as_os_str().to_owned()])?;
             }
-            Self::cryptsetup(
-                [OsString::from("close"), OsString::from(self.mapping_name())],
-                false,
-            )?;
+            Self::cryptsetup([OsString::from("close"), OsString::from(self.mapping_name())])?;
             if mapping.exists() {
                 return Err("the encrypted Local storage mapping remained open".into());
             }
@@ -203,11 +295,11 @@ impl<'a> Pool<'a> {
                 OsString::from("000"),
                 self.paths.pool_mount.as_os_str().to_owned(),
             ],
-            false,
         )?;
-        Self::cryptsetup(
+        let mut passphrase = new_passphrase()?;
+        passphrase.run_cryptsetup(
+            "luksFormat",
             [
-                OsString::from("luksFormat"),
                 OsString::from("--batch-mode"),
                 OsString::from("--type"),
                 OsString::from("luks2"),
@@ -225,7 +317,6 @@ impl<'a> Pool<'a> {
                 OsString::from("4"),
                 self.paths.pool_image.as_os_str().to_owned(),
             ],
-            true,
         )?;
         live_trace!("formatted LUKS2 container");
         let uuid = Self::luks_output([
@@ -235,15 +326,14 @@ impl<'a> Pool<'a> {
         let uuid = one_line(&uuid, "encrypted Local storage UUID")?;
         write_private(&self.paths.pool_uuid, &format!("{uuid}\n"))?;
         live_trace!("recorded LUKS2 identity");
-        Self::cryptsetup(
+        passphrase.run_cryptsetup(
+            "open",
             [
-                OsString::from("open"),
                 OsString::from("--type"),
                 OsString::from("luks2"),
                 self.paths.pool_image.as_os_str().to_owned(),
                 OsString::from(self.mapping_name()),
             ],
-            true,
         )?;
         live_trace!("opened device-mapper mapping");
         self.validate_mapping()?;
@@ -260,7 +350,6 @@ impl<'a> Pool<'a> {
                 OsString::from("0"),
                 self.mapping_path().as_os_str().to_owned(),
             ],
-            false,
         )?;
         live_trace!("formatted ext4 filesystem");
         Self::root(
@@ -271,7 +360,6 @@ impl<'a> Pool<'a> {
                 self.mapping_path().as_os_str().to_owned(),
                 self.paths.pool_mount.as_os_str().to_owned(),
             ],
-            false,
         )?;
         live_trace!("mounted ext4 filesystem");
         self.own_mount_root()?;
@@ -476,7 +564,6 @@ impl<'a> Pool<'a> {
                     OsString::from(format!("{mode:o}")),
                     self.paths.pool_mount.join(name).as_os_str().to_owned(),
                 ],
-                false,
             )?;
         }
         Ok(())
@@ -493,7 +580,6 @@ impl<'a> Pool<'a> {
                 )),
                 self.paths.pool_mount.as_os_str().to_owned(),
             ],
-            false,
         )?;
         fs::set_permissions(&self.paths.pool_mount, fs::Permissions::from_mode(0o700))
             .map_err(io_error)
@@ -501,17 +587,10 @@ impl<'a> Pool<'a> {
 
     fn discard_new(&self) -> Result<(), String> {
         if self.is_mounted().unwrap_or(false) && self.validate_mount().is_ok() {
-            Self::root(
-                Tool::Umount,
-                [self.paths.pool_mount.as_os_str().to_owned()],
-                false,
-            )?;
+            Self::root(Tool::Umount, [self.paths.pool_mount.as_os_str().to_owned()])?;
         }
         if self.mapping_path().exists() && self.validate_mapping().is_ok() {
-            Self::cryptsetup(
-                [OsString::from("close"), OsString::from(self.mapping_name())],
-                false,
-            )?;
+            Self::cryptsetup([OsString::from("close"), OsString::from(self.mapping_name())])?;
         }
         if self.mapping_path().exists() {
             return Err("owned encrypted storage mapping remained after compensation".into());
@@ -523,11 +602,11 @@ impl<'a> Pool<'a> {
         remove_if_empty(&self.paths.security)
     }
 
-    fn cryptsetup<I>(arguments: I, tty: bool) -> Result<(), String>
+    fn cryptsetup<I>(arguments: I) -> Result<(), String>
     where
         I: IntoIterator<Item = OsString>,
     {
-        let result = command::privileged_status(Tool::Luks, arguments, tty)?;
+        let result = command::privileged_status(Tool::Luks, arguments)?;
         if result.success() {
             Ok(())
         } else {
@@ -535,11 +614,11 @@ impl<'a> Pool<'a> {
         }
     }
 
-    fn root<I>(tool: Tool, arguments: I, tty: bool) -> Result<(), String>
+    fn root<I>(tool: Tool, arguments: I) -> Result<(), String>
     where
         I: IntoIterator<Item = OsString>,
     {
-        let result = command::privileged_status(tool, arguments, tty)?;
+        let result = command::privileged_status(tool, arguments)?;
         if result.success() {
             Ok(())
         } else {
@@ -699,6 +778,53 @@ mod tests {
     }
 
     #[test]
+    fn validates_locks_and_compares_passphrases_without_exposing_them() {
+        for invalid in [
+            Vec::new(),
+            b"line\nfeed".to_vec(),
+            b"carriage\rreturn".to_vec(),
+            vec![b'a'; MAX_PASSPHRASE_BYTES + 1],
+        ] {
+            assert!(validate_passphrase(&invalid).is_err());
+        }
+        assert!(validate_passphrase(&vec![b'a'; MAX_PASSPHRASE_BYTES]).is_ok());
+
+        let mut first = LockedPassphrase::from_input(Zeroizing::new("correct horse".into()))
+            .expect("passphrase should be locked");
+        let mut matching = LockedPassphrase::from_input(Zeroizing::new("correct horse".into()))
+            .expect("passphrase should be locked");
+        let mut different = LockedPassphrase::from_input(Zeroizing::new("wrong battery".into()))
+            .expect("passphrase should be locked");
+        let mut shorter = LockedPassphrase::from_input(Zeroizing::new("short".into()))
+            .expect("passphrase should be locked");
+        assert!(first.matches(&mut matching).unwrap());
+        assert!(!first.matches(&mut different).unwrap());
+        assert!(!first.matches(&mut shorter).unwrap());
+    }
+
+    #[test]
+    fn cryptsetup_secret_arguments_bind_exact_stdin_bytes() {
+        let arguments = cryptsetup_secret_arguments(
+            "open",
+            13,
+            [OsString::from("--type"), OsString::from("luks2")],
+        );
+        assert_eq!(
+            arguments,
+            [
+                "open",
+                "--key-file",
+                "-",
+                "--keyfile-size",
+                "13",
+                "--type",
+                "luks2"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
     fn volume_specs_match_the_canonical_graph() {
         assert_eq!(VOLUME_SPECS.len(), crate::space::graph::VOLUME_NAMES.len());
         for (index, spec) in VOLUME_SPECS.iter().enumerate() {
@@ -725,17 +851,8 @@ mod tests {
         let pool = Pool::new(&paths, "space-0123456789abcdef01234567").unwrap();
         assert_eq!(pool.ensure(true, false).unwrap(), Admission::Verified);
         pool.validate_mount().unwrap();
-        Pool::root(
-            Tool::Umount,
-            [paths.pool_mount.as_os_str().to_owned()],
-            false,
-        )
-        .unwrap();
-        Pool::cryptsetup(
-            [OsString::from("close"), OsString::from(pool.mapping_name())],
-            false,
-        )
-        .unwrap();
+        Pool::root(Tool::Umount, [paths.pool_mount.as_os_str().to_owned()]).unwrap();
+        Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())]).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
         pool.reset().unwrap();
