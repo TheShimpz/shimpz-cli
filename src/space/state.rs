@@ -236,7 +236,7 @@ pub(crate) fn write_status(
     paths: &Paths,
     release: &ResolvedRelease,
     outcome: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if !matches!(outcome, "current" | "updated" | "rollback-needed") {
         return Err("the Local release status outcome is invalid".into());
     }
@@ -250,7 +250,8 @@ pub(crate) fn write_status(
     if document.len() > 1_024 {
         return Err("the Local release status is too large".into());
     }
-    write_private(&paths.status, &document)
+    write_private(&paths.status, &document)?;
+    Ok(document)
 }
 
 pub(crate) fn random_space_id() -> Result<String, String> {

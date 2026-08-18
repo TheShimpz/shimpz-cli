@@ -2,6 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -241,6 +242,87 @@ impl Engine {
             .stdin(Stdio::null())
             .status()
             .map_err(|error| format!("could not execute Docker Compose: {error}"))
+    }
+
+    pub(crate) fn project_release_status(
+        &self,
+        admin_image: &str,
+        document: &[u8],
+    ) -> Result<(), String> {
+        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") || document.len() > 1_024
+        {
+            return Err("the Local release status projection is invalid".into());
+        }
+        let volume = "shimpz-space_release_status";
+        let identity = self.run_output([
+            "volume",
+            "inspect",
+            "--format",
+            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
+            volume,
+        ])?;
+        if identity.trim() != "shimpz-space_release_status|shimpz-space|release_status" {
+            return Err("the Local release status volume is not owned by this Space".into());
+        }
+        let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release");
+        let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
+        let arguments = [
+            "run",
+            "--rm",
+            "--platform",
+            self.platform,
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--user",
+            "1000:1000",
+            "--cpuset-cpus",
+            &self.cpuset,
+            "--cpus",
+            "0.25",
+            "--memory",
+            "64m",
+            "--memory-swap",
+            "64m",
+            "--pids-limit",
+            "32",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=8m",
+            "--mount",
+            &mount,
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            admin_image,
+            "-c",
+            script,
+        ];
+        let mut child = Command::new(&self.docker)
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "Docker status input is unavailable".to_owned())?
+            .write_all(document)
+            .map_err(|_| "the Local release status could not be sent to Docker".to_owned())?;
+        if child
+            .wait()
+            .map_err(|error| format!("could not execute Docker: {error}"))?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err("the Local release status could not be projected to Admin".into())
+        }
     }
 
     pub(crate) fn run_output<I, S>(&self, arguments: I) -> Result<String, String>

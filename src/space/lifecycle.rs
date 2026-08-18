@@ -224,10 +224,7 @@ impl Context {
         if !started.success() {
             return self.rollback(release, previous);
         }
-        remove_backup(previous)?;
-        state::write_marker(&self.paths)?;
-        scheduler::install(self.profile, &self.paths)?;
-        state::write_status(
+        let status = state::write_status(
             &self.paths,
             release,
             if installed.is_some() {
@@ -236,6 +233,16 @@ impl Context {
                 "current"
             },
         )?;
+        if self
+            .engine
+            .project_release_status(&release.metadata.admin, status.as_bytes())
+            .is_err()
+        {
+            return self.rollback(release, previous);
+        }
+        remove_backup(previous)?;
+        state::write_marker(&self.paths)?;
+        scheduler::install(self.profile, &self.paths)?;
         Ok(format!(
             "Shimpz Space is ready.\nAdmin http://127.0.0.1:{port}\nRelease {} (ordinal {})",
             release.reference, release.metadata.ordinal
