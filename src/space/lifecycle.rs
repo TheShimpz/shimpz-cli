@@ -376,10 +376,10 @@ impl Context {
         release: &ResolvedRelease,
         scheduled: bool,
     ) -> Result<bool, String> {
+        let running = std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?;
+        reconcile_previous_cli(&self.paths.managed_cli, &running)?;
         let expected = expected_cli_hash(release, self.profile);
-        if hash_file(&std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?)?
-            == expected
-        {
+        if hash_file(&running)? == expected {
             return Ok(false);
         }
         let bin = self
@@ -401,9 +401,6 @@ impl Context {
             return Err("the extracted CLI hash does not match the atomic release".into());
         }
         let previous = self.paths.managed_cli.with_extension("previous");
-        if previous.exists() {
-            return Err("a previous managed CLI compensation artifact remains".into());
-        }
         if self.paths.managed_cli.exists() {
             validate_private_cli(&self.paths.managed_cli)?;
             fs::rename(&self.paths.managed_cli, &previous).map_err(io_error)?;
@@ -781,6 +778,26 @@ fn restore_previous_cli(managed: &Path, previous: &Path) -> Result<(), String> {
         fs::rename(previous, managed).map_err(io_error)?;
     }
     Ok(())
+}
+
+fn reconcile_previous_cli(managed: &Path, running: &Path) -> Result<(), String> {
+    let previous = managed.with_extension("previous");
+    if !previous.exists() {
+        return Ok(());
+    }
+    validate_private_cli(&previous)?;
+    if !managed.exists() {
+        fs::rename(previous, managed).map_err(io_error)?;
+        return Ok(());
+    }
+    validate_private_cli(managed)?;
+    if hash_file(managed)? != hash_file(running)? {
+        return Err(
+            "an interrupted CLI handoff remains; run the managed ~/.shimpz/bin/shimpz command directly"
+                .into(),
+        );
+    }
+    remove_regular_if_present(&previous)
 }
 
 fn ensure_public_cli(paths: &Paths) -> Result<(), String> {
@@ -1217,5 +1234,25 @@ mod tests {
         restore_previous_cli(&paths.managed_cli, &previous).unwrap();
         assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "previous");
         assert!(!previous.exists());
+    }
+
+    #[test]
+    fn reconciles_only_a_previous_artifact_for_the_running_managed_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        let previous = paths.managed_cli.with_extension("previous");
+        fs::write(&paths.managed_cli, "current").unwrap();
+        fs::write(&previous, "previous").unwrap();
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
+        assert!(!previous.exists());
+
+        fs::remove_file(&paths.managed_cli).unwrap();
+        fs::write(&previous, "restored").unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "restored");
     }
 }
