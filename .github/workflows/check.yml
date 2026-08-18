@@ -30,7 +30,7 @@ jobs:
       - name: Install pinned coverage tool
         uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # v2.79.11
         with:
-          tool: cargo-llvm-cov@0.9.0
+          tool: cargo-llvm-cov
           fallback: none
       - name: Require 100% line coverage for pure Local lifecycle modules
         run: |

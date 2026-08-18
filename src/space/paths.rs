@@ -89,13 +89,18 @@ mod tests {
 
     #[test]
     fn derives_every_owned_path_below_exact_roots() {
-        let paths = Paths::under(Path::new("/home/ada")).unwrap();
-        assert_eq!(paths.home, Path::new("/home/ada/.shimpz"));
-        assert_eq!(paths.managed_cli, Path::new("/home/ada/.shimpz/bin/shimpz"));
-        assert_eq!(paths.public_cli, Path::new("/home/ada/.local/bin/shimpz"));
+        let user_home = if cfg!(windows) {
+            Path::new(r"C:\Users\ada")
+        } else {
+            Path::new("/home/ada")
+        };
+        let paths = Paths::under(user_home).unwrap();
+        assert_eq!(paths.home, user_home.join(".shimpz"));
+        assert_eq!(paths.managed_cli, user_home.join(".shimpz/bin/shimpz"));
+        assert_eq!(paths.public_cli, user_home.join(".local/bin/shimpz"));
         assert_eq!(
             paths.systemd_timer,
-            Path::new("/home/ada/.config/systemd/user/shimpz-update.timer")
+            user_home.join(".config/systemd/user/shimpz-update.timer")
         );
     }
 
