@@ -51,10 +51,16 @@ pub(crate) fn luks_dump_valid(value: &str) -> bool {
         && exactly_one_trimmed(value, "cipher:")
         && exactly_one_trimmed(value, "Key:")
         && exactly_one_trimmed(value, "PBKDF:")
+        && exactly_one_trimmed(value, "Time cost:")
+        && exactly_one_trimmed(value, "Memory:")
+        && exactly_one_trimmed(value, "Threads:")
         && has_exact(value, "Version:", "2")
         && has_exact_trimmed(value, "cipher:", "aes-xts-plain64")
         && has_exact_trimmed(value, "Key:", "512 bits")
         && has_exact_trimmed(value, "PBKDF:", "argon2id")
+        && has_exact_trimmed(value, "Time cost:", "8")
+        && has_exact_trimmed(value, "Memory:", "262144")
+        && has_exact_trimmed(value, "Threads:", "4")
 }
 
 fn exactly_one(value: &str, prefix: &str) -> bool {
@@ -92,7 +98,7 @@ fn has_exact_trimmed(value: &str, prefix: &str, expected: &str) -> bool {
 mod tests {
     use super::*;
 
-    const LUKS: &str = "Version:       2\n  cipher:     aes-xts-plain64\n  Key:        512 bits\n  PBKDF:      argon2id\n";
+    const LUKS: &str = "Version:       2\n  cipher:     aes-xts-plain64\n  Key:        512 bits\n  PBKDF:      argon2id\n  Time cost:  8\n  Memory:     262144\n  Threads:    4\n";
 
     #[test]
     fn classifies_only_supported_unambiguous_hosts() {
@@ -148,7 +154,11 @@ mod tests {
             LUKS.replace("aes-xts-plain64", "aes-cbc"),
             LUKS.replace("512 bits", "256 bits"),
             LUKS.replace("argon2id", "pbkdf2"),
+            LUKS.replace("Time cost:  8", "Time cost:  7"),
+            LUKS.replace("Memory:     262144", "Memory:     131072"),
+            LUKS.replace("Threads:    4", "Threads:    2"),
             format!("{LUKS}Version:       2\n"),
+            format!("{LUKS}  Memory:     262144\n"),
         ] {
             assert!(!luks_dump_valid(&invalid));
         }
