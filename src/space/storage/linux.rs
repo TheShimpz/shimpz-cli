@@ -729,6 +729,9 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
         return Err("the Local Space identity is invalid".into());
     }
     validate_security_entries(paths)?;
+    if incomplete(paths)? {
+        return reset_incomplete(paths);
+    }
     validate_metadata(paths)?;
     let mappings = discover_pool_mappings(paths)?;
     let identity = reset_mapping_identity(expected_space_id, &mappings)?;
@@ -753,6 +756,95 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
         return Err("refusing to unmount Local storage without its owned mapping".into());
     }
     remove_pool_files(paths)
+}
+
+pub(crate) fn incomplete(paths: &Paths) -> Result<bool, String> {
+    if !paths.security.exists() {
+        return Ok(false);
+    }
+    validate_security_entries(paths)?;
+    reconcile_storage_marker(paths)?;
+    let marker = paths.storage_marker.exists();
+    let image = paths.pool_image.exists();
+    let uuid = paths.pool_uuid.exists();
+    let mount = paths.pool_mount.exists();
+    match (marker, image, mount, uuid) {
+        (true, true, true, true) => Ok(false),
+        (_, false, false, false) | (true, true, _, false) => Ok(true),
+        _ => Err("the encrypted Local storage has an impossible partial layout".into()),
+    }
+}
+
+fn reset_incomplete(paths: &Paths) -> Result<(), String> {
+    if !paths.storage_marker.exists() {
+        return remove_if_empty(&paths.security);
+    }
+    exact_regular_file(&paths.storage_marker)?;
+    if fs::read_to_string(&paths.storage_marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n")
+    {
+        return Err("encrypted Local storage marker is invalid".into());
+    }
+    if paths.pool_image.exists() {
+        exact_regular_file(&paths.pool_image)?;
+        refuse_open_partial_pool(paths)?;
+    }
+    if paths.pool_mount.exists() {
+        let metadata = paths.pool_mount.symlink_metadata().map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("encrypted Local storage mountpoint is invalid".into());
+        }
+    }
+    remove_if_regular(&paths.pool_image)?;
+    remove_if_regular(&paths.storage_marker)?;
+    remove_if_empty(&paths.pool_mount)?;
+    remove_if_empty(&paths.security)
+}
+
+fn refuse_open_partial_pool(paths: &Paths) -> Result<(), String> {
+    let pool = paths.pool_image.canonicalize().map_err(io_error)?;
+    let blocks = fs::read_dir("/sys/class/block")
+        .map_err(|_| "the host block-device inventory is unavailable".to_owned())?;
+    for entry in blocks {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.strip_prefix("loop").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            continue;
+        }
+        let Ok(backing) = fs::read_to_string(entry.path().join("loop/backing_file")) else {
+            continue;
+        };
+        let backing = backing.trim_end();
+        if deleted_backing_is_pool(backing, &pool) {
+            return Err("the partial encrypted storage has a deleted open backing file".into());
+        }
+        if PathBuf::from(backing)
+            .canonicalize()
+            .is_ok_and(|backing| backing == pool)
+        {
+            return Err("the partial encrypted storage still has an open loop device".into());
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_storage_marker(paths: &Paths) -> Result<(), String> {
+    let temporary = paths.storage_marker.with_extension("tmp");
+    if !temporary.exists() {
+        return Ok(());
+    }
+    if paths.storage_marker.exists() {
+        return Err("the encrypted Local storage has an unexpected marker temporary".into());
+    }
+    exact_regular_file(&temporary)?;
+    if fs::read_to_string(&temporary).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
+        return Err("encrypted Local storage marker temporary is invalid".into());
+    }
+    fs::rename(temporary, &paths.storage_marker).map_err(io_error)
 }
 
 fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
@@ -924,8 +1016,18 @@ fn valid_space_id(value: &str) -> bool {
 }
 
 fn validate_security_entries(paths: &Paths) -> Result<(), String> {
+    let metadata = paths.security.symlink_metadata().map_err(io_error)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("the encrypted Local storage directory is invalid".into());
+    }
+    let marker_temporary = paths.storage_marker.with_extension("tmp");
     let admitted = [
         paths.storage_marker.as_path(),
+        marker_temporary.as_path(),
         paths.pool_image.as_path(),
         paths.pool_uuid.as_path(),
         paths.pool_mount.as_path(),
@@ -1148,6 +1250,33 @@ mod tests {
             "/home/ada/.shimpz/security/local-data.luks",
             pool
         ));
+    }
+
+    #[test]
+    fn admits_only_current_interrupted_provision_layouts() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(&paths.security).unwrap();
+        fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(incomplete(&paths).unwrap());
+
+        fs::write(
+            paths.storage_marker.with_extension("tmp"),
+            format!("{STORAGE_MARKER}\n"),
+        )
+        .unwrap();
+        assert!(incomplete(&paths).unwrap());
+        assert!(paths.storage_marker.exists());
+
+        fs::write(&paths.pool_image, "partial").unwrap();
+        assert!(incomplete(&paths).unwrap());
+        fs::create_dir(&paths.pool_mount).unwrap();
+        assert!(incomplete(&paths).unwrap());
+        fs::write(&paths.pool_uuid, "uuid\n").unwrap();
+        assert!(!incomplete(&paths).unwrap());
+
+        fs::remove_file(&paths.storage_marker).unwrap();
+        assert!(incomplete(&paths).is_err());
     }
 
     #[cfg(target_os = "linux")]

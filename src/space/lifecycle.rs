@@ -124,7 +124,10 @@ impl Context {
         let marker = self.paths.marker_is_current()?;
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let installed = if marker {
-            match self.current_installation() {
+            match self
+                .current_installation()
+                .and_then(|installed| self.validate_installation_storage(installed))
+            {
                 Ok(installed) => Some(installed),
                 Err(reason) => {
                     self.recover_corrupt(&inventory, &reason)?;
@@ -147,6 +150,13 @@ impl Context {
             return Ok("The release-bound CLI completed the installation.".into());
         }
         self.apply(&release, installed.as_ref(), false)
+    }
+
+    fn validate_installation_storage(&self, installed: Installed) -> Result<Installed, String> {
+        if self.profile == HostProfile::Linux && linux::incomplete(&self.paths)? {
+            return Err("the encrypted Local storage provision was interrupted".into());
+        }
+        Ok(installed)
     }
 
     fn start(&self, options: &SpaceStart) -> Result<String, String> {
@@ -193,7 +203,30 @@ impl Context {
             Some(installed) => installed.space_id.clone(),
             None => state::random_space_id()?,
         };
-        match self.ensure_storage(&space_id, installed.is_none(), scheduled)? {
+        let fresh = installed.is_none();
+        if fresh {
+            state::write_marker(&self.paths)?;
+        }
+        match self.apply_owned(release, installed, scheduled, &space_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if fresh => match self.compensate_fresh_failure(&space_id) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!(
+                    "{error}; fresh-install compensation also failed: {cleanup}"
+                )),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    fn apply_owned(
+        &self,
+        release: &ResolvedRelease,
+        installed: Option<&Installed>,
+        scheduled: bool,
+        space_id: &str,
+    ) -> Result<String, String> {
+        match self.ensure_storage(space_id, installed.is_none(), scheduled)? {
             linux::Admission::Locked => {
                 return Ok("Encrypted Local storage is locked. No workloads were started.".into());
             }
@@ -209,7 +242,7 @@ impl Context {
             &Environment {
                 release,
                 profile: self.profile,
-                space_id: &space_id,
+                space_id,
                 port,
                 docker_gid,
                 docker_socket: &docker_socket,
@@ -234,10 +267,10 @@ impl Context {
             ],
         )?;
         if !started.success() {
-            return self.rollback(release, &space_id, previous);
+            return self.rollback(release, space_id, previous);
         }
-        if let Err(storage_error) = self.validate_started_storage(&space_id) {
-            let rollback = self.rollback(release, &space_id, previous);
+        if let Err(storage_error) = self.validate_started_storage(space_id) {
+            let rollback = self.rollback(release, space_id, previous);
             return match rollback {
                 Ok(outcome) | Err(outcome) => Err(format!("{storage_error}; {outcome}")),
             };
@@ -249,10 +282,9 @@ impl Context {
             .project_release_status(&release.metadata.admin, status.as_bytes())
             .is_err()
         {
-            return self.rollback(release, &space_id, previous);
+            return self.rollback(release, space_id, previous);
         }
         remove_backup(previous)?;
-        state::write_marker(&self.paths)?;
         scheduler::install(self.profile, &self.paths)?;
         remove_regular_if_present(&self.paths.failed_release)?;
         Ok(format!(
@@ -632,11 +664,16 @@ impl Context {
         for path in [
             &self.paths.compose,
             &self.paths.environment,
-            &self.paths.marker,
             &self.paths.status,
             &self.paths.failed_release,
             &self.paths.compose.with_extension("previous"),
             &self.paths.environment.with_extension("previous"),
+            &self.paths.compose.with_extension("tmp"),
+            &self.paths.environment.with_extension("tmp"),
+            &self.paths.status.with_extension("tmp"),
+            &self.paths.failed_release.with_extension("tmp"),
+            &self.paths.marker.with_extension("tmp"),
+            &self.paths.marker,
         ] {
             remove_regular_if_present(path)?;
         }
@@ -700,10 +737,20 @@ struct Backup {
 fn ensure_install_home(paths: &Paths) -> Result<(), String> {
     if paths.home.exists() {
         let metadata = paths.home.symlink_metadata().map_err(io_error)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
             return Err("refusing to use an invalid Local Space directory".into());
         }
         if !paths.marker.exists() {
+            for temporary in [
+                paths.home.join("release.env.tmp"),
+                paths.marker.with_extension("tmp"),
+            ] {
+                remove_regular_if_present(&temporary)?;
+            }
             for entry in fs::read_dir(&paths.home).map_err(io_error)? {
                 let path = entry.map_err(io_error)?.path();
                 if path
@@ -1193,6 +1240,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
         fs::write(paths.managed_cli.with_extension("candidate"), "candidate").unwrap();
         fs::set_permissions(
@@ -1207,6 +1255,21 @@ mod tests {
         )
         .unwrap();
         assert!(ensure_install_home(&paths).is_err());
+    }
+
+    #[test]
+    fn unmarked_home_reconciles_only_pre_marker_temporaries() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let release_temporary = paths.home.join("release.env.tmp");
+        let marker_temporary = paths.marker.with_extension("tmp");
+        fs::write(&release_temporary, "metadata").unwrap();
+        fs::write(&marker_temporary, "marker").unwrap();
+        ensure_install_home(&paths).unwrap();
+        assert!(!release_temporary.exists());
+        assert!(!marker_temporary.exists());
     }
 
     #[test]
