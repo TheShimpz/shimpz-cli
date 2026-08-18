@@ -345,11 +345,7 @@ impl<'a> Pool<'a> {
         let filesystem = one_line(&filesystem_document, "mount filesystem")?;
         let target = one_line(&target_document, "mount target")?;
         let mapping = self.mapping_path().metadata().map_err(io_error)?;
-        let expected_device = format!(
-            "{}:{}",
-            rustix::fs::major(mapping.rdev()),
-            rustix::fs::minor(mapping.rdev())
-        );
+        let expected_device = mapping_device_identity(&mapping);
         if device != expected_device || filesystem != "ext4" || target != mount {
             return Err("encrypted Local storage mount identity is invalid".into());
         }
@@ -469,6 +465,20 @@ impl<'a> Pool<'a> {
     fn mapping_path(&self) -> PathBuf {
         Path::new("/dev/mapper").join(self.mapping_name())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn mapping_device_identity(mapping: &fs::Metadata) -> String {
+    format!(
+        "{}:{}",
+        rustix::fs::major(mapping.rdev()),
+        rustix::fs::minor(mapping.rdev())
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mapping_device_identity(_mapping: &fs::Metadata) -> String {
+    "unsupported".into()
 }
 
 fn valid_space_id(value: &str) -> bool {
