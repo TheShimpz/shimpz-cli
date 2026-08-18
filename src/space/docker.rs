@@ -264,7 +264,7 @@ impl Engine {
         if identity.trim() != "shimpz-space_release_status|shimpz-space|release_status" {
             return Err("the Local release status volume is not owned by this Space".into());
         }
-        let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release");
+        let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
         let arguments =
             status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image);
         let mut child = Command::new(&self.docker)
@@ -552,16 +552,21 @@ mod tests {
     }
 
     #[test]
-    fn static_status_projection_requests_stdin_without_a_tty() {
+    fn static_status_projection_preserves_owned_volume_and_requests_stdin_without_a_tty() {
         let arguments = status_projection_arguments(
             "linux/amd64",
             "0-3",
-            "type=volume,src=release,dst=/run/release",
+            "type=volume,src=release,dst=/run/release,volume-nocopy",
             &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
         );
 
         assert_eq!(arguments[0], "run");
         assert_eq!(arguments[2], "--interactive");
+        assert!(
+            arguments.iter().any(
+                |argument| argument == "type=volume,src=release,dst=/run/release,volume-nocopy"
+            )
+        );
         assert!(arguments.iter().all(|argument| argument != "--tty"));
     }
 }
