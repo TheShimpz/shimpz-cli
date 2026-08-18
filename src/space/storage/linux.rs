@@ -778,7 +778,7 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
             continue;
         };
         let backing = backing.trim_end();
-        if deleted_backing_is_pool(backing, &paths.pool_image) {
+        if deleted_backing_is_pool(backing, &pool) {
             return Err("the encrypted Local storage has a deleted open backing file".into());
         }
         let Ok(backing) = PathBuf::from(backing).canonicalize() else {
