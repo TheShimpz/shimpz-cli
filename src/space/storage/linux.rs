@@ -3,7 +3,9 @@
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::evidence::luks_dump_valid;
@@ -357,6 +359,7 @@ impl<'a> Pool<'a> {
         self.validate_mount_identity()
     }
 
+    #[cfg(target_os = "linux")]
     fn validate_mapping_unprivileged(&self) -> Result<(), String> {
         self.validate_metadata()?;
         let mapping = self.mapping_path().metadata().map_err(io_error)?;
@@ -401,6 +404,11 @@ impl<'a> Pool<'a> {
             return Err("encrypted Local storage mapping has foreign backing".into());
         }
         Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn validate_mapping_unprivileged(&self) -> Result<(), String> {
+        Err("unprivileged encrypted mapping validation requires Linux".into())
     }
 
     fn validate_mount_identity(&self) -> Result<(), String> {
