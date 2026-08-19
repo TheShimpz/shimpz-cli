@@ -10,7 +10,6 @@ use std::process::{Command, ExitStatus, Stdio};
 pub(crate) enum Tool {
     Chown,
     Docker,
-    FileVault,
     Findmnt,
     Install,
     Launchctl,
@@ -19,7 +18,6 @@ pub(crate) enum Tool {
     MkfsExt4,
     Mount,
     Mountpoint,
-    PowerShell,
     Sudo,
     Systemctl,
     Umount,
@@ -35,7 +33,6 @@ impl Tool {
                 "/usr/local/bin/docker",
                 "/opt/homebrew/bin/docker",
             ],
-            Self::FileVault => &["/usr/bin/fdesetup"],
             Self::Findmnt => &["/usr/bin/findmnt", "/bin/findmnt"],
             Self::Install => &["/usr/bin/install"],
             Self::Launchctl => &["/bin/launchctl"],
@@ -44,7 +41,6 @@ impl Tool {
             Self::MkfsExt4 => &["/usr/sbin/mkfs.ext4", "/sbin/mkfs.ext4"],
             Self::Mount => &["/usr/bin/mount", "/bin/mount"],
             Self::Mountpoint => &["/usr/bin/mountpoint", "/bin/mountpoint"],
-            Self::PowerShell => &["/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"],
             Self::Sudo => &["/usr/bin/sudo"],
             Self::Systemctl => &["/usr/bin/systemctl", "/bin/systemctl"],
             Self::Umount => &["/usr/bin/umount", "/bin/umount"],
@@ -55,21 +51,9 @@ impl Tool {
         self.candidates()
             .iter()
             .map(Path::new)
-            .find_map(|path| match self {
-                Self::PowerShell => trusted_windows_executable(path),
-                _ => trusted_executable(path),
-            })
+            .find_map(trusted_executable)
             .ok_or_else(|| format!("required host tool is unavailable: {self:?}"))
     }
-}
-
-fn trusted_windows_executable(path: &Path) -> Option<PathBuf> {
-    let metadata = path.symlink_metadata().ok()?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
-    }
-    let canonical = path.canonicalize().ok()?;
-    (canonical == path).then_some(canonical)
 }
 
 fn trusted_executable(path: &Path) -> Option<PathBuf> {
@@ -233,7 +217,6 @@ mod tests {
         for tool in [
             Tool::Chown,
             Tool::Docker,
-            Tool::FileVault,
             Tool::Findmnt,
             Tool::Install,
             Tool::Launchctl,
@@ -242,7 +225,6 @@ mod tests {
             Tool::MkfsExt4,
             Tool::Mount,
             Tool::Mountpoint,
-            Tool::PowerShell,
             Tool::Sudo,
             Tool::Systemctl,
             Tool::Umount,
@@ -250,30 +232,6 @@ mod tests {
             assert!(!tool.candidates().is_empty());
             assert!(tool.candidates().iter().all(|path| path.starts_with('/')));
             assert!(tool.candidates().iter().all(|path| !path.contains("..")));
-        }
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn windows_acl_tool_does_not_apply_drvfs_unix_ownership() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = root.join("powershell.exe");
-        std::fs::write(&executable, []).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o777)).unwrap();
-
-        assert_eq!(
-            trusted_windows_executable(&executable),
-            Some(executable.clone())
-        );
-        assert_eq!(trusted_executable(&executable), None);
-        if directory.path() != root {
-            assert_eq!(
-                trusted_windows_executable(&directory.path().join("powershell.exe")),
-                None
-            );
         }
     }
 }

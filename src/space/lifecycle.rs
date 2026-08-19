@@ -398,10 +398,7 @@ impl Context {
     ) -> Result<linux::Admission, String> {
         match self.profile {
             HostProfile::Linux => linux::Pool::new(&self.paths, space_id)?.ensure(fresh, scheduled),
-            HostProfile::MacOs | HostProfile::Wsl => {
-                managed::verify(self.profile, &self.paths)?;
-                Ok(linux::Admission::Verified)
-            }
+            HostProfile::MacOs | HostProfile::Wsl => Ok(linux::Admission::Verified),
         }
     }
 

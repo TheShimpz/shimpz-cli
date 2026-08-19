@@ -36,7 +36,7 @@
 - Keep source files small and responsibilities explicit.
 - Space commands never load Creator Account credentials, call Creator authentication, or emit a Creator bearer.
 - A release binary resolves privileged Space tools from fixed reviewed platform names and paths. Environment or
-  configuration overrides for Docker, Compose, `sudo`, storage tools, or PowerShell are test-compiled only and must
+  configuration overrides for Docker, Compose, `sudo`, or storage tools are test-compiled only and must
   be inert in the release binary.
 - A Space-managed executable is updated only through the atomic Local release. `shimpz upgrade` must refuse to
   replace it; the Local release ordinal remains its anti-rollback authority.

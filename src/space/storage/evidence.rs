@@ -42,10 +42,6 @@ impl HostProfile {
     }
 }
 
-pub(crate) fn bitlocker_record_valid(value: &str) -> bool {
-    value.trim_end_matches(['\r', '\n']) == "shimpz-bitlocker-v1|FullyEncrypted|On|100"
-}
-
 pub(crate) fn luks_dump_valid(value: &str) -> bool {
     exactly_one(value, "Version:")
         && exactly_one_trimmed(value, "cipher:")
@@ -129,21 +125,6 @@ mod tests {
             assert!(classify(evidence.0, evidence.1, evidence.2, evidence.3, evidence.4).is_err());
         }
         assert!(classify("linux", "x86_64", true, true, "init").is_err());
-    }
-
-    #[test]
-    fn parses_only_exact_bitlocker_evidence() {
-        assert!(bitlocker_record_valid(
-            "shimpz-bitlocker-v1|FullyEncrypted|On|100\r\n"
-        ));
-        for invalid in [
-            "shimpz-bitlocker-v1|EncryptionInProgress|On|99",
-            "shimpz-bitlocker-v1|FullyEncrypted|Off|100",
-            "FullyEncrypted|On|100",
-            "shimpz-bitlocker-v1|FullyEncrypted|On|100|extra",
-        ] {
-            assert!(!bitlocker_record_valid(invalid));
-        }
     }
 
     #[test]
