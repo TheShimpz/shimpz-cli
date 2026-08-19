@@ -816,14 +816,13 @@ fn refuse_open_partial_pool(paths: &Paths) -> Result<(), String> {
         }) {
             continue;
         }
-        let Ok(backing) = fs::read_to_string(entry.path().join("loop/backing_file")) else {
+        let Some(backing) = read_loop_backing(&entry.path().join("loop/backing_file"))? else {
             continue;
         };
-        let backing = backing.trim_end();
-        if deleted_backing_is_pool(backing, &pool) {
+        if deleted_backing_is_pool(&backing, &pool) {
             return Err("the partial encrypted storage has a deleted open backing file".into());
         }
-        if PathBuf::from(backing)
+        if PathBuf::from(&backing)
             .canonicalize()
             .is_ok_and(|backing| backing == pool)
         {
@@ -867,14 +866,13 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
             continue;
         }
         let backing = entry.path().join("loop/backing_file");
-        let Ok(backing) = fs::read_to_string(backing) else {
+        let Some(backing) = read_loop_backing(&backing)? else {
             continue;
         };
-        let backing = backing.trim_end();
-        if deleted_backing_is_pool(backing, &pool) {
+        if deleted_backing_is_pool(&backing, &pool) {
             return Err("the encrypted Local storage has a deleted open backing file".into());
         }
-        let Ok(backing) = PathBuf::from(backing).canonicalize() else {
+        let Ok(backing) = PathBuf::from(&backing).canonicalize() else {
             continue;
         };
         if backing != pool {
@@ -900,6 +898,14 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
     identities.sort();
     identities.dedup();
     Ok(identities)
+}
+
+fn read_loop_backing(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(document) => Ok(Some(document.trim_end().to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("the host loop-device backing evidence is unavailable".into()),
+    }
 }
 
 fn deleted_backing_is_pool(value: &str, pool_image: &Path) -> bool {
@@ -1256,6 +1262,28 @@ mod tests {
     }
 
     #[test]
+    fn skips_only_absent_loop_backing_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = root.path().join("backing_file");
+        assert_eq!(read_loop_backing(&backing).unwrap(), None);
+
+        fs::write(&backing, "/owned/pool.img").unwrap();
+        assert_eq!(
+            read_loop_backing(&backing).unwrap().as_deref(),
+            Some("/owned/pool.img")
+        );
+        fs::write(&backing, "/owned/pool.img (deleted)\n").unwrap();
+        assert_eq!(
+            read_loop_backing(&backing).unwrap().as_deref(),
+            Some("/owned/pool.img (deleted)")
+        );
+
+        fs::remove_file(&backing).unwrap();
+        fs::create_dir(&backing).unwrap();
+        assert!(read_loop_backing(&backing).is_err());
+    }
+
+    #[test]
     fn admits_only_current_interrupted_provision_layouts() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
@@ -1317,7 +1345,7 @@ mod tests {
         Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())]).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
-        reset(&paths, None).unwrap();
+        reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();
         reset(&paths, None).unwrap();
         assert!(!paths.security.exists());
     }
