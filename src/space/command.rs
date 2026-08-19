@@ -1,4 +1,4 @@
-//! Fixed host command boundary for privileged Space operations.
+//! Fixed host command boundary for Local Space operations.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -21,6 +21,12 @@ pub(crate) enum Tool {
     Sudo,
     Systemctl,
     Umount,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostOs {
+    MacOs,
+    Other,
 }
 
 impl Tool {
@@ -51,12 +57,12 @@ impl Tool {
         self.candidates()
             .iter()
             .map(Path::new)
-            .find_map(trusted_executable)
+            .find_map(|path| trusted_executable(path, self))
             .ok_or_else(|| format!("required host tool is unavailable: {self:?}"))
     }
 }
 
-fn trusted_executable(path: &Path) -> Option<PathBuf> {
+fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
     let canonical = path.canonicalize().ok()?;
     let metadata = canonical.metadata().ok()?;
     if !metadata.is_file() {
@@ -65,11 +71,30 @@ fn trusted_executable(path: &Path) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+        let host = if cfg!(target_os = "macos") {
+            HostOs::MacOs
+        } else {
+            HostOs::Other
+        };
+        if !trusted_metadata(
+            tool,
+            host,
+            metadata.uid(),
+            rustix::process::getuid().as_raw(),
+            metadata.permissions().mode(),
+        ) {
             return None;
         }
     }
+    #[cfg(not(unix))]
+    let _ = tool;
     Some(canonical)
+}
+
+fn trusted_metadata(tool: Tool, host: HostOs, file_uid: u32, process_uid: u32, mode: u32) -> bool {
+    let owner_is_trusted =
+        file_uid == 0 || (tool == Tool::Docker && host == HostOs::MacOs && file_uid == process_uid);
+    owner_is_trusted && mode & 0o022 == 0
 }
 
 pub(crate) fn output<I, S>(tool: Tool, arguments: I) -> Result<String, String>
@@ -233,5 +258,105 @@ mod tests {
             assert!(tool.candidates().iter().all(|path| path.starts_with('/')));
             assert!(tool.candidates().iter().all(|path| !path.contains("..")));
         }
+        assert_eq!(
+            Tool::Docker.candidates(),
+            [
+                "/usr/bin/docker",
+                "/Applications/Docker.app/Contents/Resources/bin/docker",
+                "/usr/local/bin/docker",
+                "/opt/homebrew/bin/docker",
+            ]
+        );
+    }
+
+    #[test]
+    fn macos_docker_admits_only_root_or_the_current_user() {
+        assert!(trusted_metadata(
+            Tool::Docker,
+            HostOs::MacOs,
+            501,
+            501,
+            0o100_755,
+        ));
+        assert!(!trusted_metadata(
+            Tool::Docker,
+            HostOs::MacOs,
+            502,
+            501,
+            0o100_755,
+        ));
+        assert!(!trusted_metadata(
+            Tool::Docker,
+            HostOs::MacOs,
+            501,
+            0,
+            0o100_755,
+        ));
+        assert!(trusted_metadata(
+            Tool::Docker,
+            HostOs::MacOs,
+            0,
+            501,
+            0o100_755,
+        ));
+    }
+
+    #[test]
+    fn user_owned_executable_is_rejected_outside_macos_docker() {
+        for tool in [
+            Tool::Chown,
+            Tool::Findmnt,
+            Tool::Install,
+            Tool::Launchctl,
+            Tool::Losetup,
+            Tool::Luks,
+            Tool::MkfsExt4,
+            Tool::Mount,
+            Tool::Mountpoint,
+            Tool::Sudo,
+            Tool::Systemctl,
+            Tool::Umount,
+        ] {
+            assert!(!trusted_metadata(tool, HostOs::MacOs, 501, 501, 0o100_755,));
+        }
+        assert!(!trusted_metadata(
+            Tool::Docker,
+            HostOs::Other,
+            501,
+            501,
+            0o100_755,
+        ));
+    }
+
+    #[test]
+    fn writable_executable_is_never_trusted() {
+        assert!(!trusted_metadata(
+            Tool::Docker,
+            HostOs::MacOs,
+            501,
+            501,
+            0o100_775,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_metadata_uses_the_platform_owner_policy() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let uid = rustix::process::getuid().as_raw();
+        assert_eq!(
+            trusted_executable(&executable, Tool::Docker).is_some(),
+            uid == 0 || cfg!(target_os = "macos")
+        );
+
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(trusted_executable(&executable, Tool::Docker).is_none());
     }
 }
