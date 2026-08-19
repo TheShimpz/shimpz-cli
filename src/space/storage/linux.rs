@@ -150,11 +150,6 @@ impl LockedPassphrase {
             .write(true)
             .open("/dev/tty")
             .map_err(|_| "encrypted storage requires a terminal".to_owned())?;
-        let mut output = &tty;
-        output
-            .write_all(label.as_bytes())
-            .and_then(|()| output.flush())
-            .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
         let signals = SignalMaskRestoration::block()?;
         let original = rustix::termios::tcgetattr(&tty)
             .map_err(|_| "encrypted storage terminal state is unavailable".to_owned())?;
@@ -162,12 +157,17 @@ impl LockedPassphrase {
         hidden
             .local_modes
             .remove(LocalModes::ECHO | LocalModes::ECHONL);
-        rustix::termios::tcsetattr(&tty, OptionalActions::Now, &hidden)
+        rustix::termios::tcsetattr(&tty, OptionalActions::Flush, &hidden)
             .map_err(|_| "encrypted storage terminal could not disable echo".to_owned())?;
         let restoration = EchoRestoration {
             tty: &tty,
             original: Some(original),
         };
+        let mut output = &tty;
+        output
+            .write_all(label.as_bytes())
+            .and_then(|()| output.flush())
+            .map_err(|_| "encrypted storage terminal prompt failed".to_owned())?;
         let result = Self::read_from(&tty);
         restoration.restore()?;
         output
