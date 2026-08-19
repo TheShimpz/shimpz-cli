@@ -142,10 +142,13 @@ mod tests {
         fs::create_dir(root.path().join("version")).unwrap();
         assert!(detect_from(root.path(), "linux", "x86_64").is_err());
 
-        fs::remove_dir(root.path().join("version")).unwrap();
-        fs::write(root.path().join("version"), "Microsoft WSL2").unwrap();
-        fs::write(root.path().join("sys"), "not a directory").unwrap();
-        assert!(detect_from(root.path(), "linux", "x86_64").is_err());
+        #[cfg(unix)]
+        {
+            fs::remove_dir(root.path().join("version")).unwrap();
+            fs::write(root.path().join("version"), "Linux version 6.8").unwrap();
+            fs::write(root.path().join("sys"), "not a directory").unwrap();
+            assert!(detect_from(root.path(), "linux", "x86_64").is_err());
+        }
 
         assert_eq!(
             detect_from(root.path(), "macos", "aarch64"),
