@@ -35,7 +35,7 @@ shimpz upgrade
 
 `shimpz auth` opens the default browser for OAuth authorization and also
 prints the URL and user code in the terminal. `shimpz auth status` validates
-the exact Accounts session online, while `shimpz auth logout` revokes the
+the exact Account session online, while `shimpz auth logout` revokes the
 complete rotating token family. Local credentials are stored in the current
 OS user configuration directory with owner-only permissions.
 
