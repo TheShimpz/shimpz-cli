@@ -12,7 +12,9 @@ use memsafe::Secret;
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustix::termios::{LocalModes, OptionalActions, QueueSelector, Termios};
 
-use super::evidence::{luks_dump_valid, luks_unlock_credentials_valid};
+use super::evidence::{
+    MIN_CRYPTSETUP_VERSION, cryptsetup_version, luks_dump_valid, luks_unlock_credentials_valid,
+};
 use crate::space::command::{self, Tool};
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
@@ -302,6 +304,7 @@ impl<'a> Pool<'a> {
     }
 
     pub(crate) fn ensure(&self, fresh: bool, scheduled: bool) -> Result<Admission, String> {
+        admit_cryptsetup()?;
         if !self.paths.security.exists() {
             if !fresh {
                 return Err("the existing Local Space has no encrypted storage".into());
@@ -732,6 +735,7 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
     if incomplete(paths)? {
         return reset_incomplete(paths);
     }
+    admit_cryptsetup()?;
     validate_metadata(paths)?;
     let mappings = discover_pool_mappings(paths)?;
     let identity = reset_mapping_identity(expected_space_id, &mappings)?;
@@ -1007,6 +1011,20 @@ fn validate_metadata(paths: &Paths) -> Result<(), String> {
     .map_err(|_| "encrypted Local storage unlock credential evidence is unavailable")?;
     if !luks_unlock_credentials_valid(&unlock_credentials) {
         return Err("encrypted Local storage unlock credentials are invalid".into());
+    }
+    Ok(())
+}
+
+fn admit_cryptsetup() -> Result<(), String> {
+    let document = command::output(Tool::Luks, ["--version"])?;
+    let version = cryptsetup_version(&document).ok_or_else(|| {
+        "encrypted Local storage cryptsetup version evidence is malformed".to_owned()
+    })?;
+    if (version.0, version.1) < MIN_CRYPTSETUP_VERSION {
+        return Err(format!(
+            "encrypted Local storage requires cryptsetup {}.{} or newer; found {}.{}.{}",
+            MIN_CRYPTSETUP_VERSION.0, MIN_CRYPTSETUP_VERSION.1, version.0, version.1, version.2,
+        ));
     }
     Ok(())
 }

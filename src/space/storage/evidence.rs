@@ -2,6 +2,30 @@
 
 use serde_json::Value;
 
+pub(crate) const MIN_CRYPTSETUP_VERSION: (u32, u32) = (2, 4);
+
+pub(crate) fn cryptsetup_version(value: &str) -> Option<(u32, u32, u32)> {
+    let mut lines = value.lines();
+    let line = lines.next().filter(|line| !line.is_empty())?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let mut fields = line.split_ascii_whitespace();
+    if fields.next() != Some("cryptsetup") {
+        return None;
+    }
+    let mut numbers = fields.next()?.split('.');
+    let version = (
+        numbers.next()?.parse().ok()?,
+        numbers.next()?.parse().ok()?,
+        numbers.next()?.parse().ok()?,
+    );
+    if numbers.next().is_some() {
+        return None;
+    }
+    Some(version)
+}
+
 pub(crate) fn luks_dump_valid(value: &str) -> bool {
     exactly_one(value, "Version:")
         && exactly_one_trimmed(value, "cipher:")
@@ -76,6 +100,40 @@ mod tests {
     use super::*;
 
     const LUKS: &str = "Version:       2\n  cipher:     aes-xts-plain64\n  Key:        512 bits\n  PBKDF:      argon2id\n  Time cost:  8\n  Memory:     262144\n  Threads:    4\n";
+
+    #[test]
+    fn parses_only_strict_cryptsetup_versions() {
+        for (document, expected) in [
+            ("cryptsetup 2.4.0\n", (2, 4, 0)),
+            (
+                "cryptsetup 2.7.5 flags: UDEV BLKID KEYRING KERNEL_CAPI",
+                (2, 7, 5),
+            ),
+            ("cryptsetup 2.10.0", (2, 10, 0)),
+            ("cryptsetup 10.0.0", (10, 0, 0)),
+            (" cryptsetup 2.4.0 ", (2, 4, 0)),
+        ] {
+            assert_eq!(cryptsetup_version(document), Some(expected));
+            assert!((expected.0, expected.1) >= MIN_CRYPTSETUP_VERSION);
+        }
+        for document in [
+            "",
+            "\n",
+            "cryptsetup",
+            "cryptsetup 2.4",
+            "cryptsetup 2.4.0.1",
+            "cryptsetup 2.4.0-rc1",
+            "Cryptsetup 2.4.0",
+            "cryptsetup 2.4.0\nextra",
+            "cryptsetup 4294967296.4.0",
+        ] {
+            assert_eq!(cryptsetup_version(document), None);
+        }
+        for document in ["cryptsetup 2.3.7", "cryptsetup 1.7.5"] {
+            let version = cryptsetup_version(document).expect("the version shape is valid");
+            assert!((version.0, version.1) < MIN_CRYPTSETUP_VERSION);
+        }
+    }
 
     #[test]
     fn parses_only_exact_luks2_parameters() {
