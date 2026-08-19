@@ -508,6 +508,14 @@ mod tests {
                 "SHIMPZ_STORAGE_PROFILE=linux-luks",
                 "SHIMPZ_STORAGE_PROFILE=managed-disk",
             ),
+            valid.replace(
+                "SHIMPZ_STORAGE_PROFILE=linux-luks",
+                "SHIMPZ_STORAGE_PROFILE=macos-filevault",
+            ),
+            valid.replace(
+                "SHIMPZ_STORAGE_PROFILE=linux-luks",
+                "SHIMPZ_STORAGE_PROFILE=windows-wsl",
+            ),
             valid.replace("SHIMPZ_CPUSET=0", "SHIMPZ_CPUSET=0,1"),
             valid.replace(
                 "SHIMPZ_DOCKER_SOCKET=/var/run/docker.sock",
