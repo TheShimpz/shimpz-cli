@@ -28,17 +28,27 @@ pub(crate) fn classify(
 }
 
 pub(crate) fn detect() -> Result<HostProfile, String> {
-    let microsoft_kernel = std::fs::read_to_string("/proc/version")
-        .is_ok_and(|value| value.to_ascii_lowercase().contains("microsoft"));
-    let wsl_interop = Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists();
-    let pid_one = std::fs::read_to_string("/proc/1/comm").unwrap_or_default();
-    classify(
+    detect_from(
+        Path::new("/proc"),
         std::env::consts::OS,
         std::env::consts::ARCH,
-        microsoft_kernel,
-        wsl_interop,
-        &pid_one,
     )
+}
+
+fn detect_from(proc_root: &Path, os: &str, arch: &str) -> Result<HostProfile, String> {
+    if os != "linux" {
+        return classify(os, arch, false, false, "");
+    }
+    let microsoft_kernel = std::fs::read_to_string(proc_root.join("version"))
+        .map_err(|_| "the Linux kernel identity is unavailable")?
+        .to_ascii_lowercase()
+        .contains("microsoft");
+    let wsl_interop = proc_root
+        .join("sys/fs/binfmt_misc/WSLInterop")
+        .try_exists()
+        .map_err(|_| "the WSL interop evidence is unavailable")?;
+    let pid_one = std::fs::read_to_string(proc_root.join("1/comm")).unwrap_or_default();
+    classify(os, arch, microsoft_kernel, wsl_interop, &pid_one)
 }
 
 impl HostProfile {
@@ -49,7 +59,10 @@ impl HostProfile {
         }
     }
 
-    pub(crate) const fn disk_encryption_recommendation(self) -> Option<&'static str> {
+    pub(crate) const fn disk_encryption_recommendation(self, fresh: bool) -> Option<&'static str> {
+        if !fresh {
+            return None;
+        }
         match self {
             Self::Linux => None,
             Self::MacOs => Some(
@@ -64,6 +77,8 @@ impl HostProfile {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -83,19 +98,25 @@ mod tests {
         assert_eq!(HostProfile::Linux.storage(), StorageProfile::LinuxLuks);
         assert_eq!(HostProfile::Wsl.storage(), StorageProfile::ManagedDisk);
         assert_eq!(HostProfile::MacOs.storage(), StorageProfile::ManagedDisk);
-        assert_eq!(HostProfile::Linux.disk_encryption_recommendation(), None);
         assert_eq!(
-            HostProfile::MacOs.disk_encryption_recommendation(),
+            HostProfile::Linux.disk_encryption_recommendation(true),
+            None
+        );
+        assert_eq!(
+            HostProfile::MacOs.disk_encryption_recommendation(true),
             Some(
                 "Enable FileVault to protect Docker data at rest; Shimpz does not verify this macOS setting. https://docs.shimpz.com/install/macos/"
             )
         );
         assert_eq!(
-            HostProfile::Wsl.disk_encryption_recommendation(),
+            HostProfile::Wsl.disk_encryption_recommendation(true),
             Some(
                 "Enable BitLocker on the Windows volume that stores Docker Desktop data; Shimpz does not verify this Windows setting. https://docs.shimpz.com/install/windows/"
             )
         );
+        for profile in [HostProfile::Linux, HostProfile::MacOs, HostProfile::Wsl] {
+            assert_eq!(profile.disk_encryption_recommendation(false), None);
+        }
         for evidence in [
             ("linux", "aarch64", false, false, "systemd"),
             ("macos", "x86_64", false, false, "launchd"),
@@ -106,6 +127,30 @@ mod tests {
             assert!(classify(evidence.0, evidence.1, evidence.2, evidence.3, evidence.4).is_err());
         }
         assert!(classify("linux", "x86_64", true, true, "init").is_err());
+    }
+
+    #[test]
+    fn detects_only_complete_linux_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("version"), "Linux version 6.8").unwrap();
+        assert_eq!(
+            detect_from(root.path(), "linux", "x86_64"),
+            Ok(HostProfile::Linux)
+        );
+
+        fs::remove_file(root.path().join("version")).unwrap();
+        fs::create_dir(root.path().join("version")).unwrap();
+        assert!(detect_from(root.path(), "linux", "x86_64").is_err());
+
+        fs::remove_dir(root.path().join("version")).unwrap();
+        fs::write(root.path().join("version"), "Microsoft WSL2").unwrap();
+        fs::write(root.path().join("sys"), "not a directory").unwrap();
+        assert!(detect_from(root.path(), "linux", "x86_64").is_err());
+
+        assert_eq!(
+            detect_from(root.path(), "macos", "aarch64"),
+            Ok(HostProfile::MacOs)
+        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

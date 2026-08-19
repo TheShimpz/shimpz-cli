@@ -149,8 +149,9 @@ impl Context {
         if exact_release.is_none() && self.handoff_if_needed(&release, false)? {
             return Ok("The release-bound CLI completed the installation.".into());
         }
-        if installed.is_none()
-            && let Some(recommendation) = self.profile.disk_encryption_recommendation()
+        if let Some(recommendation) = self
+            .profile
+            .disk_encryption_recommendation(installed.is_none())
         {
             output::warning(recommendation);
         }
