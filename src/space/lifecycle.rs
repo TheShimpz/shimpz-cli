@@ -304,11 +304,6 @@ impl Context {
     fn reset(&self) -> Result<String, String> {
         let marker = self.paths.marker_is_current()?;
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
-        if self.profile != HostProfile::Linux && self.paths.security.exists() {
-            return Err(
-                "unexpected Local security content is outside the managed host profile".into(),
-            );
-        }
         if !marker && inventory.empty() && !self.paths.security.exists() {
             scheduler::remove(self.profile, &self.paths)?;
             let preserved = self.remove_files()?;
@@ -720,7 +715,7 @@ fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> 
 
 fn reset_outcome(already_reset: bool, preserved: &[String]) -> String {
     let action = if already_reset {
-        "Shimpz Space was already reset."
+        "Shimpz Space was reset successfully. No change was needed."
     } else {
         "Shimpz Space was reset successfully."
     };
@@ -1194,14 +1189,19 @@ mod tests {
 
     #[test]
     fn reset_outcomes_are_positive_and_report_preserved_content() {
+        let already_clean = reset_outcome(true, &[]);
+        let changed = reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()]);
         assert_eq!(
-            reset_outcome(true, &[]),
-            "Shimpz Space was already reset. No managed Space data remains; the shimpz command and lifecycle lock are retained."
+            already_clean,
+            "Shimpz Space was reset successfully. No change was needed. No managed Space data remains; the shimpz command and lifecycle lock are retained."
         );
         assert_eq!(
-            reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()]),
+            changed,
             "Shimpz Space was reset successfully. Preserved unrecognized content: /home/ada/.shimpz/notes"
         );
+        for outcome in [already_clean, changed] {
+            assert!(outcome.contains("Shimpz Space was reset successfully"));
+        }
     }
 
     #[test]
