@@ -16,14 +16,25 @@ pub(crate) fn cryptsetup_version(value: &str) -> Option<(u32, u32, u32)> {
     }
     let mut numbers = fields.next()?.split('.');
     let version = (
-        numbers.next()?.parse().ok()?,
-        numbers.next()?.parse().ok()?,
-        numbers.next()?.parse().ok()?,
+        decimal_component(numbers.next()?)?,
+        decimal_component(numbers.next()?)?,
+        decimal_component(numbers.next()?)?,
     );
     if numbers.next().is_some() {
         return None;
     }
     Some(version)
+}
+
+pub(crate) fn cryptsetup_version_supported(version: (u32, u32, u32)) -> bool {
+    (version.0, version.1) >= MIN_CRYPTSETUP_VERSION
+}
+
+fn decimal_component(value: &str) -> Option<u32> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 pub(crate) fn luks_dump_valid(value: &str) -> bool {
@@ -114,7 +125,6 @@ mod tests {
             (" cryptsetup 2.4.0 ", (2, 4, 0)),
         ] {
             assert_eq!(cryptsetup_version(document), Some(expected));
-            assert!((expected.0, expected.1) >= MIN_CRYPTSETUP_VERSION);
         }
         for document in [
             "",
@@ -123,15 +133,25 @@ mod tests {
             "cryptsetup 2.4",
             "cryptsetup 2.4.0.1",
             "cryptsetup 2.4.0-rc1",
+            "cryptsetup +2.4.0",
+            "cryptsetup 2.+4.0",
+            "cryptsetup 2.4.+0",
+            "cryptsetup 2..0",
             "Cryptsetup 2.4.0",
             "cryptsetup 2.4.0\nextra",
             "cryptsetup 4294967296.4.0",
         ] {
             assert_eq!(cryptsetup_version(document), None);
         }
-        for document in ["cryptsetup 2.3.7", "cryptsetup 1.7.5"] {
-            let version = cryptsetup_version(document).expect("the version shape is valid");
-            assert!((version.0, version.1) < MIN_CRYPTSETUP_VERSION);
+    }
+
+    #[test]
+    fn admits_only_supported_cryptsetup_versions() {
+        for version in [(2, 4, 0), (2, 10, 0), (3, 0, 0), (10, 0, 0)] {
+            assert!(cryptsetup_version_supported(version));
+        }
+        for version in [(2, 3, 7), (1, 7, 5)] {
+            assert!(!cryptsetup_version_supported(version));
         }
     }
 

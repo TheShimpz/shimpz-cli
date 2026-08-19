@@ -13,7 +13,8 @@ use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustix::termios::{LocalModes, OptionalActions, QueueSelector, Termios};
 
 use super::evidence::{
-    MIN_CRYPTSETUP_VERSION, cryptsetup_version, luks_dump_valid, luks_unlock_credentials_valid,
+    MIN_CRYPTSETUP_VERSION, cryptsetup_version, cryptsetup_version_supported, luks_dump_valid,
+    luks_unlock_credentials_valid,
 };
 use crate::space::command::{self, Tool};
 use crate::space::paths::{Paths, STORAGE_MARKER};
@@ -1020,7 +1021,7 @@ fn admit_cryptsetup() -> Result<(), String> {
     let version = cryptsetup_version(&document).ok_or_else(|| {
         "encrypted Local storage cryptsetup version evidence is malformed".to_owned()
     })?;
-    if (version.0, version.1) < MIN_CRYPTSETUP_VERSION {
+    if !cryptsetup_version_supported(version) {
         return Err(format!(
             "encrypted Local storage requires cryptsetup {}.{} or newer; found {}.{}.{}",
             MIN_CRYPTSETUP_VERSION.0, MIN_CRYPTSETUP_VERSION.1, version.0, version.1, version.2,
