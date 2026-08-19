@@ -81,7 +81,43 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install musl linker
         if: ${{ contains(matrix.platform.target, 'musl') }}
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        timeout-minutes: 13
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Dpkg::Lock::Timeout=60
+          )
+          installed=0
+          for attempt in 1 2 3; do
+            if (( attempt > 1 )); then
+              echo "Repairing interrupted package state before attempt ${attempt}." >&2
+              sudo timeout --kill-after=10s 60s dpkg --configure -a || true
+              sleep 5
+            fi
+            if ! sudo timeout --kill-after=10s 60s apt-get "${apt_options[@]}" update; then
+              echo "Package index attempt ${attempt} failed." >&2
+              continue
+            fi
+            if sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" install -y \
+              --no-install-recommends musl-tools
+            then
+              installed=1
+              break
+            fi
+            echo "Package installation attempt ${attempt} failed." >&2
+          done
+          if (( installed != 1 )); then
+            echo "::error::the musl linker could not be installed"
+            exit 1
+          fi
+          command -v musl-gcc >/dev/null || {
+            echo "::error::required workflow tool is missing: musl-gcc"
+            exit 1
+          }
       - run: rustup target add ${{ matrix.platform.target }}
       - run: cargo build --release --locked --target ${{ matrix.platform.target }}
       - name: Verify binary
