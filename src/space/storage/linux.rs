@@ -12,7 +12,7 @@ use memsafe::Secret;
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use rustix::termios::{LocalModes, OptionalActions, QueueSelector, Termios};
 
-use super::evidence::luks_dump_valid;
+use super::evidence::{luks_dump_valid, luks_unlock_credentials_valid};
 use crate::space::command::{self, Tool};
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
@@ -995,6 +995,18 @@ fn validate_metadata(paths: &Paths) -> Result<(), String> {
     )?;
     if !luks_dump_valid(&dump) {
         return Err("encrypted Local storage parameters are invalid".into());
+    }
+    let unlock_credentials = command::output(
+        Tool::Luks,
+        [
+            OsString::from("luksDump"),
+            OsString::from("--dump-json-metadata"),
+            paths.pool_image.as_os_str().to_owned(),
+        ],
+    )
+    .map_err(|_| "encrypted Local storage unlock credential evidence is unavailable")?;
+    if !luks_unlock_credentials_valid(&unlock_credentials) {
+        return Err("encrypted Local storage unlock credentials are invalid".into());
     }
     Ok(())
 }

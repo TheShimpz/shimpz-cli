@@ -1,5 +1,7 @@
 //! Native Linux LUKS2 evidence parsing.
 
+use serde_json::Value;
+
 pub(crate) fn luks_dump_valid(value: &str) -> bool {
     exactly_one(value, "Version:")
         && exactly_one_trimmed(value, "cipher:")
@@ -15,6 +17,27 @@ pub(crate) fn luks_dump_valid(value: &str) -> bool {
         && has_exact_trimmed(value, "Time cost:", "8")
         && has_exact_trimmed(value, "Memory:", "262144")
         && has_exact_trimmed(value, "Threads:", "4")
+}
+
+pub(crate) fn luks_unlock_credentials_valid(value: &str) -> bool {
+    let Ok(metadata) = serde_json::from_str::<Value>(value) else {
+        return false;
+    };
+    let Some(metadata) = metadata.as_object() else {
+        return false;
+    };
+    let Some(keyslots) = metadata.get("keyslots").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(tokens) = metadata.get("tokens").and_then(Value::as_object) else {
+        return false;
+    };
+    keyslots.len() == 1
+        && keyslots
+            .get("0")
+            .and_then(Value::as_object)
+            .is_some_and(|slot| slot.get("type").and_then(Value::as_str) == Some("luks2"))
+        && tokens.is_empty()
 }
 
 fn exactly_one(value: &str, prefix: &str) -> bool {
@@ -69,6 +92,29 @@ mod tests {
             format!("{LUKS}  Memory:     262144\n"),
         ] {
             assert!(!luks_dump_valid(&invalid));
+        }
+    }
+
+    #[test]
+    fn admits_only_one_human_unlock_credential() {
+        let valid = r#"{"keyslots":{"0":{"type":"luks2"}},"tokens":{}}"#;
+        assert!(luks_unlock_credentials_valid(valid));
+        for invalid in [
+            "not-json",
+            "[]",
+            r#"{"tokens":{}}"#,
+            r#"{"keyslots":[],"tokens":{}}"#,
+            r#"{"keyslots":{},"tokens":{}}"#,
+            r#"{"keyslots":{"0":{"type":"luks2"},"1":{"type":"luks2"}},"tokens":{}}"#,
+            r#"{"keyslots":{"1":{"type":"luks2"}},"tokens":{}}"#,
+            r#"{"keyslots":{"0":[]},"tokens":{}}"#,
+            r#"{"keyslots":{"0":{}},"tokens":{}}"#,
+            r#"{"keyslots":{"0":{"type":"reencrypt"}},"tokens":{}}"#,
+            r#"{"keyslots":{"0":{"type":"luks2"}}}"#,
+            r#"{"keyslots":{"0":{"type":"luks2"}},"tokens":[]}"#,
+            r#"{"keyslots":{"0":{"type":"luks2"}},"tokens":{"0":{"type":"systemd-tpm2"}}}"#,
+        ] {
+            assert!(!luks_unlock_credentials_valid(invalid));
         }
     }
 }
