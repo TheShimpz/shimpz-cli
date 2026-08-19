@@ -48,6 +48,18 @@ impl HostProfile {
             Self::MacOs | Self::Wsl => StorageProfile::ManagedDisk,
         }
     }
+
+    pub(crate) const fn disk_encryption_recommendation(self) -> Option<&'static str> {
+        match self {
+            Self::Linux => None,
+            Self::MacOs => Some(
+                "Enable FileVault to protect Docker data at rest; Shimpz does not verify this macOS setting. https://docs.shimpz.com/install/macos/",
+            ),
+            Self::Wsl => Some(
+                "Enable BitLocker on the Windows volume that stores Docker Desktop data; Shimpz does not verify this Windows setting. https://docs.shimpz.com/install/windows/",
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -71,6 +83,19 @@ mod tests {
         assert_eq!(HostProfile::Linux.storage(), StorageProfile::LinuxLuks);
         assert_eq!(HostProfile::Wsl.storage(), StorageProfile::ManagedDisk);
         assert_eq!(HostProfile::MacOs.storage(), StorageProfile::ManagedDisk);
+        assert_eq!(HostProfile::Linux.disk_encryption_recommendation(), None);
+        assert_eq!(
+            HostProfile::MacOs.disk_encryption_recommendation(),
+            Some(
+                "Enable FileVault to protect Docker data at rest; Shimpz does not verify this macOS setting. https://docs.shimpz.com/install/macos/"
+            )
+        );
+        assert_eq!(
+            HostProfile::Wsl.disk_encryption_recommendation(),
+            Some(
+                "Enable BitLocker on the Windows volume that stores Docker Desktop data; Shimpz does not verify this Windows setting. https://docs.shimpz.com/install/windows/"
+            )
+        );
         for evidence in [
             ("linux", "aarch64", false, false, "systemd"),
             ("macos", "x86_64", false, false, "launchd"),

@@ -59,9 +59,10 @@ provided.
 digest-pinned release. `shimpz status` reports it, `shimpz start` reconciles it,
 and `shimpz reset` removes its exact owned state. A corrupt prior installation
 is removed only after an exact interactive `Yes`; benign absence is successful.
-Linux storage is LUKS2-backed, macOS requires FileVault protection for Docker's
-default data disk, and WSL2 requires the default Docker data disk on a fully
-protected BitLocker volume.
+On native Linux, Shimpz creates and verifies a LUKS2-backed storage pool. On
+macOS and Windows/WSL2, Shimpz uses Docker-managed volumes and recommends
+FileVault or BitLocker respectively, but does not configure or verify the
+operating system's disk encryption.
 
 `shimpz upgrade` checks the latest stable GitHub release and replaces a
 standalone executable only when a newer version is available. A Space-managed
