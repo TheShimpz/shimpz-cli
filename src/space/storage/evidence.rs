@@ -1,46 +1,4 @@
-//! Fail-closed supported-host classification and managed-disk evidence parsing.
-
-use super::super::graph::StorageProfile;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HostProfile {
-    Linux,
-    MacOs,
-    Wsl,
-}
-
-pub(crate) fn classify(
-    os: &str,
-    arch: &str,
-    microsoft_kernel: bool,
-    wsl_interop: bool,
-    pid_one: &str,
-) -> Result<HostProfile, String> {
-    match (os, arch, microsoft_kernel, wsl_interop) {
-        ("linux", "x86_64", false, false) => Ok(HostProfile::Linux),
-        ("linux", "x86_64", true, true) if pid_one.trim() == "systemd" => Ok(HostProfile::Wsl),
-        ("macos", "aarch64", false, false) => Ok(HostProfile::MacOs),
-        ("linux", "x86_64", true, true) => Err("WSL2 must run systemd as PID 1".into()),
-        _ => Err("the host profile is unsupported or ambiguous".into()),
-    }
-}
-
-impl HostProfile {
-    pub(crate) const fn storage(self) -> StorageProfile {
-        match self {
-            Self::Linux => StorageProfile::LinuxLuks,
-            Self::MacOs | Self::Wsl => StorageProfile::ManagedDisk,
-        }
-    }
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Linux => "linux-luks",
-            Self::MacOs => "macos-filevault",
-            Self::Wsl => "windows-wsl",
-        }
-    }
-}
+//! Native Linux LUKS2 evidence parsing.
 
 pub(crate) fn luks_dump_valid(value: &str) -> bool {
     exactly_one(value, "Version:")
@@ -95,37 +53,6 @@ mod tests {
     use super::*;
 
     const LUKS: &str = "Version:       2\n  cipher:     aes-xts-plain64\n  Key:        512 bits\n  PBKDF:      argon2id\n  Time cost:  8\n  Memory:     262144\n  Threads:    4\n";
-
-    #[test]
-    fn classifies_only_supported_unambiguous_hosts() {
-        assert_eq!(
-            classify("linux", "x86_64", false, false, "systemd"),
-            Ok(HostProfile::Linux)
-        );
-        assert_eq!(
-            classify("linux", "x86_64", true, true, "systemd\n"),
-            Ok(HostProfile::Wsl)
-        );
-        assert_eq!(
-            classify("macos", "aarch64", false, false, "launchd"),
-            Ok(HostProfile::MacOs)
-        );
-        assert_eq!(HostProfile::Linux.storage(), StorageProfile::LinuxLuks);
-        assert_eq!(HostProfile::Linux.name(), "linux-luks");
-        assert_eq!(HostProfile::Wsl.storage(), StorageProfile::ManagedDisk);
-        assert_eq!(HostProfile::Wsl.name(), "windows-wsl");
-        assert_eq!(HostProfile::MacOs.name(), "macos-filevault");
-        for evidence in [
-            ("linux", "aarch64", false, false, "systemd"),
-            ("macos", "x86_64", false, false, "launchd"),
-            ("linux", "x86_64", true, false, "systemd"),
-            ("linux", "x86_64", false, true, "systemd"),
-            ("windows", "x86_64", false, false, ""),
-        ] {
-            assert!(classify(evidence.0, evidence.1, evidence.2, evidence.3, evidence.4).is_err());
-        }
-        assert!(classify("linux", "x86_64", true, true, "init").is_err());
-    }
 
     #[test]
     fn parses_only_exact_luks2_parameters() {

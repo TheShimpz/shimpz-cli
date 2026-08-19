@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 use super::command::Tool;
+use super::host::HostProfile;
 use super::paths::Paths;
 use super::release::{self, RELEASE_REPOSITORY, Release};
-use super::storage::evidence::HostProfile;
 
 const RELEASE_CHANNEL: &str = "stable";
 

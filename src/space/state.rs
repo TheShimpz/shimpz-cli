@@ -8,8 +8,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use super::docker::ResolvedRelease;
+use super::host::HostProfile;
 use super::paths::{MARKER, Paths};
-use super::storage::evidence::HostProfile;
 
 #[derive(Debug)]
 pub(crate) struct Installed {
@@ -119,8 +119,8 @@ fn validate_environment(
         "SHIMPZ_ADMIN_ALLOWED_ORIGINS",
         "SHIMPZ_STORAGE_PROFILE",
     ];
-    let expected_storage = profile.name();
-    let linux = expected_storage == "linux-luks";
+    let expected_storage = profile.storage().name();
+    let linux = profile == HostProfile::Linux;
     let expected = required.len() + usize::from(linux);
     if values.len() != expected
         || required.iter().any(|key| !values.contains_key(key))
@@ -210,7 +210,7 @@ pub(crate) fn write_environment(
         HostProfile::Linux | HostProfile::Wsl => "linux/amd64",
         HostProfile::MacOs => "linux/arm64",
     };
-    let profile = environment.profile.name();
+    let profile = environment.profile.storage().name();
     let release = &environment.release;
     let mut document = format!(
         "SHIMPZ_ADMIN_IMAGE={}\nSHIMPZ_TEAM_IMAGE={}\nSHIMPZ_BRAIN_IMAGE={}\nSHIMPZ_EGRESS_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_ORDINAL={}\nSHIMPZ_SPACE_PLATFORM={platform}\nSHIMPZ_PORT={}\nSHIMPZ_DOCKER_GID={}\nSHIMPZ_DOCKER_SOCKET={}\nSHIMPZ_SPACE_ID={}\nSHIMPZ_CPUSET={}\nSHIMPZ_PROJECT_NAME=shimpz-space\nSHIMPZ_ADMIN_ALLOWED_ORIGINS=http://localhost:{},http://127.0.0.1:{}\nSHIMPZ_STORAGE_PROFILE={profile}\n",

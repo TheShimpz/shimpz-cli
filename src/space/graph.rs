@@ -36,6 +36,15 @@ pub(crate) enum StorageProfile {
     ManagedDisk,
 }
 
+impl StorageProfile {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::LinuxLuks => "linux-luks",
+            Self::ManagedDisk => "managed-disk",
+        }
+    }
+}
+
 pub(crate) fn render(profile: StorageProfile) -> String {
     let mut volumes = String::new();
     for name in VOLUME_NAMES {
@@ -82,6 +91,8 @@ mod tests {
                 assert!(graph.contains(&format!("  {volume}:\n")));
             }
         }
+        assert_eq!(StorageProfile::LinuxLuks.name(), "linux-luks");
+        assert_eq!(StorageProfile::ManagedDisk.name(), "managed-disk");
     }
 
     #[test]

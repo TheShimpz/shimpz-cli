@@ -17,12 +17,12 @@ use crate::output;
 
 use super::docker::{Engine, ResolvedRelease};
 use super::graph::{self, StorageProfile};
+use super::host::{self, HostProfile};
 use super::paths::Paths;
 use super::resources::Inventory;
 use super::scheduler;
 use super::state::{self, Environment, Installed, Lock};
-use super::storage::evidence::HostProfile;
-use super::storage::{linux, managed};
+use super::storage::linux;
 
 const ADMIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-admin";
 const TEAM_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-team-local";
@@ -56,7 +56,7 @@ pub(crate) fn status() -> Result<String, String> {
     if !paths.marker_is_current()? {
         return Ok("Shimpz Space is not installed. Nothing needs attention.".into());
     }
-    let profile = managed::detect()?;
+    let profile = host::detect()?;
     let engine = Engine::connect(profile, &paths)?;
     let installed = state::read_installed(&paths, profile)?;
     Inventory::inspect(&engine, &paths, profile.storage())?;
@@ -109,7 +109,7 @@ impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
         ensure_install_home(&paths)?;
-        let profile = managed::detect()?;
+        let profile = host::detect()?;
         let engine = Engine::connect(profile, &paths)?;
         scheduler::validate(profile, &paths)?;
         Ok(Self {

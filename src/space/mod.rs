@@ -3,6 +3,7 @@
 pub(crate) mod command;
 pub(crate) mod docker;
 pub(crate) mod graph;
+pub(crate) mod host;
 #[cfg(unix)]
 pub(crate) mod lifecycle;
 #[cfg(not(unix))]

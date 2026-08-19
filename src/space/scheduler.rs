@@ -6,8 +6,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use super::command::{self, Tool};
+use super::host::HostProfile;
 use super::paths::Paths;
-use super::storage::evidence::HostProfile;
 
 const MARKER: &str = "shimpz-local-update-v2";
 

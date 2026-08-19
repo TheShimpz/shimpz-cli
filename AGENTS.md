@@ -8,7 +8,7 @@
 - The canonical current architecture is the umbrella's
   [architecture map](https://github.com/TheShimpz/shimpz/blob/main/.context/ARCHITECTURE.md), available at
   `../.context/ARCHITECTURE.md` when checked out at `cli/`. Read ADR-0015 through ADR-0030 and
-  ADR-0049 before changing product concepts, command ontology, Local installation, reset, topology, storage,
+  ADR-0049 and ADR-0050 before changing product concepts, command ontology, Local installation, reset, topology, storage,
   release, credentials, principals, or authority boundaries.
 - Shimpz is pre-production. Update the current contract directly; do not add migrations, deprecated aliases,
   old-format parsers, version fallbacks, dual behavior, or retired-resource cleanup paths. Current-contract reset,
