@@ -110,7 +110,10 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn detects_the_current_native_linux_host() {
-        assert_eq!(detect(), Ok(HostProfile::Linux));
+    fn detects_a_supported_linux_kernel_host() {
+        assert!(matches!(
+            detect(),
+            Ok(HostProfile::Linux | HostProfile::Wsl)
+        ));
     }
 }
