@@ -1,7 +1,7 @@
 # Shimpz source package v1
 
 This directory is the language-neutral authority for the bytes uploaded by
-`shimpz publish`. A source package is an uncompressed canonical POSIX ustar
+`shimpz assistant publish`. A source package is an uncompressed canonical POSIX ustar
 archive whose SHA-256 digest is its public identity.
 
 Every package carries one canonical root `icon.png`. It is a static,
