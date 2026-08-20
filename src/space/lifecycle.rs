@@ -105,13 +105,18 @@ enum AdminAttestation {
     Absent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplyOutcome {
+    Ready { port: u16 },
+    Locked,
+}
+
 impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
         ensure_install_home(&paths)?;
         let profile = host::detect()?;
         let engine = Engine::connect(profile, &paths)?;
-        scheduler::validate(profile, &paths)?;
         Ok(Self {
             paths,
             profile,
@@ -215,16 +220,26 @@ impl Context {
         if fresh {
             state::write_marker(&self.paths)?;
         }
-        match self.apply_owned(release, installed, scheduled, &space_id) {
-            Ok(outcome) => Ok(outcome),
+        let outcome = match self.apply_owned(release, installed, scheduled, &space_id) {
+            Ok(outcome) => outcome,
             Err(error) if fresh => match self.compensate_fresh_failure(&space_id) {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(format!(
-                    "{error}; fresh-install compensation also failed: {cleanup}"
-                )),
+                Ok(()) => return Err(error),
+                Err(cleanup) => {
+                    return Err(format!(
+                        "{error}; fresh-install compensation also failed: {cleanup}"
+                    ));
+                }
             },
-            Err(error) => Err(error),
-        }
+            Err(error) => return Err(error),
+        };
+        let ApplyOutcome::Ready { port } = outcome else {
+            return Ok("Encrypted Local storage is locked. No workloads were started.".into());
+        };
+        let ready = ready_outcome(release, port);
+        scheduler_outcome(
+            ready,
+            scheduler::install(self.profile, &self.paths, scheduled),
+        )
     }
 
     fn apply_owned(
@@ -233,10 +248,10 @@ impl Context {
         installed: Option<&Installed>,
         scheduled: bool,
         space_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<ApplyOutcome, String> {
         match self.ensure_storage(space_id, installed.is_none(), scheduled)? {
             linux::Admission::Locked => {
-                return Ok("Encrypted Local storage is locked. No workloads were started.".into());
+                return Ok(ApplyOutcome::Locked);
             }
             linux::Admission::Verified => {}
         }
@@ -275,7 +290,9 @@ impl Context {
             ],
         )?;
         if !started.success() {
-            return self.rollback(release, space_id, previous);
+            return match self.rollback(release, space_id, previous) {
+                Ok(outcome) | Err(outcome) => Err(outcome),
+            };
         }
         if let Err(storage_error) = self.validate_started_storage(space_id) {
             let rollback = self.rollback(release, space_id, previous);
@@ -290,24 +307,27 @@ impl Context {
             .project_release_status(&release.metadata.admin, status.as_bytes())
             .is_err()
         {
-            return self.rollback(release, space_id, previous);
+            return match self.rollback(release, space_id, previous) {
+                Ok(outcome) | Err(outcome) => Err(outcome),
+            };
         }
         remove_backup(previous)?;
-        scheduler::install(self.profile, &self.paths)?;
         remove_regular_if_present(&self.paths.failed_release)?;
-        Ok(format!(
-            "Shimpz Space is ready.\nAdmin http://127.0.0.1:{port}\nRelease {} (ordinal {})",
-            release.reference, release.metadata.ordinal
-        ))
+        Ok(ApplyOutcome::Ready { port })
     }
 
     fn reset(&self) -> Result<String, String> {
         let marker = self.paths.marker_is_current()?;
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         if !marker && inventory.empty() && !self.paths.security.exists() {
-            scheduler::remove(self.profile, &self.paths)?;
-            let preserved = self.remove_files()?;
-            return Ok(reset_outcome(true, &preserved));
+            let scheduler = scheduler::remove(self.profile, &self.paths)?;
+            let mut preserved = self.remove_files()?;
+            preserved.extend(scheduler.preserved);
+            return Ok(reset_outcome(
+                true,
+                &preserved,
+                scheduler.execution_unverified,
+            ));
         }
         let installed = if marker {
             self.current_installation().ok()
@@ -320,6 +340,7 @@ impl Context {
                     .into(),
             );
         }
+        scheduler::preflight_remove(self.profile, &self.paths)?;
         if !inventory.empty()
             && let Some(current) = &installed
         {
@@ -334,9 +355,14 @@ impl Context {
                 .or(inventory.space_id);
             linux::reset(&self.paths, space_id.as_deref())?;
         }
-        scheduler::remove(self.profile, &self.paths)?;
-        let preserved = self.remove_files()?;
-        Ok(reset_outcome(false, &preserved))
+        let scheduler = scheduler::remove(self.profile, &self.paths)?;
+        let mut preserved = self.remove_files()?;
+        preserved.extend(scheduler.preserved);
+        Ok(reset_outcome(
+            false,
+            &preserved,
+            scheduler.execution_unverified,
+        ))
     }
 
     fn current_installation(&self) -> Result<Installed, String> {
@@ -375,7 +401,6 @@ impl Context {
         if let Some(port) = admin_port {
             authenticated_admin_reset(port)?;
         }
-        scheduler::remove(self.profile, &self.paths)?;
         let space_id = inventory.space_id.clone();
         let remaining = if admin_port.is_some() {
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?
@@ -387,6 +412,16 @@ impl Context {
             linux::reset(&self.paths, space_id.as_deref())?;
         }
         self.remove_runtime_files()?;
+        match scheduler::remove(self.profile, &self.paths) {
+            Ok(outcome) if outcome.execution_unverified => output::warning(&format!(
+                "Preserved unrecognized scheduler entries; their execution state is unverified: {}",
+                outcome.preserved.join(", ")
+            )),
+            Ok(_) => {}
+            Err(error) => output::warning(&format!(
+                "The corrupt Space was removed, but its scheduler cleanup could not be completed: {error}"
+            )),
+        }
         output::info("Corrupt Local Space removed; continuing with a fresh installation.");
         Ok(())
     }
@@ -514,11 +549,10 @@ impl Context {
             linux::Admission::Locked => {
                 state::write_status(&self.paths, release, "rollback-needed")?;
                 if memory_error.is_some() {
-                    scheduler::remove(self.profile, &self.paths)?;
-                    return Err(
-                        "the previous release remained stopped because storage was locked, and automatic updates were disabled because the failed release could not be remembered"
-                            .into(),
-                    );
+                    return Err(format!(
+                        "the previous release remained stopped because storage was locked, and {}",
+                        self.disable_automatic_updates()
+                    ));
                 }
                 return Err(
                     "the update failed; the previous release remained stopped because encrypted storage was locked"
@@ -552,16 +586,31 @@ impl Context {
             );
         }
         if memory_error.is_some() {
-            scheduler::remove(self.profile, &self.paths)?;
-            return Err(
-                "the previous release was restored, but automatic updates were disabled because the failed release could not be remembered"
-                    .into(),
-            );
+            return Err(format!(
+                "the previous release was restored, but {}",
+                self.disable_automatic_updates()
+            ));
         }
         if restored.success() {
             Err("the update failed; the previous healthy release was restored".into())
         } else {
             Err("the update and its rollback both failed".into())
+        }
+    }
+
+    fn disable_automatic_updates(&self) -> String {
+        match scheduler::remove(self.profile, &self.paths) {
+            Ok(outcome) if outcome.execution_unverified => format!(
+                "automatic retry could not be proven disabled because unrecognized scheduler entries were preserved: {}",
+                outcome.preserved.join(", ")
+            ),
+            Ok(_) => {
+                "automatic updates were disabled because the failed release could not be remembered"
+                    .into()
+            }
+            Err(error) => format!(
+                "automatic retry could not be disabled because scheduler cleanup failed: {error}"
+            ),
         }
     }
 
@@ -713,7 +762,34 @@ fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> 
     }
 }
 
-fn reset_outcome(already_reset: bool, preserved: &[String]) -> String {
+fn ready_outcome(release: &ResolvedRelease, port: u16) -> String {
+    format!(
+        "Shimpz Space is ready.\nAdmin http://127.0.0.1:{port}\nRelease {} (ordinal {})",
+        release.reference, release.metadata.ordinal
+    )
+}
+
+fn scheduler_outcome(
+    ready: String,
+    outcome: Result<scheduler::InstallOutcome, String>,
+) -> Result<String, String> {
+    match outcome {
+        Ok(scheduler::InstallOutcome::Enabled) => Ok(ready),
+        Ok(scheduler::InstallOutcome::Preserved(paths)) => Ok(format!(
+            "{ready}\nAutomatic Local updates were not enabled because these scheduler entries are not managed by Shimpz: {}. Their execution state is unverified. Remove or rename only those entries, then run shimpz start.",
+            paths.join(", ")
+        )),
+        Err(error) => Err(format!(
+            "{ready}\nThe Space is healthy, but automatic Local updates were not enabled: {error}. Resolve the exact scheduler entry or directory, then run shimpz start."
+        )),
+    }
+}
+
+fn reset_outcome(
+    already_reset: bool,
+    preserved: &[String],
+    scheduler_execution_unverified: bool,
+) -> String {
     let action = if already_reset {
         "Shimpz Space was reset successfully. No change was needed."
     } else {
@@ -725,7 +801,12 @@ fn reset_outcome(already_reset: bool, preserved: &[String]) -> String {
     } else {
         format!("Preserved unrecognized content: {}", preserved.join(", "))
     };
-    format!("{action} {suffix}")
+    let scheduler = if scheduler_execution_unverified {
+        " Scheduler execution state is unverified; run shimpz install from an interactive terminal to review the preserved entry."
+    } else {
+        ""
+    };
+    format!("{action} {suffix}{scheduler}")
 }
 
 #[derive(Debug)]
@@ -1189,8 +1270,13 @@ mod tests {
 
     #[test]
     fn reset_outcomes_are_positive_and_report_preserved_content() {
-        let already_clean = reset_outcome(true, &[]);
-        let changed = reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()]);
+        let already_clean = reset_outcome(true, &[], false);
+        let changed = reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()], false);
+        let scheduler = reset_outcome(
+            true,
+            &["/home/ada/Library/LaunchAgents/com.shimpz.update.plist".to_owned()],
+            true,
+        );
         assert_eq!(
             already_clean,
             "Shimpz Space was reset successfully. No change was needed. No managed Space data remains; the shimpz command and lifecycle lock are retained."
@@ -1199,9 +1285,28 @@ mod tests {
             changed,
             "Shimpz Space was reset successfully. Preserved unrecognized content: /home/ada/.shimpz/notes"
         );
-        for outcome in [already_clean, changed] {
+        assert!(scheduler.contains("Scheduler execution state is unverified"));
+        assert!(scheduler.contains("run shimpz install from an interactive terminal"));
+        for outcome in [already_clean, changed, scheduler] {
             assert!(outcome.contains("Shimpz Space was reset successfully"));
         }
+    }
+
+    #[test]
+    fn scheduler_conflicts_do_not_erase_a_healthy_space_outcome() {
+        let ready = "Shimpz Space is ready.".to_owned();
+        let preserved = scheduler_outcome(
+            ready.clone(),
+            Ok(scheduler::InstallOutcome::Preserved(vec![
+                "/home/ada/scheduler".into(),
+            ])),
+        )
+        .unwrap();
+        assert!(preserved.starts_with(&ready));
+        assert!(preserved.contains("execution state is unverified"));
+        let error = scheduler_outcome(ready.clone(), Err("write failed".into())).unwrap_err();
+        assert!(error.starts_with(&ready));
+        assert!(error.contains("Space is healthy"));
     }
 
     #[test]
