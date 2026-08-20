@@ -45,4 +45,6 @@ pub(crate) mod resources;
 pub(crate) mod scheduler;
 #[cfg(unix)]
 pub(crate) mod state;
+#[cfg(unix)]
+mod status;
 pub(crate) mod storage;

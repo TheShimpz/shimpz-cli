@@ -25,6 +25,11 @@ pub(crate) struct Lock {
 
 impl Lock {
     pub(crate) fn acquire(paths: &Paths) -> Result<Self, String> {
+        Self::try_acquire(paths)?
+            .ok_or_else(|| "another Shimpz lifecycle operation is already running".to_owned())
+    }
+
+    pub(crate) fn try_acquire(paths: &Paths) -> Result<Option<Self>, String> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -44,9 +49,15 @@ impl Lock {
         {
             return Err("the Local lifecycle lock is invalid".into());
         }
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| "another Shimpz lifecycle operation is already running".to_owned())?;
-        Ok(Self { file })
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(error)
+                if error == rustix::io::Errno::AGAIN || error == rustix::io::Errno::WOULDBLOCK =>
+            {
+                Ok(None)
+            }
+            Err(_) => Err("could not acquire the Local lifecycle lock".into()),
+        }
     }
 }
 
@@ -444,6 +455,7 @@ mod tests {
         let paths = Paths::under(home.path()).unwrap();
         {
             let _lock = Lock::acquire(&paths).unwrap();
+            assert!(Lock::try_acquire(&paths).unwrap().is_none());
             let metadata = paths.lock.metadata().unwrap();
             assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
             assert_eq!(metadata.nlink(), 1);

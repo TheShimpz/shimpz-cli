@@ -22,6 +22,7 @@ use super::paths::Paths;
 use super::resources::Inventory;
 use super::scheduler;
 use super::state::{self, Environment, Installed, Lock};
+use super::status as status_report;
 use super::storage::linux;
 
 const ADMIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-admin";
@@ -57,35 +58,46 @@ pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
 pub(crate) fn status() -> Result<String, String> {
     let paths = Paths::discover()?;
     if !paths.marker_is_current()? {
-        return Ok("Shimpz Space is not installed. Nothing needs attention.".into());
+        return Ok(status_report::not_installed().into());
     }
+    validate_install_home(&paths)?;
+    let Some(_lock) = Lock::try_acquire(&paths)? else {
+        return Ok(status_report::operation_in_progress().into());
+    };
     let profile = host::detect()?;
     let engine = Engine::connect(profile, &paths)?;
     let installed = state::read_installed(&paths, profile)?;
-    Inventory::inspect(&engine, &paths, profile.storage())?;
-    let runtime = engine.run_output([
-        "compose",
-        "--project-directory",
-        &paths.home.to_string_lossy(),
-        "--env-file",
-        &paths.environment.to_string_lossy(),
-        "--file",
-        &paths.compose.to_string_lossy(),
-        "ps",
-        "--format",
-        "json",
-    ])?;
-    if runtime.len() > 32 * 1024 {
-        return Err("Docker returned an oversized Local status".into());
+    let graph_current = installed_graph_is_current(&paths, profile)?;
+    let inventory = Inventory::inspect(&engine, &paths, profile.storage())?;
+    let observations = status_report::COMPONENTS
+        .iter()
+        .copied()
+        .map(|component| {
+            let record = engine.run_output([
+                "inspect",
+                "--type=container",
+                "--format",
+                "{{index .Config.Labels \"com.docker.compose.service\"}}|{{.State.Status}}|{{with .State.Health}}{{.Status}}{{end}}|{{.State.ExitCode}}",
+                component.docker_name(),
+            ]);
+            status_report::observe(component, record.as_deref().ok())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let present = observations
+        .iter()
+        .filter(|observation| observation.is_present())
+        .count();
+    if present != inventory.project_containers.len() {
+        return Err("Docker returned an inconsistent Local runtime snapshot".into());
     }
-    Ok(format!(
-        "Shimpz Space {}\nRelease {} (ordinal {})\nAdmin http://127.0.0.1:{}\n{}",
-        installed.space_id,
-        installed.release_ref,
-        installed.ordinal,
-        installed.port,
-        runtime.trim()
-    ))
+    status_report::render(&installed, graph_current, &observations)
+}
+
+fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<bool, String> {
+    let expected = graph::render(profile.storage());
+    let actual = fs::read_to_string(&paths.compose)
+        .map_err(|error| format!("could not read the installed Local graph: {error}"))?;
+    Ok(actual == expected)
 }
 
 pub(crate) fn reset() -> Result<String, String> {
@@ -376,10 +388,7 @@ impl Context {
 
     fn current_installation(&self) -> Result<Installed, String> {
         let installed = state::read_installed(&self.paths, self.profile)?;
-        let expected = graph::render(self.profile.storage());
-        let actual = fs::read_to_string(&self.paths.compose)
-            .map_err(|error| format!("could not read the installed Local graph: {error}"))?;
-        if actual != expected {
+        if !installed_graph_is_current(&self.paths, self.profile)? {
             return Err("the installed Local graph is not current".into());
         }
         Ok(installed)

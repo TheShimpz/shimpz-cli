@@ -57,9 +57,10 @@ The agent keeps its normal permission protections unless `--yolo` is explicitly
 provided.
 
 `shimpz install` installs or reconciles the complete Local Space from one atomic,
-digest-pinned release. `shimpz status` reports it, `shimpz start` reconciles it,
-and `shimpz reset` removes its exact owned state. A corrupt prior installation
-is removed only after an exact interactive `Yes`; benign absence is successful.
+digest-pinned release. `shimpz status` summarizes its health, Admin address, and
+release ordinal; `shimpz start` reconciles it, and `shimpz reset` removes its exact
+owned state. A corrupt prior installation is removed only after an exact
+interactive `Yes`; benign absence is successful.
 On native Linux, Shimpz creates and verifies a LUKS2-backed storage pool. On
 macOS and Windows/WSL2, Shimpz uses Docker-managed volumes and recommends
 FileVault or BitLocker respectively, but does not configure or verify the

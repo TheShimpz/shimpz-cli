@@ -8,7 +8,7 @@ use super::paths::Paths;
 
 const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
-const RESERVED: [&str; 8] = [
+pub(crate) const RESERVED: [&str; 8] = [
     "shimpz-admin",
     "shimpz-team",
     "shimpz-brain",

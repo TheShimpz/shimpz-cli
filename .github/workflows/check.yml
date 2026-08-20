@@ -39,6 +39,7 @@ jobs:
             src/space/graph.rs \
             src/space/host.rs \
             src/space/release.rs \
+            src/space/status.rs \
             src/space/storage/evidence.rs
           do
             covered="$(jq --arg suffix "$file" \

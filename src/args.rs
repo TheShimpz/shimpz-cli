@@ -26,7 +26,7 @@ Usage:
 Local Space:
   shimpz install                         Install or reconcile the complete Local Space.
   shimpz start                           Start it and reconcile its atomic release.
-  shimpz status                          Show its runtime, Admin address, and exact release.
+  shimpz status                          Show its health, Admin address, and release ordinal.
   shimpz reset                           Permanently remove its Shimpz-owned data.
 
 Assistant development:
