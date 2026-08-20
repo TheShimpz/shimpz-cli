@@ -21,7 +21,7 @@ pub(crate) fn run() -> Result<String, String> {
 fn refuse_managed_space_cli() -> Result<(), String> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let current = std::env::current_exe().ok();
-    if is_managed_space_cli(home.as_deref(), current.as_deref()) {
+    if managed_space_verdict(cfg!(unix), home.as_deref(), current.as_deref())? {
         return Err(
             "this CLI is managed by Shimpz Space; run shimpz install to reconcile its atomic release"
                 .into(),
@@ -30,35 +30,53 @@ fn refuse_managed_space_cli() -> Result<(), String> {
     Ok(())
 }
 
-fn is_managed_space_cli(home: Option<&Path>, current: Option<&Path>) -> bool {
-    let (Some(home), Some(current)) = (home, current) else {
+fn managed_space_verdict(
+    unix: bool,
+    home: Option<&Path>,
+    current: Option<&Path>,
+) -> Result<bool, String> {
+    let Some(home) = home else {
+        return if unix {
+            Err("HOME is required to determine whether this CLI is managed".into())
+        } else {
+            Ok(false)
+        };
+    };
+    if unix && !home.is_absolute() {
+        return Err("HOME must be absolute to determine whether this CLI is managed".into());
+    }
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    Ok(is_managed_space_cli(home, current))
+}
+
+fn is_managed_space_cli(home: &Path, current: &Path) -> bool {
+    let managed = home.join(".shimpz/bin/shimpz");
+    let (Ok(current), Ok(managed)) = (current.canonicalize(), managed.canonicalize()) else {
         return false;
     };
-    let managed = home.join(".shimpz/bin/shimpz");
-    matches!(
-        (current.canonicalize(), managed.canonicalize()),
-        (Ok(current), Ok(managed)) if current == managed
-    )
+    current == managed
 }
 
 fn latest_release() -> Result<Release, String> {
     updater(None)?
         .get_latest_release()
-        .map_err(|error| update_check_error(&error))
+        .map_err(|error| github_error("CLI update check", &error))
 }
 
-fn update_check_error(error: &Error) -> String {
+fn github_error(context: &str, error: &Error) -> String {
     if matches!(error, Error::Ureq(ureq::Error::StatusCode(403))) {
-        return "GitHub refused the CLI update check (HTTP 403). Retry after the anonymous API limit resets or download the standalone CLI from https://github.com/TheShimpz/shimpz-cli/releases/latest".into();
+        return "GitHub refused the CLI update request (HTTP 403). Retry later or download the standalone CLI from https://github.com/TheShimpz/shimpz-cli/releases/latest".into();
     }
-    format!("CLI update check failed: {error}")
+    format!("{context} failed: {error}")
 }
 
 fn install(release: &Release) -> Result<String, String> {
     let tag = format!("v{}", release.version);
     let status = updater(Some(&tag))?
         .update()
-        .map_err(|error| format!("CLI update failed: {error}"))?;
+        .map_err(|error| github_error("CLI update", &error))?;
     Ok(format!(
         "shimpz upgraded from {CURRENT_VERSION} to {}.",
         status.version()
@@ -102,19 +120,38 @@ mod tests {
         let standalone = home.path().join("standalone-shimpz");
         std::fs::write(&standalone, "standalone").unwrap();
 
-        assert!(is_managed_space_cli(Some(home.path()), Some(&managed)));
-        assert!(!is_managed_space_cli(Some(home.path()), Some(&standalone)));
-        assert!(!is_managed_space_cli(Some(home.path()), None));
-        assert!(!is_managed_space_cli(None, Some(&managed)));
+        assert!(managed_space_verdict(true, Some(home.path()), Some(&managed)).unwrap());
+        assert!(!managed_space_verdict(true, Some(home.path()), Some(&standalone)).unwrap());
+        assert!(!managed_space_verdict(true, Some(home.path()), None).unwrap());
+        assert!(managed_space_verdict(true, None, Some(&managed)).is_err());
+        assert!(!managed_space_verdict(false, None, Some(&managed)).unwrap());
     }
 
     #[test]
     fn explains_a_refused_anonymous_github_check() {
         let error = self_update::errors::Error::Ureq(ureq::Error::StatusCode(403));
         assert_eq!(
-            update_check_error(&error),
-            "GitHub refused the CLI update check (HTTP 403). Retry after the anonymous API limit resets or download the standalone CLI from https://github.com/TheShimpz/shimpz-cli/releases/latest"
+            github_error("CLI update check", &error),
+            "GitHub refused the CLI update request (HTTP 403). Retry later or download the standalone CLI from https://github.com/TheShimpz/shimpz-cli/releases/latest"
         );
+        assert_eq!(
+            github_error("CLI update", &Error::Network("offline".into())),
+            "CLI update failed: NetworkError: offline"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recognizes_the_managed_cli_through_its_public_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let managed = home.path().join(".shimpz/bin/shimpz");
+        let public = home.path().join(".local/bin/shimpz");
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(public.parent().unwrap()).unwrap();
+        std::fs::write(&managed, "managed").unwrap();
+        std::os::unix::fs::symlink(&managed, &public).unwrap();
+
+        assert!(managed_space_verdict(true, Some(home.path()), Some(&public)).unwrap());
     }
 
     #[test]

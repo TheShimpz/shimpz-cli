@@ -114,7 +114,7 @@ enum ApplyOutcome {
 impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
-        ensure_install_home(&paths)?;
+        validate_install_home(&paths)?;
         let profile = host::detect()?;
         let engine = Engine::connect(profile, &paths)?;
         Ok(Self {
@@ -127,6 +127,9 @@ impl Context {
 
     fn install(&self, exact_release: Option<&str>) -> Result<String, String> {
         let marker = self.paths.marker_is_current()?;
+        if !marker {
+            adopt_unmarked_home(&self.paths)?;
+        }
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let installed = if marker {
             match self
@@ -411,7 +414,7 @@ impl Context {
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
             linux::reset(&self.paths, space_id.as_deref())?;
         }
-        self.remove_runtime_files()?;
+        remove_runtime_files(&self.paths)?;
         match scheduler::remove(self.profile, &self.paths) {
             Ok(outcome) if outcome.execution_unverified => output::warning(&format!(
                 "Preserved unrecognized scheduler entries; their execution state is unverified: {}",
@@ -624,7 +627,7 @@ impl Context {
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
             linux::reset(&self.paths, Some(space_id))?;
         }
-        self.remove_runtime_files()
+        remove_runtime_files(&self.paths)
     }
 
     fn start_admin_for_reset(&self) -> Result<(), String> {
@@ -709,31 +712,11 @@ impl Context {
         }
     }
 
-    fn remove_runtime_files(&self) -> Result<(), String> {
-        for path in [
-            &self.paths.compose,
-            &self.paths.environment,
-            &self.paths.status,
-            &self.paths.failed_release,
-            &self.paths.compose.with_extension("previous"),
-            &self.paths.environment.with_extension("previous"),
-            &self.paths.compose.with_extension("tmp"),
-            &self.paths.environment.with_extension("tmp"),
-            &self.paths.status.with_extension("tmp"),
-            &self.paths.failed_release.with_extension("tmp"),
-            &self.paths.marker.with_extension("tmp"),
-            &self.paths.marker,
-        ] {
-            remove_regular_if_present(path)?;
-        }
-        Ok(())
-    }
-
     fn remove_files(&self) -> Result<Vec<String>, String> {
-        self.remove_runtime_files()?;
+        remove_runtime_files(&self.paths)?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("candidate"))?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("previous"))?;
-        let mut preserved = Vec::new();
+        let mut preserved = PathReport::default();
         if self.paths.home.exists() {
             for entry in fs::read_dir(&self.paths.home).map_err(io_error)? {
                 let path = entry.map_err(io_error)?.path();
@@ -746,12 +729,33 @@ impl Context {
                 {
                     validate_unmarked_bin(&self.paths)?;
                 } else {
-                    preserved.push(path.display().to_string());
+                    preserved.record(path);
                 }
             }
         }
-        Ok(preserved)
+        Ok(preserved.into_strings())
     }
+}
+
+fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
+    for path in [
+        paths.compose.clone(),
+        paths.environment.clone(),
+        paths.status.clone(),
+        paths.failed_release.clone(),
+        paths.compose.with_extension("previous"),
+        paths.environment.with_extension("previous"),
+        paths.compose.with_extension("tmp"),
+        paths.environment.with_extension("tmp"),
+        paths.status.with_extension("tmp"),
+        paths.failed_release.with_extension("tmp"),
+        paths.home.join("release.env.tmp"),
+        paths.marker.with_extension("tmp"),
+        paths.marker.clone(),
+    ] {
+        remove_regular_if_present(&path)?;
+    }
+    Ok(())
 }
 
 fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> &'static str {
@@ -815,7 +819,63 @@ struct Backup {
     environment: PathBuf,
 }
 
-fn ensure_install_home(paths: &Paths) -> Result<(), String> {
+const REPORTED_ENTRIES: usize = 8;
+
+#[derive(Default)]
+struct PathReport {
+    named: Vec<PathBuf>,
+    total: usize,
+}
+
+impl PathReport {
+    fn record(&mut self, path: PathBuf) {
+        self.total += 1;
+        let index = self
+            .named
+            .binary_search(&path)
+            .unwrap_or_else(|index| index);
+        self.named.insert(index, path);
+        self.named.truncate(REPORTED_ENTRIES);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    fn render(&self) -> String {
+        let mut rendered = self
+            .named
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.total > self.named.len() {
+            use std::fmt::Write as _;
+            write!(
+                &mut rendered,
+                ", and {} more",
+                self.total - self.named.len()
+            )
+            .expect("String writes are infallible");
+        }
+        rendered
+    }
+
+    fn into_strings(self) -> Vec<String> {
+        let hidden = self.total.saturating_sub(self.named.len());
+        let mut rendered = self
+            .named
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        if hidden > 0 {
+            rendered.push(format!("and {hidden} more unrecognized entries"));
+        }
+        rendered
+    }
+}
+
+fn validate_install_home(paths: &Paths) -> Result<(), String> {
     if paths.home.exists() {
         let metadata = paths.home.symlink_metadata().map_err(io_error)?;
         if metadata.file_type().is_symlink()
@@ -825,34 +885,39 @@ fn ensure_install_home(paths: &Paths) -> Result<(), String> {
         {
             return Err("refusing to use an invalid Local Space directory".into());
         }
-        if !paths.marker.exists() {
-            for temporary in [
-                paths.home.join("release.env.tmp"),
-                paths.marker.with_extension("tmp"),
-            ] {
-                remove_regular_if_present(&temporary)?;
-            }
-            for entry in fs::read_dir(&paths.home).map_err(io_error)? {
-                let path = entry.map_err(io_error)?.path();
-                if path
-                    != paths
-                        .managed_cli
-                        .parent()
-                        .expect("managed CLI has a parent")
-                {
-                    return Err(format!(
-                        "refusing to use unowned Local Space entry: {}; move or remove that exact entry, then run shimpz install",
-                        path.display()
-                    ));
-                }
-            }
-            validate_unmarked_bin(paths)?;
-        }
     } else {
         fs::create_dir(&paths.home).map_err(io_error)?;
         fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
     }
     Ok(())
+}
+
+fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
+    for temporary in [
+        paths.home.join("release.env.tmp"),
+        paths.marker.with_extension("tmp"),
+    ] {
+        remove_regular_if_present(&temporary)?;
+    }
+    let bin = paths
+        .managed_cli
+        .parent()
+        .expect("managed CLI has a parent");
+    let mut unowned = PathReport::default();
+    for entry in fs::read_dir(&paths.home).map_err(io_error)? {
+        let path = entry.map_err(io_error)?.path();
+        if path != bin {
+            unowned.record(path);
+        }
+    }
+    if !unowned.is_empty() {
+        return Err(format!(
+            "refusing to use unowned Local Space entries under {}: {}; move or remove every unowned entry, then run shimpz install",
+            paths.home.display(),
+            unowned.render()
+        ));
+    }
+    validate_unmarked_bin(paths)
 }
 
 fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
@@ -865,27 +930,46 @@ fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
     }
     let metadata = bin.symlink_metadata().map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("the managed CLI directory is invalid".into());
+        return Err(format!(
+            "the managed CLI directory is invalid: {}",
+            bin.display()
+        ));
     }
+    let mut managed = Vec::with_capacity(3);
+    let mut unowned = PathReport::default();
     for entry in fs::read_dir(bin).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
         if path != paths.managed_cli
             && path != paths.managed_cli.with_extension("candidate")
             && path != paths.managed_cli.with_extension("previous")
         {
-            return Err(format!(
-                "refusing to use unowned managed CLI entry: {}; move or remove that exact entry, then run shimpz install",
-                path.display()
-            ));
+            unowned.record(path);
+        } else {
+            managed.push(path);
         }
+    }
+    if !unowned.is_empty() {
+        return Err(format!(
+            "refusing to use unowned managed CLI entries: {}; move or remove every unowned entry, then run shimpz install",
+            unowned.render()
+        ));
+    }
+    managed.sort();
+    for path in managed {
         let metadata = path.symlink_metadata().map_err(io_error)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("the managed CLI artifact is invalid".into());
+            return Err(format!(
+                "the managed CLI artifact is invalid: {}",
+                path.display()
+            ));
         }
         if metadata.uid() != rustix::process::getuid().as_raw()
             || metadata.permissions().mode() & 0o077 != 0
         {
-            return Err("the managed CLI artifact ownership or permissions are invalid".into());
+            return Err(format!(
+                "the managed CLI artifact ownership or permissions are invalid: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
@@ -898,7 +982,10 @@ fn validate_private_cli(path: &Path) -> Result<(), String> {
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
     {
-        return Err("the managed CLI artifact ownership or permissions are invalid".into());
+        return Err(format!(
+            "the managed CLI artifact ownership or permissions are invalid: {}",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -1361,10 +1448,11 @@ mod tests {
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        assert!(ensure_install_home(&paths).is_ok());
+        validate_install_home(&paths).unwrap();
+        assert!(adopt_unmarked_home(&paths).is_ok());
         let foreign = paths.managed_cli.parent().unwrap().join("foreign");
         fs::write(&foreign, "foreign").unwrap();
-        let error = ensure_install_home(&paths).unwrap_err();
+        let error = adopt_unmarked_home(&paths).unwrap_err();
         assert!(error.contains(&foreign.display().to_string()));
     }
 
@@ -1378,7 +1466,8 @@ mod tests {
         let marker_temporary = paths.marker.with_extension("tmp");
         fs::write(&release_temporary, "metadata").unwrap();
         fs::write(&marker_temporary, "marker").unwrap();
-        ensure_install_home(&paths).unwrap();
+        validate_install_home(&paths).unwrap();
+        adopt_unmarked_home(&paths).unwrap();
         assert!(!release_temporary.exists());
         assert!(!marker_temporary.exists());
     }
@@ -1392,10 +1481,75 @@ mod tests {
         let unowned = paths.home.join("unexpected");
         fs::write(&unowned, "not owned by the Local contract").unwrap();
 
-        let error = ensure_install_home(&paths).unwrap_err();
+        validate_install_home(&paths).unwrap();
+        let error = adopt_unmarked_home(&paths).unwrap_err();
 
         assert!(error.contains(&unowned.display().to_string()));
-        assert!(error.contains("move or remove that exact entry"));
+        assert!(error.contains("move or remove every unowned entry"));
+    }
+
+    #[test]
+    fn private_home_validation_allows_reset_to_preserve_unowned_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let unowned = paths.home.join("preserved");
+        fs::write(&unowned, "not owned by the Local contract").unwrap();
+
+        validate_install_home(&paths).unwrap();
+
+        assert!(unowned.exists());
+        assert!(adopt_unmarked_home(&paths).is_err());
+    }
+
+    #[test]
+    fn unowned_entry_reporting_is_bounded_and_deterministic() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        for index in (0..10).rev() {
+            fs::write(paths.home.join(format!("unexpected-{index:02}")), "foreign").unwrap();
+        }
+
+        let error = adopt_unmarked_home(&paths).unwrap_err();
+
+        for index in 0..8 {
+            assert!(error.contains(&format!("unexpected-{index:02}")));
+        }
+        assert!(!error.contains("unexpected-08"));
+        assert!(!error.contains("unexpected-09"));
+        assert!(error.contains("and 2 more"));
+    }
+
+    #[test]
+    fn managed_cli_validation_names_invalid_artifacts() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        fs::write(&paths.managed_cli, "managed").unwrap();
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let admission_error = adopt_unmarked_home(&paths).unwrap_err();
+        let private_error = validate_private_cli(&paths.managed_cli).unwrap_err();
+
+        for error in [admission_error, private_error] {
+            assert!(error.contains(&paths.managed_cli.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn reset_cleanup_removes_the_pre_marker_release_temporary() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let temporary = paths.home.join("release.env.tmp");
+        fs::write(&temporary, "metadata").unwrap();
+
+        remove_runtime_files(&paths).unwrap();
+
+        assert!(!temporary.exists());
     }
 
     #[test]
