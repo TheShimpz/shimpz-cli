@@ -1257,7 +1257,7 @@ fn admin_reset_decision(
                 .into(),
         );
     }
-    Err("Admin could not authorize the Space reset; nothing was deleted".into())
+    Err("the bootstrap Space reset did not complete; re-run shimpz reset".into())
 }
 
 fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
@@ -1272,9 +1272,9 @@ fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
             .header("Content-Type", "application/json")
             .body("{}")
             .map_err(|_| "could not build the bootstrap Space reset".to_owned())?;
-    let mut response = agent
-        .run(request)
-        .map_err(|_| "the bootstrap Space reset is unavailable; nothing was deleted".to_owned())?;
+    let mut response = agent.run(request).map_err(|_| {
+        "the bootstrap Space reset did not complete; re-run shimpz reset".to_owned()
+    })?;
     let status = response.status().as_u16();
     let body: serde_json::Value = response
         .body_mut()
@@ -1282,7 +1282,7 @@ fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
         .limit(1_024)
         .read_json()
         .map_err(|_| {
-            "Admin returned an invalid bootstrap reset response; nothing was deleted".to_owned()
+            "the bootstrap Space reset did not complete; re-run shimpz reset".to_owned()
         })?;
     admin_reset_decision(status, &body)
 }
@@ -1502,7 +1502,7 @@ mod tests {
             assert!(
                 admin_reset_decision(status, &body)
                     .unwrap_err()
-                    .contains("nothing was deleted")
+                    .contains("re-run shimpz reset")
             );
         }
     }
