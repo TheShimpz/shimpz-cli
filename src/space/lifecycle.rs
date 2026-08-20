@@ -28,6 +28,8 @@ const ADMIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-admin";
 const TEAM_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-team-local";
 const BRAIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-brain";
 const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
+// Admin bounds its authoritative Team reset call at 180 seconds; the client must outlast it.
+const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 
 pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
     if let Some(profile) = options.print_graph {
@@ -1262,7 +1264,7 @@ fn admin_reset_decision(
 
 fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
     let config = Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(ADMIN_RESET_TIMEOUT))
         .max_redirects(0)
         .http_status_as_error(false)
         .build();
@@ -1303,7 +1305,7 @@ fn authenticated_admin_reset(port: u16) -> Result<(), String> {
         return Err("the Supervisor password is required".into());
     }
     let config = Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(ADMIN_RESET_TIMEOUT))
         .max_redirects(0)
         .http_status_as_error(false)
         .build();
