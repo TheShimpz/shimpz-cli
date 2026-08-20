@@ -175,9 +175,7 @@ fn validate_environment(
     let socket = values["SHIMPZ_DOCKER_SOCKET"];
     let valid_socket = match profile {
         HostProfile::Linux | HostProfile::Wsl => socket == "/var/run/docker.sock",
-        HostProfile::MacOs => {
-            matches!(socket, "/var/run/docker.sock.raw" | "/var/run/docker.sock")
-        }
+        HostProfile::MacOs => socket == "/var/run/docker.sock.raw",
     };
     if !valid_socket {
         return Err("the installed Local Docker socket is invalid".into());
@@ -479,6 +477,35 @@ mod tests {
         assert_eq!(installed.release_ref, release.reference);
         assert_eq!(installed.ordinal, 1);
         assert_eq!(installed.port, 7777);
+    }
+
+    #[test]
+    fn round_trips_only_the_desktop_vm_socket_on_macos() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let release = release();
+        write_environment(
+            &paths,
+            &Environment {
+                release: &release,
+                profile: HostProfile::MacOs,
+                space_id: "space-0123456789abcdef01234567",
+                port: 7777,
+                docker_gid: 0,
+                docker_socket: Path::new("/var/run/docker.sock.raw"),
+                cpuset: "0-3",
+                secure_root: &paths.pool_mount,
+            },
+        )
+        .unwrap();
+        assert!(read_installed(&paths, HostProfile::MacOs).is_ok());
+
+        let invalid = fs::read_to_string(&paths.environment)
+            .unwrap()
+            .replace("/var/run/docker.sock.raw", "/var/run/docker.sock");
+        fs::write(&paths.environment, invalid).unwrap();
+        assert!(read_installed(&paths, HostProfile::MacOs).is_err());
     }
 
     #[test]

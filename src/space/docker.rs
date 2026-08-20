@@ -166,60 +166,39 @@ impl Engine {
         profile: HostProfile,
         team_image: &str,
     ) -> Result<(PathBuf, u32), String> {
-        let candidates: &[&str] = match profile {
-            HostProfile::MacOs => &["/var/run/docker.sock.raw", "/var/run/docker.sock"],
-            HostProfile::Linux | HostProfile::Wsl => &["/var/run/docker.sock"],
-        };
-        for candidate in candidates {
-            let path = Path::new(candidate);
-            let Ok(metadata) = path.symlink_metadata() else {
-                continue;
-            };
-            if !metadata.file_type().is_socket() {
-                continue;
-            }
-            let gid = metadata.gid();
-            let mount = format!("type=bind,src={candidate},dst=/var/run/docker.sock");
-            let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
-            let status = self.run_status([
-                "run",
-                "--rm",
-                "--platform",
-                self.platform,
-                "--pull",
-                "never",
-                "--network",
-                "none",
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges:true",
-                "--group-add",
-                &gid.to_string(),
-                "--cpuset-cpus",
-                &self.cpuset,
-                "--cpus",
-                "0.25",
-                "--memory",
-                "64m",
-                "--memory-swap",
-                "64m",
-                "--pids-limit",
-                "32",
-                "--tmpfs",
-                "/tmp:rw,noexec,nosuid,nodev,size=8m",
-                "--mount",
-                &mount,
-                "--entrypoint",
-                "/opt/venv/bin/python",
-                team_image,
-                "-c",
-                script,
-            ])?;
-            if status.success() {
-                return Ok((path.into(), gid));
-            }
+        let path = controller_socket_path(profile);
+        let mount = format!("type=bind,src={},dst=/var/run/docker.sock", path.display());
+        let gid = match profile {
+            HostProfile::MacOs => self
+                .run_output(socket_probe_arguments(
+                    self.platform,
+                    &self.cpuset,
+                    &mount,
+                    team_image,
+                    None,
+                    "import os,stat; metadata=os.stat('/var/run/docker.sock'); assert stat.S_ISSOCK(metadata.st_mode); print(metadata.st_gid)",
+                ))
+                .ok()
+                .and_then(|value| one_line(&value, "Docker socket group").ok())
+                .and_then(|value| value.parse::<u32>().ok()),
+            HostProfile::Linux | HostProfile::Wsl => path
+                .symlink_metadata()
+                .ok()
+                .filter(|metadata| metadata.file_type().is_socket())
+                .map(|metadata| metadata.gid()),
+        }
+        .ok_or_else(|| "the Team controller cannot access the local Docker socket".to_owned())?;
+        let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
+        let status = self.run_status(socket_probe_arguments(
+            self.platform,
+            &self.cpuset,
+            &mount,
+            team_image,
+            Some(gid),
+            script,
+        ))?;
+        if status.success() {
+            return Ok((path.into(), gid));
         }
         Err("the Team controller cannot access the local Docker socket".into())
     }
@@ -358,6 +337,75 @@ impl Engine {
         }
         Ok(first)
     }
+}
+
+#[cfg(unix)]
+fn controller_socket_path(profile: HostProfile) -> &'static Path {
+    match profile {
+        HostProfile::MacOs => Path::new("/var/run/docker.sock.raw"),
+        HostProfile::Linux | HostProfile::Wsl => Path::new("/var/run/docker.sock"),
+    }
+}
+
+#[cfg(unix)]
+fn socket_probe_arguments(
+    platform: &str,
+    cpuset: &str,
+    mount: &str,
+    team_image: &str,
+    gid: Option<u32>,
+    script: &str,
+) -> Vec<OsString> {
+    let mut arguments = [
+        "run",
+        "--rm",
+        "--platform",
+        platform,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    if let Some(gid) = gid {
+        arguments.extend([
+            OsString::from("--group-add"),
+            OsString::from(gid.to_string()),
+        ]);
+    }
+    arguments.extend(
+        [
+            "--cpuset-cpus",
+            cpuset,
+            "--cpus",
+            "0.25",
+            "--memory",
+            "64m",
+            "--memory-swap",
+            "64m",
+            "--pids-limit",
+            "32",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=8m",
+            "--mount",
+            mount,
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            team_image,
+            "-c",
+            script,
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    arguments
 }
 
 fn status_projection_arguments(
@@ -612,6 +660,47 @@ mod tests {
         ] {
             assert!(validate_managed_endpoint(profile, home, context, endpoint).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_controller_uses_the_desktop_vm_socket_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let command = temporary.path().join("docker");
+        let calls = temporary.path().join("calls");
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'print(metadata.st_gid)'*) printf '0\\n' ;; esac\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = Engine {
+            docker: command,
+            platform: "linux/arm64",
+            cpuset: "0".into(),
+        };
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+
+        let (socket, gid) = engine
+            .controller_socket(HostProfile::MacOs, &image)
+            .unwrap();
+
+        assert_eq!(socket, Path::new("/var/run/docker.sock.raw"));
+        assert_eq!(gid, 0);
+        let arguments = fs::read_to_string(calls).unwrap();
+        let mut invocations = arguments.lines();
+        let identity = invocations.next().unwrap();
+        assert!(identity.contains("src=/var/run/docker.sock.raw"));
+        assert!(!identity.contains("--group-add"));
+        let access = invocations.next().unwrap();
+        assert!(access.contains("src=/var/run/docker.sock.raw"));
+        assert!(access.contains("--group-add 0"));
+        assert!(invocations.next().is_none());
     }
 
     #[cfg(unix)]
