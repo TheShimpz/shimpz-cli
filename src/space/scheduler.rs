@@ -67,6 +67,7 @@ where
     F: FnMut(&[PathBuf]) -> Result<bool, String>,
 {
     let entries = inspect_entries(profile, paths)?;
+    // A Foreign entry proves this parent already exists, so preserving it creates nothing.
     prepare_parent(match profile {
         HostProfile::Linux | HostProfile::Wsl => &paths.systemd_service,
         HostProfile::MacOs => &paths.launch_agent,

@@ -32,7 +32,7 @@ enum HostOs {
 #[derive(Debug, Eq, PartialEq)]
 enum Candidate {
     Absent,
-    Refused { path: PathBuf, reason: &'static str },
+    Refused(&'static str),
     Trusted(PathBuf),
 }
 
@@ -71,7 +71,7 @@ fn resolve_candidates(tool: Tool, candidates: &[PathBuf]) -> Result<PathBuf, Str
     for path in candidates {
         match inspect_executable(path, tool) {
             Candidate::Absent => {}
-            Candidate::Refused { path, reason } => {
+            Candidate::Refused(reason) => {
                 refused.get_or_insert((path, reason));
             }
             Candidate::Trusted(path) => return Ok(path),
@@ -98,30 +98,18 @@ fn inspect_executable(path: &Path, tool: Tool) -> Candidate {
     match path.symlink_metadata() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Candidate::Absent,
         Err(_) => {
-            return Candidate::Refused {
-                path: path.to_owned(),
-                reason: "metadata could not be read safely",
-            };
+            return Candidate::Refused("metadata could not be read safely");
         }
         Ok(_) => {}
     }
     let Ok(canonical) = path.canonicalize() else {
-        return Candidate::Refused {
-            path: path.to_owned(),
-            reason: "could not be resolved safely",
-        };
+        return Candidate::Refused("could not be resolved safely");
     };
     let Ok(metadata) = canonical.metadata() else {
-        return Candidate::Refused {
-            path: canonical,
-            reason: "metadata could not be read safely",
-        };
+        return Candidate::Refused("metadata could not be read safely");
     };
     if !metadata.is_file() {
-        return Candidate::Refused {
-            path: canonical,
-            reason: "is not a regular file",
-        };
+        return Candidate::Refused("is not a regular file");
     }
     #[cfg(unix)]
     {
@@ -138,10 +126,7 @@ fn inspect_executable(path: &Path, tool: Tool) -> Candidate {
             rustix::process::getuid().as_raw(),
             metadata.permissions().mode(),
         ) {
-            return Candidate::Refused {
-                path: canonical,
-                reason,
-            };
+            return Candidate::Refused(reason);
         }
     }
     #[cfg(not(unix))]
@@ -153,7 +138,7 @@ fn inspect_executable(path: &Path, tool: Tool) -> Candidate {
 fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
     match inspect_executable(path, tool) {
         Candidate::Trusted(path) => Some(path),
-        Candidate::Absent | Candidate::Refused { .. } => None,
+        Candidate::Absent | Candidate::Refused(_) => None,
     }
 }
 
@@ -512,6 +497,26 @@ mod tests {
                 executable.display()
             ))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refused_tool_diagnostic_names_the_fixed_candidate_path() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let alias = directory.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let executable = alias.join("docker");
+        std::fs::create_dir(&executable).unwrap();
+
+        let error =
+            resolve_candidates(Tool::Docker, std::slice::from_ref(&executable)).unwrap_err();
+        assert!(error.contains("is not a regular file"));
+        assert!(error.contains(&executable.display().to_string()));
+        assert!(!error.contains(&real.join("docker").display().to_string()));
     }
 
     #[cfg(unix)]
