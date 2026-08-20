@@ -30,6 +30,7 @@ const BRAIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-brain";
 const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
 // Admin bounds its authoritative Team reset call at 180 seconds; the client must outlast it.
 const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
+const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
 
 pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
     if let Some(profile) = options.print_graph {
@@ -1259,7 +1260,7 @@ fn admin_reset_decision(
                 .into(),
         );
     }
-    Err("the bootstrap Space reset did not complete; re-run shimpz reset".into())
+    Err(RESET_INCOMPLETE.into())
 }
 
 fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
@@ -1274,19 +1275,33 @@ fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
             .header("Content-Type", "application/json")
             .body("{}")
             .map_err(|_| "could not build the bootstrap Space reset".to_owned())?;
-    let mut response = agent.run(request).map_err(|_| {
-        "the bootstrap Space reset did not complete; re-run shimpz reset".to_owned()
-    })?;
+    let mut response = agent
+        .run(request)
+        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
     let status = response.status().as_u16();
     let body: serde_json::Value = response
         .body_mut()
         .with_config()
         .limit(1_024)
         .read_json()
-        .map_err(|_| {
-            "the bootstrap Space reset did not complete; re-run shimpz reset".to_owned()
-        })?;
+        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
     admin_reset_decision(status, &body)
+}
+
+fn authenticated_reset_response(
+    status: u16,
+    body: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if status == 200
+        && body.is_some_and(|body| {
+            body.as_object().is_some_and(|object| {
+                object.len() == 1 && object.get("reset") == Some(&serde_json::Value::Bool(true))
+            })
+        })
+    {
+        return Ok(());
+    }
+    Err(RESET_INCOMPLETE.into())
 }
 
 fn admin_reset(port: u16) -> Result<(), String> {
@@ -1334,23 +1349,18 @@ fn authenticated_admin_reset(port: u16) -> Result<(), String> {
         .map_err(|_| "could not build the authenticated reset".to_owned())?;
     let mut response = agent
         .run(request)
-        .map_err(|_| "the authenticated Space reset is unavailable".to_owned())?;
-    if response.status().as_u16() != 200 {
-        return Err("the authenticated Space reset did not complete".into());
+        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        return authenticated_reset_response(status, None);
     }
     let body: serde_json::Value = response
         .body_mut()
         .with_config()
         .limit(1_024)
         .read_json()
-        .map_err(|_| "Admin returned an invalid Space reset response".to_owned())?;
-    if body.as_object().is_some_and(|object| {
-        object.len() == 1 && object.get("reset") == Some(&serde_json::Value::Bool(true))
-    }) {
-        Ok(())
-    } else {
-        Err("Admin returned an invalid Space reset response".into())
-    }
+        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
+    authenticated_reset_response(status, Some(&body))
 }
 
 fn remove_backup(backup: Option<Backup>) -> Result<(), String> {
@@ -1520,6 +1530,27 @@ mod tests {
         assert!(error.contains("inconsistent Supervisor state"));
         assert!(error.contains("nothing was deleted"));
         assert!(!error.contains("untrusted"));
+    }
+
+    #[test]
+    fn authenticated_reset_requires_exact_success_and_names_the_retry() {
+        assert_eq!(
+            authenticated_reset_response(200, Some(&serde_json::json!({"reset": true}))),
+            Ok(())
+        );
+        assert_eq!(
+            authenticated_reset_response(503, None),
+            Err(RESET_INCOMPLETE.into())
+        );
+        for body in [
+            serde_json::json!({"reset": false}),
+            serde_json::json!({"reset": true, "extra": true}),
+        ] {
+            assert_eq!(
+                authenticated_reset_response(200, Some(&body)),
+                Err(RESET_INCOMPLETE.into())
+            );
+        }
     }
 
     #[test]
