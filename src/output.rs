@@ -50,7 +50,7 @@ fn labeled(style: Style, label: &str, message: &str) -> String {
     format!("{style}{label}:{style:#} {}", sanitize(message))
 }
 
-fn sanitize(message: &str) -> String {
+pub(crate) fn sanitize(message: &str) -> String {
     message
         .chars()
         .map(|character| {

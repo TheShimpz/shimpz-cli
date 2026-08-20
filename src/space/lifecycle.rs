@@ -206,13 +206,16 @@ impl Context {
     ) -> Result<String, String> {
         validate_forward_release(release, installed)?;
         verify_running_cli(release, self.profile)?;
-        output::progress("Pulling the release-pinned Space images...");
+        output::progress("Downloading Shimpz Space (1/4): Admin...");
         self.engine
             .pull_exact(&release.metadata.admin, ADMIN_REPOSITORY)?;
+        output::progress("Downloading Shimpz Space (2/4): Team...");
         self.engine
             .pull_exact(&release.metadata.team, TEAM_REPOSITORY)?;
+        output::progress("Downloading Shimpz Space (3/4): Brain...");
         self.engine
             .pull_exact(&release.metadata.brain, BRAIN_REPOSITORY)?;
+        output::progress("Downloading Shimpz Space (4/4): network boundaries...");
         self.engine
             .pull_exact(&release.metadata.egress, EGRESS_REPOSITORY)?;
         let space_id = match installed {
@@ -634,7 +637,9 @@ impl Context {
         self.start_container_if_present("shimpz-team")?;
         let mut attestation = self.admin_attestation()?;
         if attestation == AdminAttestation::Stopped {
-            let status = self.engine.run_status(["start", "shimpz-admin"])?;
+            let status = self
+                .engine
+                .run_quiet_status("Docker Admin container start", ["start", "shimpz-admin"])?;
             if !status.success() {
                 return Err("the owned Admin container could not be started".into());
             }
@@ -663,7 +668,10 @@ impl Context {
         if attestation == AdminAttestation::Stopped {
             let started = self
                 .engine
-                .run_status(["start", "shimpz-admin"])
+                .run_quiet_status(
+                    "Docker Admin container recovery start",
+                    ["start", "shimpz-admin"],
+                )
                 .is_ok_and(|status| status.success());
             if !started {
                 output::info(
@@ -687,7 +695,9 @@ impl Context {
         match state.as_deref().map(str::trim) {
             Err(_) | Ok("true") => Ok(()),
             Ok("false") => {
-                let status = self.engine.run_status(["start", name])?;
+                let status = self
+                    .engine
+                    .run_quiet_status("Docker owned container start", ["start", name])?;
                 if status.success() {
                     Ok(())
                 } else {
@@ -768,8 +778,8 @@ fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> 
 
 fn ready_outcome(release: &ResolvedRelease, port: u16) -> String {
     format!(
-        "Shimpz Space is ready.\nAdmin http://127.0.0.1:{port}\nRelease {} (ordinal {})",
-        release.reference, release.metadata.ordinal
+        "Shimpz Space is ready.\nAdmin: http://127.0.0.1:{port}\nRelease: ordinal {}\nNext: open the Admin address above.",
+        release.metadata.ordinal
     )
 }
 
@@ -1356,6 +1366,18 @@ mod tests {
             "updated"
         );
         assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+    }
+
+    #[test]
+    fn ready_outcome_leads_to_admin_without_printing_the_digest() {
+        let release = release(3, 'c');
+        let outcome = ready_outcome(&release, 7777);
+
+        assert_eq!(
+            outcome,
+            "Shimpz Space is ready.\nAdmin: http://127.0.0.1:7777\nRelease: ordinal 3\nNext: open the Admin address above."
+        );
+        assert!(!outcome.contains("sha256:"));
     }
 
     #[test]

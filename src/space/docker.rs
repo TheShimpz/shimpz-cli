@@ -2,7 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ use super::paths::Paths;
 use super::release::{self, RELEASE_REPOSITORY, Release};
 
 const RELEASE_CHANNEL: &str = "stable";
+const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
 
 pub(crate) struct Engine {
     docker: PathBuf,
@@ -102,12 +104,18 @@ impl Engine {
         }
         let metadata_path = temporary.join("release.env.tmp");
         let container = self.create(&reference, ["/release.env"])?;
-        let copied = self.run_status([
-            OsString::from("cp"),
-            OsString::from(format!("{container}:/release.env")),
-            metadata_path.as_os_str().to_owned(),
-        ]);
-        let removed = self.run_status([OsString::from("rm"), OsString::from(&container)]);
+        let copied = self.run_quiet_status(
+            "Docker release metadata copy",
+            [
+                OsString::from("cp"),
+                OsString::from(format!("{container}:/release.env")),
+                metadata_path.as_os_str().to_owned(),
+            ],
+        );
+        let removed = self.run_quiet_status(
+            "Docker temporary container cleanup",
+            [OsString::from("rm"), OsString::from(&container)],
+        );
         if !copied?.success() || !removed?.success() {
             return Err("the Local release metadata could not be extracted cleanly".into());
         }
@@ -135,12 +143,18 @@ impl Engine {
             HostProfile::MacOs => "/cli/aarch64-apple-darwin/shimpz",
         };
         let container = self.create(release_ref, [member])?;
-        let copied = self.run_status([
-            OsString::from("cp"),
-            OsString::from(format!("{container}:{member}")),
-            target.as_os_str().to_owned(),
-        ]);
-        let removed = self.run_status([OsString::from("rm"), OsString::from(&container)]);
+        let copied = self.run_quiet_status(
+            "Docker CLI copy",
+            [
+                OsString::from("cp"),
+                OsString::from(format!("{container}:{member}")),
+                target.as_os_str().to_owned(),
+            ],
+        );
+        let removed = self.run_quiet_status(
+            "Docker temporary container cleanup",
+            [OsString::from("rm"), OsString::from(&container)],
+        );
         if !copied?.success() || !removed?.success() {
             return Err("the release-bound CLI could not be extracted cleanly".into());
         }
@@ -196,14 +210,17 @@ impl Engine {
                 })?,
         };
         let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
-        let status = self.run_status(socket_probe_arguments(
-            self.platform,
-            &self.cpuset,
-            &mount,
-            team_image,
-            Some(gid),
-            script,
-        ))?;
+        let status = self.run_quiet_status(
+            "Team controller Docker socket access probe",
+            socket_probe_arguments(
+                self.platform,
+                &self.cpuset,
+                &mount,
+                team_image,
+                Some(gid),
+                script,
+            ),
+        )?;
         if status.success() {
             return Ok((path.into(), gid));
         }
@@ -225,9 +242,8 @@ impl Engine {
             .arg("--file")
             .arg(&paths.compose)
             .args(arguments)
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|error| format!("could not execute Docker Compose: {error}"))
+            .stdin(Stdio::null());
+        quiet_status(&mut command, "Docker Compose")
     }
 
     pub(crate) fn project_release_status(
@@ -284,21 +300,25 @@ impl Engine {
         output(&self.docker, arguments)
     }
 
-    pub(crate) fn run_status<I, S>(&self, arguments: I) -> Result<ExitStatus, String>
+    pub(crate) fn run_quiet_status<I, S>(
+        &self,
+        operation: &str,
+        arguments: I,
+    ) -> Result<ExitStatus, String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        Command::new(&self.docker)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|error| format!("could not execute Docker: {error}"))
+        let mut command = Command::new(&self.docker);
+        command.args(arguments).stdin(Stdio::null());
+        quiet_status(&mut command, operation)
     }
 
     fn pull(&self, reference: &str) -> Result<(), String> {
-        let result =
-            self.run_status(["pull", "--quiet", "--platform", self.platform, reference])?;
+        let result = self.run_quiet_status(
+            "Docker image download",
+            ["pull", "--quiet", "--platform", self.platform, reference],
+        )?;
         if result.success() {
             Ok(())
         } else {
@@ -551,6 +571,83 @@ where
     } else {
         Err(format!("{message}; Docker returned {result}"))
     }
+}
+
+fn quiet_status(command: &mut Command, operation: &str) -> Result<ExitStatus, String> {
+    let (status, diagnostic) = execute_quiet(command)?;
+    if !status.success() {
+        let detail = if diagnostic.is_empty() {
+            String::new()
+        } else {
+            format!(": {diagnostic}")
+        };
+        crate::output::warning(&format!(
+            "{operation} failed; Docker returned {status}{detail}"
+        ));
+    }
+    Ok(status)
+}
+
+fn execute_quiet(command: &mut Command) -> Result<(ExitStatus, String), String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
+    let captured = drain_diagnostic(stderr);
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
+    let captured = captured?;
+    let diagnostic = render_diagnostic(&captured);
+    Ok((status, diagnostic))
+}
+
+struct CapturedDiagnostic {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn drain_diagnostic(mut reader: impl Read) -> Result<CapturedDiagnostic, String> {
+    let mut bytes = Vec::with_capacity(MAX_DOCKER_DIAGNOSTIC_BYTES);
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|_| "Docker diagnostic output could not be read".to_owned())?;
+        if count == 0 {
+            break;
+        }
+        let retained = count.min(MAX_DOCKER_DIAGNOSTIC_BYTES.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < count;
+    }
+    Ok(CapturedDiagnostic { bytes, truncated })
+}
+
+fn render_diagnostic(captured: &CapturedDiagnostic) -> String {
+    let decoded = String::from_utf8_lossy(&captured.bytes);
+    let sanitized = crate::output::sanitize(decoded.trim());
+    let content_limit = MAX_DOCKER_DIAGNOSTIC_BYTES - TRUNCATED_DIAGNOSTIC.len();
+    let mut rendered = String::with_capacity(sanitized.len().min(content_limit));
+    let mut truncated = captured.truncated;
+    for character in sanitized.chars() {
+        if rendered.len() + character.len_utf8() > content_limit {
+            truncated = true;
+            break;
+        }
+        rendered.push(character);
+    }
+    if truncated {
+        rendered.push_str(TRUNCATED_DIAGNOSTIC);
+    }
+    rendered
 }
 
 fn output<I, S>(program: &Path, arguments: I) -> Result<String, String>
@@ -827,6 +924,58 @@ mod tests {
             error,
             "Docker daemon check failed; run docker info as the current user; Docker returned exit status: 7"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quiet_success_captures_without_emitting_child_output() {
+        let stdout = tempfile::NamedTempFile::new().unwrap();
+        let stderr = tempfile::NamedTempFile::new().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf 'unexpected stdout'; printf 'unexpected stderr' >&2",
+            ])
+            .stdout(Stdio::from(stdout.reopen().unwrap()))
+            .stderr(Stdio::from(stderr.reopen().unwrap()));
+
+        let (status, diagnostic) = execute_quiet(&mut command).unwrap();
+
+        assert!(status.success());
+        assert_eq!(diagnostic, "unexpected stderr");
+        assert_eq!(stdout.as_file().metadata().unwrap().len(), 0);
+        assert_eq!(stderr.as_file().metadata().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quiet_failure_retains_a_sanitized_diagnostic() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'failed\\033[2J' >&2; exit 7"]);
+
+        let (status, diagnostic) = execute_quiet(&mut command).unwrap();
+
+        assert_eq!(status.code(), Some(7));
+        assert!(diagnostic.contains("failed�[2J"));
+        assert!(!diagnostic.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn diagnostic_capture_drains_and_bounds_excess_output() {
+        let mut payload = vec![b'x'; MAX_DOCKER_DIAGNOSTIC_BYTES + 4096];
+        payload[0] = b'\x1b';
+        let mut source = std::io::Cursor::new(payload);
+
+        let captured = drain_diagnostic(&mut source).unwrap();
+        let rendered = render_diagnostic(&captured);
+
+        assert_eq!(source.position(), MAX_DOCKER_DIAGNOSTIC_BYTES as u64 + 4096);
+        assert_eq!(captured.bytes.len(), MAX_DOCKER_DIAGNOSTIC_BYTES);
+        assert!(captured.truncated);
+        assert!(rendered.len() <= MAX_DOCKER_DIAGNOSTIC_BYTES);
+        assert!(rendered.ends_with(TRUNCATED_DIAGNOSTIC));
+        assert!(!rendered.contains('\u{1b}'));
     }
 
     #[test]

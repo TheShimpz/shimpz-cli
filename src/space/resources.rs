@@ -485,7 +485,10 @@ fn require_removed<const N: usize>(
     arguments: [&str; N],
     kind: &str,
 ) -> Result<(), String> {
-    if engine.run_status(arguments)?.success() {
+    if engine
+        .run_quiet_status(&format!("Docker managed {kind} removal"), arguments)?
+        .success()
+    {
         Ok(())
     } else {
         Err(format!("could not remove a managed Local {kind}"))
