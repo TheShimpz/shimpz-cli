@@ -16,23 +16,52 @@ const TOP_LEVEL_COMMANDS: [&str; 7] = [
 pub(crate) const USAGE: &str =
     "Usage: shimpz <assistant|auth|install|reset|start|status|upgrade> [options]";
 pub(crate) const HELP: &str = "\
-Fast local tooling for Shimpz Assistants.
+Shimpz CLI
+
+Manage a Local Space and build independently published Assistants.
 
 Usage:
+  shimpz <command> [options]
+
+Local Space:
+  shimpz install                         Install or reconcile the complete Local Space.
+  shimpz start                           Start it and reconcile its atomic release.
+  shimpz status                          Show its runtime, Admin address, and exact release.
+  shimpz reset                           Permanently remove its Shimpz-owned data.
+
+Assistant development:
   shimpz assistant new <name> [--language python]
+                                         Create a Python Assistant project.
   shimpz assistant develop <codex|claude> [path] [--yolo]
+                                         Develop it with a supported coding agent.
   shimpz assistant check [--project <path>]
+                                         Validate the project and its Actions.
   shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]
+                                         Run one Action locally.
   shimpz assistant publish --visibility <private|public> [--project <path>]
+                                         Publish an immutable Assistant release.
   shimpz assistant install <source-digest> [--team <team-id>]
-  shimpz auth [login|status|logout]
-  shimpz install
-  shimpz start
-  shimpz status
-  shimpz reset
-  shimpz upgrade
-  shimpz --help
-  shimpz --version
+                                         Install an exact release for a Team.
+
+Creator account:
+  shimpz auth [login|status|logout]       Manage Creator authentication.
+
+CLI:
+  shimpz upgrade                         Upgrade a standalone CLI.
+  shimpz --version                       Show the CLI version.
+
+Common workflows:
+  Start using Shimpz locally:
+    shimpz install
+    Open the Admin address printed when the Space is ready.
+
+  Create and validate an Assistant:
+    shimpz assistant new hello-assistant
+    cd hello-assistant
+    shimpz assistant check
+
+Documentation:
+  https://docs.shimpz.com/
 ";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -965,6 +994,7 @@ mod tests {
         );
         assert!(!HELP.contains("--scheduled"));
         assert!(!HELP.contains("--candidate"));
+        assert!(!HELP.contains("--print-graph"));
         assert_eq!(
             parse(strings(&["install", "--candidate"])),
             Err("install accepts no public options".into())

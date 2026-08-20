@@ -32,6 +32,21 @@ fn help_exposes_the_resource_first_assistant_surface() {
 }
 
 #[test]
+fn bare_command_prints_a_task_oriented_manual() {
+    let output = Command::new(env!("CARGO_BIN_EXE_shimpz")).output().unwrap();
+    let help = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(help.contains("Manage a Local Space"));
+    assert!(help.contains("Local Space:"));
+    assert!(help.contains("Assistant development:"));
+    assert!(help.contains("Common workflows:"));
+    assert!(help.contains("Install or reconcile the complete Local Space."));
+    assert!(help.contains("https://docs.shimpz.com/"));
+    assert!(!help.contains("--print-graph"));
+}
+
+#[test]
 fn retired_assistant_spellings_fail_at_the_process_boundary() {
     for arguments in [
         &["test", "hello-world"][..],
