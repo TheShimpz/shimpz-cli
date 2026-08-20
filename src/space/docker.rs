@@ -169,8 +169,9 @@ impl Engine {
         let path = controller_socket_path(profile);
         let mount = format!("type=bind,src={},dst=/var/run/docker.sock", path.display());
         let gid = match profile {
-            HostProfile::MacOs => self
-                .run_output(socket_probe_arguments(
+            HostProfile::MacOs => {
+                let value = self
+                    .run_output(socket_probe_arguments(
                     self.platform,
                     &self.cpuset,
                     &mount,
@@ -178,16 +179,22 @@ impl Engine {
                     None,
                     "import os,stat; metadata=os.stat('/var/run/docker.sock'); assert stat.S_ISSOCK(metadata.st_mode); print(metadata.st_gid)",
                 ))
-                .ok()
-                .and_then(|value| one_line(&value, "Docker socket group").ok())
-                .and_then(|value| value.parse::<u32>().ok()),
+                    .map_err(|error| {
+                        format!("the Team controller Docker socket identity probe failed: {error}")
+                    })?;
+                one_line(&value, "Docker socket group")?
+                    .parse::<u32>()
+                    .map_err(|_| "Docker returned an invalid Docker socket group".to_owned())?
+            }
             HostProfile::Linux | HostProfile::Wsl => path
                 .symlink_metadata()
                 .ok()
                 .filter(|metadata| metadata.file_type().is_socket())
-                .map(|metadata| metadata.gid()),
-        }
-        .ok_or_else(|| "the Team controller cannot access the local Docker socket".to_owned())?;
+                .map(|metadata| metadata.gid())
+                .ok_or_else(|| {
+                    "the Team controller cannot access the local Docker socket".to_owned()
+                })?,
+        };
         let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
         let status = self.run_status(socket_probe_arguments(
             self.platform,
@@ -557,7 +564,10 @@ where
         .output()
         .map_err(|error| format!("could not execute Docker: {error}"))?;
     if !result.status.success() {
-        return Err("Docker operation failed".into());
+        return Err(format!(
+            "Docker operation failed; Docker returned {}",
+            result.status
+        ));
     }
     String::from_utf8(result.stdout).map_err(|_| "Docker returned non-UTF-8 output".into())
 }
@@ -701,6 +711,105 @@ mod tests {
         assert!(access.contains("src=/var/run/docker.sock.raw"));
         assert!(access.contains("--group-add 0"));
         assert!(invocations.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_controller_names_a_failed_socket_identity_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let command = temporary.path().join("docker");
+        fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'probe failed\\n' >&2\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = Engine {
+            docker: command,
+            platform: "linux/arm64",
+            cpuset: "0".into(),
+        };
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+
+        let error = engine
+            .controller_socket(HostProfile::MacOs, &image)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "the Team controller Docker socket identity probe failed: Docker operation failed; Docker returned exit status: 7"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_controller_rejects_a_malformed_socket_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let command = temporary.path().join("docker");
+        fs::write(&command, "#!/bin/sh\nprintf 'not-a-group\\n'\n").unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = Engine {
+            docker: command,
+            platform: "linux/arm64",
+            cpuset: "0".into(),
+        };
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+
+        let error = engine
+            .controller_socket(HostProfile::MacOs, &image)
+            .unwrap_err();
+
+        assert_eq!(error, "Docker returned an invalid Docker socket group");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_probe_arguments_preserve_the_security_boundary() {
+        let arguments = socket_probe_arguments(
+            "linux/arm64",
+            "0-1",
+            "type=bind,src=/var/run/docker.sock.raw,dst=/var/run/docker.sock",
+            &format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}"),
+            Some(0),
+            "pass",
+        );
+        let pairs = [
+            ("--platform", "linux/arm64"),
+            ("--pull", "never"),
+            ("--network", "none"),
+            ("--cap-drop", "ALL"),
+            ("--security-opt", "no-new-privileges:true"),
+            ("--group-add", "0"),
+            ("--cpus", "0.25"),
+            ("--memory", "64m"),
+            ("--memory-swap", "64m"),
+            ("--pids-limit", "32"),
+            ("--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=8m"),
+        ];
+
+        assert_eq!(arguments.first(), Some(&OsString::from("run")));
+        assert!(arguments.iter().any(|argument| argument == "--rm"));
+        assert!(arguments.iter().any(|argument| argument == "--read-only"));
+        for (option, value) in pairs {
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == option && pair[1] == value)
+            );
+        }
+        assert!(arguments.windows(2).any(|pair| {
+            pair[0] == "--mount"
+                && pair[1] == "type=bind,src=/var/run/docker.sock.raw,dst=/var/run/docker.sock"
+        }));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair[0] == "--entrypoint" && pair[1] == "/opt/venv/bin/python" })
+        );
     }
 
     #[cfg(unix)]
