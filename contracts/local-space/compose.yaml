@@ -66,6 +66,8 @@ services:
       - type: bind
         source: ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}
         target: /var/run/docker.sock
+        bind:
+          create_host_path: false
       - type: volume
         source: controller_token
         target: /run/shimpz-local

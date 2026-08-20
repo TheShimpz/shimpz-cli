@@ -134,6 +134,7 @@ mod tests {
                     } else {
                         socket_count += 1;
                         assert_eq!(mount["target"].as_str(), Some("/var/run/docker.sock"));
+                        assert_eq!(mount["bind"]["create_host_path"].as_bool(), Some(false));
                         assert!(mount.get("volume").is_none());
                     }
                 }
