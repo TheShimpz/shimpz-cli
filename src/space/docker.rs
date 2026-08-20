@@ -33,12 +33,12 @@ impl Engine {
         require_success(
             &docker,
             ["compose", "version"],
-            "Docker Compose v2 is required",
+            "Docker Compose v2 check failed; run docker compose version as the current user",
         )?;
         require_success(
             &docker,
             ["info"],
-            "the Docker daemon is not available to this user",
+            "Docker daemon check failed; start Docker and run docker info as the current user",
         )?;
         let server = output(&docker, ["version", "--format", "{{.Server.Version}}"])?;
         let api = output(&docker, ["version", "--format", "{{.Server.APIVersion}}"])?;
@@ -494,7 +494,7 @@ where
     if result.success() {
         Ok(())
     } else {
-        Err(message.into())
+        Err(format!("{message}; Docker returned {result}"))
     }
 }
 
@@ -612,6 +612,23 @@ mod tests {
         ] {
             assert!(validate_managed_endpoint(profile, home, context, endpoint).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_docker_check_names_the_command_evidence_without_classifying_it() {
+        let program = Path::new("/bin/sh");
+        let error = require_success(
+            program,
+            ["-c", "exit 7"],
+            "Docker daemon check failed; run docker info as the current user",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Docker daemon check failed; run docker info as the current user; Docker returned exit status: 7"
+        );
     }
 
     #[test]

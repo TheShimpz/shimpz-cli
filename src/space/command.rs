@@ -29,6 +29,13 @@ enum HostOs {
     Other,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum Candidate {
+    Absent,
+    Refused { path: PathBuf, reason: &'static str },
+    Trusted(PathBuf),
+}
+
 impl Tool {
     fn candidates(self) -> &'static [&'static str] {
         match self {
@@ -54,19 +61,67 @@ impl Tool {
     }
 
     pub(crate) fn resolve(self) -> Result<PathBuf, String> {
-        self.candidates()
-            .iter()
-            .map(Path::new)
-            .find_map(|path| trusted_executable(path, self))
-            .ok_or_else(|| format!("required host tool is unavailable: {self:?}"))
+        let candidates: Vec<_> = self.candidates().iter().map(PathBuf::from).collect();
+        resolve_candidates(self, &candidates)
     }
 }
 
-fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
-    let canonical = path.canonicalize().ok()?;
-    let metadata = canonical.metadata().ok()?;
+fn resolve_candidates(tool: Tool, candidates: &[PathBuf]) -> Result<PathBuf, String> {
+    let mut refused = None;
+    for path in candidates {
+        match inspect_executable(path, tool) {
+            Candidate::Absent => {}
+            Candidate::Refused { path, reason } => {
+                refused.get_or_insert((path, reason));
+            }
+            Candidate::Trusted(path) => return Ok(path),
+        }
+    }
+    if let Some((path, reason)) = refused {
+        Err(format!(
+            "required host tool was refused: {tool:?} executable {} {reason}",
+            path.display()
+        ))
+    } else {
+        let expected = candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!(
+            "required host tool is unavailable: {tool:?}; expected an executable at {expected}"
+        ))
+    }
+}
+
+fn inspect_executable(path: &Path, tool: Tool) -> Candidate {
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Candidate::Absent,
+        Err(_) => {
+            return Candidate::Refused {
+                path: path.to_owned(),
+                reason: "metadata could not be read safely",
+            };
+        }
+        Ok(_) => {}
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return Candidate::Refused {
+            path: path.to_owned(),
+            reason: "could not be resolved safely",
+        };
+    };
+    let Ok(metadata) = canonical.metadata() else {
+        return Candidate::Refused {
+            path: canonical,
+            reason: "metadata could not be read safely",
+        };
+    };
     if !metadata.is_file() {
-        return None;
+        return Candidate::Refused {
+            path: canonical,
+            reason: "is not a regular file",
+        };
     }
     #[cfg(unix)]
     {
@@ -76,25 +131,57 @@ fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
         } else {
             HostOs::Other
         };
-        if !trusted_metadata(
+        if let Some(reason) = metadata_refusal(
             tool,
             host,
             metadata.uid(),
             rustix::process::getuid().as_raw(),
             metadata.permissions().mode(),
         ) {
-            return None;
+            return Candidate::Refused {
+                path: canonical,
+                reason,
+            };
         }
     }
     #[cfg(not(unix))]
     let _ = tool;
-    Some(canonical)
+    Candidate::Trusted(canonical)
 }
 
+#[cfg(test)]
+fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
+    match inspect_executable(path, tool) {
+        Candidate::Trusted(path) => Some(path),
+        Candidate::Absent | Candidate::Refused { .. } => None,
+    }
+}
+
+#[cfg(test)]
 fn trusted_metadata(tool: Tool, host: HostOs, file_uid: u32, process_uid: u32, mode: u32) -> bool {
+    metadata_refusal(tool, host, file_uid, process_uid, mode).is_none()
+}
+
+fn metadata_refusal(
+    tool: Tool,
+    host: HostOs,
+    file_uid: u32,
+    process_uid: u32,
+    mode: u32,
+) -> Option<&'static str> {
     let owner_is_trusted =
         file_uid == 0 || (tool == Tool::Docker && host == HostOs::MacOs && file_uid == process_uid);
-    owner_is_trusted && mode & 0o022 == 0
+    if !owner_is_trusted {
+        Some(if tool == Tool::Docker && host == HostOs::MacOs {
+            "is not owned by root or the current macOS user"
+        } else {
+            "is not owned by root"
+        })
+    } else if mode & 0o022 != 0 {
+        Some("is writable by group or others")
+    } else {
+        None
+    }
 }
 
 pub(crate) fn output<I, S>(tool: Tool, arguments: I) -> Result<String, String>
@@ -337,6 +424,94 @@ mod tests {
             501,
             0o100_775,
         ));
+    }
+
+    #[test]
+    fn metadata_refusal_names_the_exact_owner_and_mode_rules() {
+        assert_eq!(
+            metadata_refusal(Tool::Docker, HostOs::Other, 501, 501, 0o100_755),
+            Some("is not owned by root")
+        );
+        assert_eq!(
+            metadata_refusal(Tool::Docker, HostOs::MacOs, 502, 501, 0o100_755),
+            Some("is not owned by root or the current macOS user")
+        );
+        assert_eq!(
+            metadata_refusal(Tool::Docker, HostOs::MacOs, 501, 501, 0o100_775),
+            Some("is writable by group or others")
+        );
+    }
+
+    #[test]
+    fn absent_tool_lists_the_fixed_expected_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker");
+
+        assert_eq!(
+            resolve_candidates(Tool::Docker, std::slice::from_ref(&executable)),
+            Err(format!(
+                "required host tool is unavailable: Docker; expected an executable at {}",
+                executable.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn existing_directory_is_refused_instead_of_reported_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker");
+        std::fs::create_dir(&executable).unwrap();
+
+        assert_eq!(
+            resolve_candidates(Tool::Docker, std::slice::from_ref(&executable)),
+            Err(format!(
+                "required host tool was refused: Docker executable {} is not a regular file",
+                executable.display()
+            ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refused_docker_reports_the_failed_trust_property() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let reason = if cfg!(target_os = "macos") || rustix::process::getuid().is_root() {
+            "is writable by group or others"
+        } else {
+            "is not owned by root"
+        };
+        assert_eq!(
+            resolve_candidates(Tool::Docker, std::slice::from_ref(&executable)),
+            Err(format!(
+                "required host tool was refused: Docker executable {} {reason}",
+                executable.display()
+            ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_tool_symlink_is_refused_instead_of_reported_absent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker");
+        symlink(directory.path().join("missing"), &executable).unwrap();
+
+        assert_eq!(
+            resolve_candidates(Tool::Docker, std::slice::from_ref(&executable)),
+            Err(format!(
+                "required host tool was refused: Docker executable {} could not be resolved safely",
+                executable.display()
+            ))
+        );
     }
 
     #[cfg(unix)]
