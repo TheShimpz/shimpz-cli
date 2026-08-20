@@ -841,8 +841,8 @@ fn ensure_install_home(paths: &Paths) -> Result<(), String> {
                         .expect("managed CLI has a parent")
                 {
                     return Err(format!(
-                        "refusing to use existing unowned directory: {}",
-                        paths.home.display()
+                        "refusing to use unowned Local Space entry: {}; move or remove that exact entry, then run shimpz install",
+                        path.display()
                     ));
                 }
             }
@@ -873,7 +873,10 @@ fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
             && path != paths.managed_cli.with_extension("candidate")
             && path != paths.managed_cli.with_extension("previous")
         {
-            return Err("the unmarked managed CLI directory contains unrecognized content".into());
+            return Err(format!(
+                "refusing to use unowned managed CLI entry: {}; move or remove that exact entry, then run shimpz install",
+                path.display()
+            ));
         }
         let metadata = path.symlink_metadata().map_err(io_error)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -1359,12 +1362,10 @@ mod tests {
         )
         .unwrap();
         assert!(ensure_install_home(&paths).is_ok());
-        fs::write(
-            paths.managed_cli.parent().unwrap().join("foreign"),
-            "foreign",
-        )
-        .unwrap();
-        assert!(ensure_install_home(&paths).is_err());
+        let foreign = paths.managed_cli.parent().unwrap().join("foreign");
+        fs::write(&foreign, "foreign").unwrap();
+        let error = ensure_install_home(&paths).unwrap_err();
+        assert!(error.contains(&foreign.display().to_string()));
     }
 
     #[test]
@@ -1380,6 +1381,21 @@ mod tests {
         ensure_install_home(&paths).unwrap();
         assert!(!release_temporary.exists());
         assert!(!marker_temporary.exists());
+    }
+
+    #[test]
+    fn unmarked_home_names_the_exact_unowned_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let unowned = paths.home.join("unexpected");
+        fs::write(&unowned, "not owned by the Local contract").unwrap();
+
+        let error = ensure_install_home(&paths).unwrap_err();
+
+        assert!(error.contains(&unowned.display().to_string()));
+        assert!(error.contains("move or remove that exact entry"));
     }
 
     #[test]
