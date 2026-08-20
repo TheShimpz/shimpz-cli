@@ -351,7 +351,7 @@ impl Context {
             && let Some(current) = &installed
         {
             self.start_admin_for_reset()?;
-            authenticated_admin_reset(current.port)?;
+            admin_reset(current.port)?;
         }
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
@@ -405,7 +405,7 @@ impl Context {
             _ => None,
         };
         if let Some(port) = admin_port {
-            authenticated_admin_reset(port)?;
+            admin_reset(port)?;
         }
         let space_id = inventory.space_id.clone();
         let remaining = if admin_port.is_some() {
@@ -1224,6 +1224,76 @@ fn admin_available(port: u16) -> bool {
     false
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum AdminResetDecision {
+    Complete,
+    PasswordRequired,
+}
+
+fn admin_reset_decision(
+    status: u16,
+    body: &serde_json::Value,
+) -> Result<AdminResetDecision, String> {
+    if status == 200
+        && body.as_object().is_some_and(|object| {
+            object.len() == 1 && object.get("reset") == Some(&serde_json::Value::Bool(true))
+        })
+    {
+        return Ok(AdminResetDecision::Complete);
+    }
+    if status == 409
+        && body.get("code")
+            == Some(&serde_json::Value::String(
+                "supervisor-password-required".into(),
+            ))
+    {
+        return Ok(AdminResetDecision::PasswordRequired);
+    }
+    if status == 409
+        && body.get("code") == Some(&serde_json::Value::String("bootstrap-reset-refused".into()))
+    {
+        return Err(
+            "Admin found inconsistent Supervisor state; nothing was deleted. Run shimpz install for bounded recovery"
+                .into(),
+        );
+    }
+    Err("Admin could not authorize the Space reset; nothing was deleted".into())
+}
+
+fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
+    let config = Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build();
+    let agent = Agent::new_with_config(config);
+    let request =
+        ureq::http::Request::delete(format!("http://127.0.0.1:{port}/api/space/bootstrap"))
+            .header("Content-Type", "application/json")
+            .body("{}")
+            .map_err(|_| "could not build the bootstrap Space reset".to_owned())?;
+    let mut response = agent
+        .run(request)
+        .map_err(|_| "the bootstrap Space reset is unavailable; nothing was deleted".to_owned())?;
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response
+        .body_mut()
+        .with_config()
+        .limit(1_024)
+        .read_json()
+        .map_err(|_| {
+            "Admin returned an invalid bootstrap reset response; nothing was deleted".to_owned()
+        })?;
+    admin_reset_decision(status, &body)
+}
+
+fn admin_reset(port: u16) -> Result<(), String> {
+    match bootstrap_admin_reset(port)? {
+        AdminResetDecision::Complete => Ok(()),
+        AdminResetDecision::PasswordRequired => authenticated_admin_reset(port),
+    }
+}
+
 fn authenticated_admin_reset(port: u16) -> Result<(), String> {
     let password = Zeroizing::new(
         rpassword::prompt_password("Supervisor password: ")
@@ -1402,6 +1472,52 @@ mod tests {
         for outcome in [already_clean, changed, scheduler] {
             assert!(outcome.contains("Shimpz Space was reset successfully"));
         }
+    }
+
+    #[test]
+    fn bootstrap_reset_prompts_only_for_the_exact_password_required_decision() {
+        assert_eq!(
+            admin_reset_decision(200, &serde_json::json!({"reset": true})),
+            Ok(AdminResetDecision::Complete)
+        );
+        assert_eq!(
+            admin_reset_decision(
+                409,
+                &serde_json::json!({
+                    "code": "supervisor-password-required",
+                    "detail": "ignored for control flow",
+                    "future": true
+                })
+            ),
+            Ok(AdminResetDecision::PasswordRequired)
+        );
+        for (status, body) in [
+            (200, serde_json::json!({"reset": true, "extra": true})),
+            (409, serde_json::json!({"detail": "password required"})),
+            (
+                503,
+                serde_json::json!({"code": "supervisor-password-required"}),
+            ),
+        ] {
+            assert!(
+                admin_reset_decision(status, &body)
+                    .unwrap_err()
+                    .contains("nothing was deleted")
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_reset_names_inconsistent_supervisor_state_without_deleting() {
+        let error = admin_reset_decision(
+            409,
+            &serde_json::json!({"code": "bootstrap-reset-refused", "detail": "untrusted"}),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("inconsistent Supervisor state"));
+        assert!(error.contains("nothing was deleted"));
+        assert!(!error.contains("untrusted"));
     }
 
     #[test]
