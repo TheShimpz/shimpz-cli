@@ -29,6 +29,7 @@ shimpz assistant publish --visibility public
 shimpz install
 shimpz status
 shimpz start
+shimpz stop
 shimpz reset
 shimpz upgrade
 ```
@@ -58,8 +59,9 @@ provided.
 
 `shimpz install` installs or reconciles the complete Local Space from one atomic,
 digest-pinned release. `shimpz status` summarizes its health, Admin address, and
-release ordinal; `shimpz start` reconciles it, and `shimpz reset` removes its exact
-owned state. A corrupt prior installation is removed only after an exact
+release ordinal; `shimpz start` reconciles it, `shimpz stop` stops every owned
+workload without removing data, and `shimpz reset` removes its exact owned state.
+A stopped Space resumes with `shimpz start`. A corrupt prior installation is removed only after an exact
 interactive `Yes`; benign absence is successful.
 On native Linux, Shimpz creates and verifies a LUKS2-backed storage pool. On
 macOS and Windows/WSL2, Shimpz uses Docker-managed volumes and recommends

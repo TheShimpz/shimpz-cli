@@ -11,6 +11,8 @@ use super::docker::ResolvedRelease;
 use super::host::HostProfile;
 use super::paths::{MARKER, Paths};
 
+const STOPPED: &str = "shimpz-space-stopped-v1\n";
+
 #[derive(Debug)]
 pub(crate) struct Installed {
     pub(crate) space_id: String,
@@ -309,6 +311,48 @@ pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result
     Ok(recorded == release_ref)
 }
 
+pub(crate) fn stopped(paths: &Paths) -> Result<bool, String> {
+    let metadata = match paths.stopped.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() != STOPPED.len() as u64
+    {
+        return Err("the Local stopped-state record is invalid".into());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&paths.stopped)
+        .map_err(io_error)?;
+    let mut document = String::with_capacity(STOPPED.len());
+    file.read_to_string(&mut document).map_err(io_error)?;
+    if document != STOPPED {
+        return Err("the Local stopped-state record is malformed".into());
+    }
+    Ok(true)
+}
+
+pub(crate) fn write_stopped(paths: &Paths) -> Result<(), String> {
+    if stopped(paths)? {
+        return Ok(());
+    }
+    write_private(&paths.stopped, STOPPED)
+}
+
+pub(crate) fn clear_stopped(paths: &Paths) -> Result<(), String> {
+    if !stopped(paths)? {
+        return Ok(());
+    }
+    fs::remove_file(&paths.stopped).map_err(io_error)
+}
+
 pub(crate) fn random_space_id() -> Result<String, String> {
     let mut source =
         File::open("/dev/urandom").map_err(|_| "the system random source is unavailable")?;
@@ -592,5 +636,47 @@ mod tests {
         );
         fs::write(&paths.failed_release, "release=invalid\n").unwrap();
         assert!(failed_release_matches(&paths, &release.reference).is_err());
+    }
+
+    #[test]
+    fn round_trips_only_the_exact_private_stopped_state() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+
+        assert!(!stopped(&paths).unwrap());
+        write_stopped(&paths).unwrap();
+        write_stopped(&paths).unwrap();
+        assert!(stopped(&paths).unwrap());
+        assert_eq!(
+            paths.stopped.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        clear_stopped(&paths).unwrap();
+        clear_stopped(&paths).unwrap();
+        assert!(!paths.stopped.exists());
+    }
+
+    #[test]
+    fn refuses_unsafe_or_malformed_stopped_state() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+
+        fs::write(&paths.stopped, "wrong stopped record\n").unwrap();
+        assert!(stopped(&paths).is_err());
+        fs::remove_file(&paths.stopped).unwrap();
+
+        fs::write(&paths.stopped, STOPPED).unwrap();
+        fs::set_permissions(&paths.stopped, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(stopped(&paths).is_err());
+        fs::remove_file(&paths.stopped).unwrap();
+
+        let target = paths.home.join("target");
+        fs::write(&target, STOPPED).unwrap();
+        symlink(&target, &paths.stopped).unwrap();
+        assert!(stopped(&paths).is_err());
     }
 }

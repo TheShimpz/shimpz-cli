@@ -152,6 +152,15 @@ impl Inventory {
         Ok(names.into_iter().collect())
     }
 
+    pub(crate) fn assistant_containers(&self) -> Vec<&str> {
+        let project: BTreeSet<_> = self.project_containers.iter().map(String::as_str).collect();
+        self.dynamic_containers
+            .iter()
+            .map(String::as_str)
+            .filter(|identifier| !project.contains(identifier))
+            .collect()
+    }
+
     pub(crate) fn remove(self, engine: &Engine) -> Result<(), String> {
         let project_containers: BTreeSet<_> = self.project_containers.iter().collect();
         for identifier in self
@@ -522,5 +531,19 @@ mod tests {
     #[test]
     fn an_empty_inventory_is_a_successful_absence_proof() {
         assert!(Inventory::default().empty());
+    }
+
+    #[test]
+    fn separates_dynamic_assistants_from_static_managed_boundaries() {
+        let inventory = Inventory {
+            project_containers: vec!["static".into()],
+            dynamic_containers: vec!["static".into(), "assistant-b".into(), "assistant-a".into()],
+            ..Inventory::default()
+        };
+
+        assert_eq!(
+            inventory.assistant_containers(),
+            ["assistant-b", "assistant-a"]
+        );
     }
 }

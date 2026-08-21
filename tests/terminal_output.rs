@@ -42,6 +42,7 @@ fn bare_command_prints_a_task_oriented_manual() {
     assert!(help.contains("Assistant development:"));
     assert!(help.contains("Common workflows:"));
     assert!(help.contains("Install or reconcile the complete Local Space."));
+    assert!(help.contains("Stop it without removing its data."));
     assert!(help.contains("https://docs.shimpz.com/"));
     assert!(!help.contains("--print-graph"));
 }

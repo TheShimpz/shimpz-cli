@@ -3,18 +3,19 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-const TOP_LEVEL_COMMANDS: [&str; 7] = [
+const TOP_LEVEL_COMMANDS: [&str; 8] = [
     "assistant",
     "auth",
     "install",
     "reset",
     "start",
     "status",
+    "stop",
     "upgrade",
 ];
 
 pub(crate) const USAGE: &str =
-    "Usage: shimpz <assistant|auth|install|reset|start|status|upgrade> [options]";
+    "Usage: shimpz <assistant|auth|install|reset|start|status|stop|upgrade> [options]";
 pub(crate) const HELP: &str = "\
 Shimpz CLI
 
@@ -26,6 +27,7 @@ Usage:
 Local Space:
   shimpz install                         Install or reconcile the complete Local Space.
   shimpz start                           Start it and reconcile its atomic release.
+  shimpz stop                            Stop it without removing its data.
   shimpz status                          Show its health, Admin address, and release ordinal.
   shimpz reset                           Permanently remove its Shimpz-owned data.
 
@@ -79,6 +81,7 @@ pub(crate) enum Command {
     Reset,
     Start(SpaceStart),
     Status,
+    Stop,
     Upgrade,
 }
 
@@ -188,6 +191,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         "reset" => parse_no_options(rest, Command::Reset, "reset"),
         "start" => parse_space_start(rest),
         "status" => parse_no_options(rest, Command::Status, "status"),
+        "stop" => parse_no_options(rest, Command::Stop, "stop"),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
@@ -903,6 +907,7 @@ mod tests {
                 "reset",
                 "start",
                 "status",
+                "stop",
                 "upgrade"
             ]
         );
@@ -939,6 +944,14 @@ mod tests {
             Ok(Invocation::Execute(Command::Status))
         );
         assert_eq!(
+            parse(strings(&["stop"])),
+            Ok(Invocation::Execute(Command::Stop))
+        );
+        assert_eq!(
+            parse(strings(&["stop", "--force"])),
+            Err("stop accepts no options".into())
+        );
+        assert_eq!(
             parse(strings(&["reset"])),
             Ok(Invocation::Execute(Command::Reset))
         );
@@ -946,6 +959,7 @@ mod tests {
             parse(strings(&["space", "install"])),
             Err("unknown command".into())
         );
+        assert!(HELP.contains("shimpz stop"));
     }
 
     #[test]

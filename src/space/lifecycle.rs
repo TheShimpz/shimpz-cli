@@ -1,4 +1,4 @@
-//! Native install, reconcile, status, and reset orchestration.
+//! Native install, reconcile, stop, status, and reset orchestration.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -67,9 +67,30 @@ pub(crate) fn status() -> Result<String, String> {
     let profile = host::detect()?;
     let engine = Engine::connect(profile, &paths)?;
     let installed = state::read_installed(&paths, profile)?;
+    let stopped = state::stopped(&paths)?;
     let graph_current = installed_graph_is_current(&paths, profile)?;
     let inventory = Inventory::inspect(&engine, &paths, profile.storage())?;
-    let observations = status_report::COMPONENTS
+    let snapshot = runtime_snapshot(&engine, &inventory)?;
+    status_report::render(
+        &installed,
+        graph_current,
+        stopped,
+        &snapshot.components,
+        &snapshot.assistants,
+    )
+}
+
+fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<bool, String> {
+    let expected = graph::render(profile.storage());
+    match fs::read_to_string(&paths.compose) {
+        Ok(actual) => Ok(actual == expected),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("could not read the installed Local graph: {error}")),
+    }
+}
+
+fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSnapshot, String> {
+    let components = status_report::COMPONENTS
         .iter()
         .copied()
         .map(|component| {
@@ -83,21 +104,54 @@ pub(crate) fn status() -> Result<String, String> {
             status_report::observe(component, record.as_deref().ok())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let present = observations
+    let present = components
         .iter()
         .filter(|observation| observation.is_present())
         .count();
     if present != inventory.project_containers.len() {
         return Err("Docker returned an inconsistent Local runtime snapshot".into());
     }
-    status_report::render(&installed, graph_current, &observations)
+    let assistants = inventory
+        .assistant_containers()
+        .into_iter()
+        .map(|identifier| {
+            let record = engine.run_output([
+                "inspect",
+                "--type=container",
+                "--format",
+                "{{.State.Status}}|{{.State.ExitCode}}",
+                identifier,
+            ])?;
+            status_report::observe_assistant(&record)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(RuntimeSnapshot {
+        components,
+        assistants,
+    })
 }
 
-fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<bool, String> {
-    let expected = graph::render(profile.storage());
-    let actual = fs::read_to_string(&paths.compose)
-        .map_err(|error| format!("could not read the installed Local graph: {error}"))?;
-    Ok(actual == expected)
+fn stop_absent(paths: &Paths) -> Result<String, String> {
+    let profile = host::detect()?;
+    let engine = Engine::connect(profile, paths)?;
+    let inventory = Inventory::inspect(&engine, paths, profile.storage())?;
+    let residue = unmarked_runtime_entries(paths)?;
+    validate_unmarked_bin(paths)?;
+    if inventory.empty() && residue.is_empty() {
+        Ok("Shimpz Space is not installed. No change was needed.\nNext: shimpz install".into())
+    } else {
+        Err("Shimpz Space is not installed, but Local residue remains; run shimpz install for bounded recovery".into())
+    }
+}
+
+pub(crate) fn stop() -> Result<String, String> {
+    let paths = Paths::discover()?;
+    validate_existing_install_home(&paths)?;
+    let _lock = Lock::acquire(&paths)?;
+    if !paths.marker_is_current()? {
+        return stop_absent(&paths);
+    }
+    Context::open(false)?.stop()
 }
 
 pub(crate) fn reset() -> Result<String, String> {
@@ -111,6 +165,11 @@ struct Context {
     profile: HostProfile,
     engine: Engine,
     scheduled: bool,
+}
+
+struct RuntimeSnapshot {
+    components: Vec<status_report::Observation>,
+    assistants: Vec<status_report::AssistantObservation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,7 +207,7 @@ impl Context {
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let installed = if marker {
             match self
-                .current_installation()
+                .installed_state()
                 .and_then(|installed| self.validate_installation_storage(installed))
             {
                 Ok(installed) => Some(installed),
@@ -194,15 +253,25 @@ impl Context {
         if !self.paths.marker_is_current()? {
             return Err("Shimpz Space is not installed; run shimpz install".into());
         }
-        let installed = self.current_installation()?;
+        let installed = self.installed_state()?;
         Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
-        let release = self
+        let stopped = state::stopped(&self.paths)?;
+        if options.scheduled && stopped {
+            return Ok("Shimpz Space is stopped.\nNext: shimpz start".into());
+        }
+        let mut release = self
             .engine
             .resolve_release(options.release.as_deref(), &self.paths.home)?;
         if options.release.is_none()
             && state::failed_release_matches(&self.paths, &release.reference)?
         {
-            return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
+            if stopped {
+                release = self
+                    .engine
+                    .resolve_release(Some(&installed.release_ref), &self.paths.home)?;
+            } else {
+                return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
+            }
         }
         if options.release.is_none() && self.handoff_if_needed(&release, options.scheduled)? {
             return Ok("The release-bound CLI completed reconciliation.".into());
@@ -211,6 +280,30 @@ impl Context {
             return Err("a candidate start requires an exact release".into());
         }
         self.apply(&release, Some(&installed), options.scheduled)
+    }
+
+    fn stop(&self) -> Result<String, String> {
+        if !self.paths.marker_is_current()? {
+            return Err("Shimpz Space is not installed; run shimpz install".into());
+        }
+        let installed = state::read_installed(&self.paths, self.profile)?;
+        state::stopped(&self.paths)?;
+        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        state::write_stopped(&self.paths)?;
+        self.stop_owned_containers(&inventory)?;
+        let stopped_inventory =
+            Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        let snapshot = runtime_snapshot(&self.engine, &stopped_inventory)?;
+        if !status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
+            return Err("the Space stop is incomplete; re-run shimpz stop".into());
+        }
+        status_report::render(
+            &installed,
+            installed_graph_is_current(&self.paths, self.profile)?,
+            true,
+            &snapshot.components,
+            &snapshot.assistants,
+        )
     }
 
     fn apply(
@@ -280,7 +373,9 @@ impl Context {
         let (docker_socket, docker_gid) = self
             .engine
             .controller_socket(self.profile, &release.metadata.team)?;
-        let previous = installed.map(|_| self.backup_current()).transpose()?;
+        let previous = installed
+            .map(|_| backup_current(&self.paths, self.profile))
+            .transpose()?;
         state::write_environment(
             &self.paths,
             &Environment {
@@ -295,6 +390,7 @@ impl Context {
             },
         )?;
         state::write_private(&self.paths.compose, &graph::render(self.profile.storage()))?;
+        state::clear_stopped(&self.paths)?;
         output::progress("Starting the Shimpz Space...");
         let started = self.engine.compose(
             &self.paths,
@@ -340,6 +436,7 @@ impl Context {
     fn reset(&self) -> Result<String, String> {
         let marker = self.paths.marker_is_current()?;
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        let stopped = state::stopped(&self.paths)?;
         if !marker && inventory.empty() && !self.paths.security.exists() {
             let scheduler = scheduler::remove(self.profile, &self.paths)?;
             let mut preserved = self.remove_files()?;
@@ -366,7 +463,17 @@ impl Context {
             && let Some(current) = &installed
         {
             self.start_admin_for_reset()?;
-            admin_reset(current.port)?;
+            if let Err(error) = admin_reset(current.port) {
+                if stopped {
+                    self.restore_stopped_after_reset_failure()
+                        .map_err(|stop_error| {
+                            format!(
+                                "{error}; the stopped Space could not be restored: {stop_error}"
+                            )
+                        })?;
+                }
+                return Err(error);
+            }
         }
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
@@ -387,11 +494,37 @@ impl Context {
     }
 
     fn current_installation(&self) -> Result<Installed, String> {
-        let installed = state::read_installed(&self.paths, self.profile)?;
+        let installed = self.installed_state()?;
         if !installed_graph_is_current(&self.paths, self.profile)? {
             return Err("the installed Local graph is not current".into());
         }
         Ok(installed)
+    }
+
+    fn installed_state(&self) -> Result<Installed, String> {
+        state::stopped(&self.paths)?;
+        state::read_installed(&self.paths, self.profile)
+    }
+
+    fn stop_owned_containers(&self, inventory: &Inventory) -> Result<(), String> {
+        let mut names = inventory.container_names(&self.engine)?;
+        if let Ok(index) = names.binary_search(&"shimpz-team".to_owned()) {
+            let team = vec![names.remove(index)];
+            self.engine.stop_containers(&team)?;
+        }
+        self.engine.stop_containers(&names)
+    }
+
+    fn restore_stopped_after_reset_failure(&self) -> Result<(), String> {
+        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        self.stop_owned_containers(&inventory)?;
+        let stopped = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        let snapshot = runtime_snapshot(&self.engine, &stopped)?;
+        if status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
+            Ok(())
+        } else {
+            Err("the Space stop is incomplete; re-run shimpz stop".into())
+        }
     }
 
     fn validate_started_storage(&self, space_id: &str) -> Result<(), String> {
@@ -527,17 +660,6 @@ impl Context {
         Ok(true)
     }
 
-    fn backup_current(&self) -> Result<Backup, String> {
-        let compose = self.paths.compose.with_extension("previous");
-        let environment = self.paths.environment.with_extension("previous");
-        fs::copy(&self.paths.compose, &compose).map_err(io_error)?;
-        fs::copy(&self.paths.environment, &environment).map_err(io_error)?;
-        Ok(Backup {
-            compose,
-            environment,
-        })
-    }
-
     fn rollback(
         &self,
         release: &ResolvedRelease,
@@ -646,6 +768,26 @@ impl Context {
     }
 
     fn start_admin_for_reset(&self) -> Result<(), String> {
+        if state::stopped(&self.paths)? {
+            output::progress("Starting the Shimpz Space for reset authorization...");
+            let started = self.engine.compose(
+                &self.paths,
+                [
+                    "up",
+                    "-d",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "--remove-orphans",
+                ],
+            )?;
+            if !started.success() {
+                return Err("the stopped Space could not start for reset authorization".into());
+            }
+        }
         self.start_container_if_present("shimpz-team")?;
         let mut attestation = self.admin_attestation()?;
         if attestation == AdminAttestation::Stopped {
@@ -765,12 +907,14 @@ fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
         paths.environment.clone(),
         paths.status.clone(),
         paths.failed_release.clone(),
+        paths.stopped.clone(),
         paths.compose.with_extension("previous"),
         paths.environment.with_extension("previous"),
         paths.compose.with_extension("tmp"),
         paths.environment.with_extension("tmp"),
         paths.status.with_extension("tmp"),
         paths.failed_release.with_extension("tmp"),
+        paths.stopped.with_extension("tmp"),
         paths.home.join("release.env.tmp"),
         paths.marker.with_extension("tmp"),
         paths.marker.clone(),
@@ -841,6 +985,17 @@ struct Backup {
     environment: PathBuf,
 }
 
+fn backup_current(paths: &Paths, profile: HostProfile) -> Result<Backup, String> {
+    let compose = paths.compose.with_extension("previous");
+    let environment = paths.environment.with_extension("previous");
+    state::write_private(&compose, &graph::render(profile.storage()))?;
+    fs::copy(&paths.environment, &environment).map_err(io_error)?;
+    Ok(Backup {
+        compose,
+        environment,
+    })
+}
+
 const REPORTED_ENTRIES: usize = 8;
 
 #[derive(Default)]
@@ -899,14 +1054,7 @@ impl PathReport {
 
 fn validate_install_home(paths: &Paths) -> Result<(), String> {
     if paths.home.exists() {
-        let metadata = paths.home.symlink_metadata().map_err(io_error)?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err("refusing to use an invalid Local Space directory".into());
-        }
+        validate_existing_install_home(paths)?;
     } else {
         fs::create_dir(&paths.home).map_err(io_error)?;
         fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
@@ -914,24 +1062,30 @@ fn validate_install_home(paths: &Paths) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_existing_install_home(paths: &Paths) -> Result<(), String> {
+    if !paths.home.exists() {
+        return Ok(());
+    }
+    let metadata = paths.home.symlink_metadata().map_err(io_error)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err("refusing to use an invalid Local Space directory".into());
+    }
+    Ok(())
+}
+
 fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
+    state::clear_stopped(paths)?;
     for temporary in [
         paths.home.join("release.env.tmp"),
         paths.marker.with_extension("tmp"),
     ] {
         remove_regular_if_present(&temporary)?;
     }
-    let bin = paths
-        .managed_cli
-        .parent()
-        .expect("managed CLI has a parent");
-    let mut unowned = PathReport::default();
-    for entry in fs::read_dir(&paths.home).map_err(io_error)? {
-        let path = entry.map_err(io_error)?.path();
-        if path != bin {
-            unowned.record(path);
-        }
-    }
+    let unowned = unmarked_runtime_entries(paths)?;
     if !unowned.is_empty() {
         return Err(format!(
             "refusing to use unowned Local Space entries under {}: {}; move or remove every unowned entry, then run shimpz install",
@@ -940,6 +1094,24 @@ fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
         ));
     }
     validate_unmarked_bin(paths)
+}
+
+fn unmarked_runtime_entries(paths: &Paths) -> Result<PathReport, String> {
+    let mut entries = PathReport::default();
+    if !paths.home.exists() {
+        return Ok(entries);
+    }
+    let bin = paths
+        .managed_cli
+        .parent()
+        .expect("managed CLI has a parent");
+    for entry in fs::read_dir(&paths.home).map_err(io_error)? {
+        let path = entry.map_err(io_error)?.path();
+        if path != bin {
+            entries.record(path);
+        }
+    }
+    Ok(entries)
 }
 
 fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
@@ -1428,6 +1600,27 @@ mod tests {
     }
 
     #[test]
+    fn rollback_backup_replaces_a_stale_graph_with_the_current_contract() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::write(&paths.compose, "untrusted stale graph").unwrap();
+        fs::write(&paths.environment, "current environment").unwrap();
+
+        assert!(!installed_graph_is_current(&paths, HostProfile::MacOs).unwrap());
+        let backup = backup_current(&paths, HostProfile::MacOs).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(backup.compose).unwrap(),
+            graph::render(StorageProfile::ManagedDisk)
+        );
+        assert_eq!(
+            fs::read_to_string(backup.environment).unwrap(),
+            "current environment"
+        );
+    }
+
+    #[test]
     fn admits_only_monotonic_unambiguous_releases() {
         let installed = Installed {
             space_id: "space-0123456789abcdef01234567".into(),
@@ -1646,10 +1839,22 @@ mod tests {
         let marker_temporary = paths.marker.with_extension("tmp");
         fs::write(&release_temporary, "metadata").unwrap();
         fs::write(&marker_temporary, "marker").unwrap();
+        state::write_stopped(&paths).unwrap();
         validate_install_home(&paths).unwrap();
+        assert_eq!(unmarked_runtime_entries(&paths).unwrap().total, 3);
         adopt_unmarked_home(&paths).unwrap();
         assert!(!release_temporary.exists());
         assert!(!marker_temporary.exists());
+        assert!(!paths.stopped.exists());
+        assert!(unmarked_runtime_entries(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn absent_unmarked_home_has_no_runtime_residue() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+
+        assert!(unmarked_runtime_entries(&paths).unwrap().is_empty());
     }
 
     #[test]
@@ -1726,10 +1931,12 @@ mod tests {
         fs::create_dir(&paths.home).unwrap();
         let temporary = paths.home.join("release.env.tmp");
         fs::write(&temporary, "metadata").unwrap();
+        state::write_stopped(&paths).unwrap();
 
         remove_runtime_files(&paths).unwrap();
 
         assert!(!temporary.exists());
+        assert!(!paths.stopped.exists());
     }
 
     #[test]

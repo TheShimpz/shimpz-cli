@@ -88,6 +88,7 @@ fn run(command: &Command) -> ExitCode {
         Command::Reset => (space::lifecycle::reset(), Presentation::Success),
         Command::Start(options) => (space::lifecycle::start(options), Presentation::Success),
         Command::Status => (space::lifecycle::status(), Presentation::Info),
+        Command::Stop => (space::lifecycle::stop(), Presentation::Success),
         Command::Upgrade => (upgrade::run(), Presentation::Success),
     };
     match result {

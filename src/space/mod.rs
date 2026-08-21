@@ -30,6 +30,10 @@ pub(crate) mod lifecycle {
         unsupported()
     }
 
+    pub(crate) fn stop() -> Result<String, String> {
+        unsupported()
+    }
+
     pub(crate) fn reset() -> Result<String, String> {
         unsupported()
     }

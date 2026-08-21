@@ -314,6 +314,26 @@ impl Engine {
         quiet_status(&mut command, operation)
     }
 
+    pub(crate) fn stop_containers(&self, containers: &[String]) -> Result<(), String> {
+        if containers.is_empty() {
+            return Ok(());
+        }
+        let mut arguments = vec![
+            OsString::from("stop"),
+            OsString::from("--time"),
+            OsString::from("30"),
+        ];
+        arguments.extend(containers.iter().map(OsString::from));
+        if self
+            .run_quiet_status("Docker managed container stop", arguments)?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err("could not stop every managed Local container".into())
+        }
+    }
+
     fn pull(&self, reference: &str) -> Result<(), String> {
         let result = self.run_quiet_status(
             "Docker image download",

@@ -14,6 +14,7 @@ pub(crate) struct Paths {
     pub(crate) lock: PathBuf,
     pub(crate) status: PathBuf,
     pub(crate) failed_release: PathBuf,
+    pub(crate) stopped: PathBuf,
     pub(crate) managed_cli: PathBuf,
     pub(crate) security: PathBuf,
     pub(crate) storage_marker: PathBuf,
@@ -49,6 +50,7 @@ impl Paths {
             lock: user_home.join(".shimpz-update.lock"),
             status: home.join("release-status.json"),
             failed_release: home.join("failed-release.env"),
+            stopped: home.join("stopped"),
             managed_cli: home.join("bin/shimpz"),
             storage_marker: security.join(".shimpz-storage"),
             pool_image: security.join("local-data.luks"),
@@ -98,6 +100,7 @@ mod tests {
         assert_eq!(paths.home, user_home.join(".shimpz"));
         assert_eq!(paths.managed_cli, user_home.join(".shimpz/bin/shimpz"));
         assert_eq!(paths.public_cli, user_home.join(".local/bin/shimpz"));
+        assert_eq!(paths.stopped, user_home.join(".shimpz/stopped"));
         assert_eq!(
             paths.systemd_timer,
             user_home.join(".config/systemd/user/shimpz-update.timer")
