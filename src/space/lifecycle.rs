@@ -185,6 +185,13 @@ enum ApplyOutcome {
     Locked,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailedReleaseDecision {
+    UseSelected,
+    ResumeInstalled,
+    KeepRunning,
+}
+
 impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
@@ -262,19 +269,20 @@ impl Context {
         let mut release = self
             .engine
             .resolve_release(options.release.as_deref(), &self.paths.home)?;
-        let mut preserve_failed_release = false;
-        if options.release.is_none()
-            && state::failed_release_matches(&self.paths, &release.reference)?
-        {
-            if stopped {
-                preserve_failed_release = true;
+        let selected_failed = options.release.is_none()
+            && state::failed_release_matches(&self.paths, &release.reference)?;
+        let preserve_failed_release = match failed_release_decision(stopped, selected_failed) {
+            FailedReleaseDecision::UseSelected => false,
+            FailedReleaseDecision::ResumeInstalled => {
                 release = self
                     .engine
                     .resolve_release(Some(&installed.release_ref), &self.paths.home)?;
-            } else {
+                true
+            }
+            FailedReleaseDecision::KeepRunning => {
                 return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
             }
-        }
+        };
         if options.release.is_none()
             && !preserve_failed_release
             && self.handoff_if_needed(&release, options.scheduled)?
@@ -1586,6 +1594,14 @@ fn finish_failed_release_memory(paths: &Paths, preserve: bool) -> Result<(), Str
     }
 }
 
+fn failed_release_decision(stopped: bool, selected_failed: bool) -> FailedReleaseDecision {
+    match (stopped, selected_failed) {
+        (_, false) => FailedReleaseDecision::UseSelected,
+        (true, true) => FailedReleaseDecision::ResumeInstalled,
+        (false, true) => FailedReleaseDecision::KeepRunning,
+    }
+}
+
 fn remove_regular_if_present(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -1699,6 +1715,22 @@ mod tests {
 
         finish_failed_release_memory(&paths, false).unwrap();
         assert!(!paths.failed_release.exists());
+    }
+
+    #[test]
+    fn a_failed_channel_release_resumes_only_an_intentionally_stopped_space() {
+        assert_eq!(
+            failed_release_decision(true, true),
+            FailedReleaseDecision::ResumeInstalled
+        );
+        assert_eq!(
+            failed_release_decision(false, true),
+            FailedReleaseDecision::KeepRunning
+        );
+        assert_eq!(
+            failed_release_decision(true, false),
+            FailedReleaseDecision::UseSelected
+        );
     }
 
     #[test]
