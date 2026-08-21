@@ -791,6 +791,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn managed_stop_omits_a_timeout_override_and_keeps_bounded_failures() {
         assert_eq!(
