@@ -3,6 +3,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::help::Topic;
+
 const TOP_LEVEL_COMMANDS: [&str; 8] = [
     "assistant",
     "auth",
@@ -16,59 +18,9 @@ const TOP_LEVEL_COMMANDS: [&str; 8] = [
 
 pub(crate) const USAGE: &str =
     "Usage: shimpz <assistant|auth|install|reset|start|status|stop|upgrade> [options]";
-pub(crate) const HELP: &str = "\
-Shimpz CLI
-
-Manage a Local Space and build independently published Assistants.
-
-Usage:
-  shimpz <command> [options]
-
-Local Space:
-  shimpz install                         Install or reconcile the complete Local Space.
-  shimpz start                           Start it and reconcile its atomic release.
-  shimpz stop                            Stop it without removing its data.
-  shimpz status                          Show its health, Admin address, and release ordinal.
-  shimpz reset                           Permanently remove its Shimpz-owned data.
-
-Assistant development:
-  shimpz assistant new <name> [--language python]
-                                         Create a Python Assistant project.
-  shimpz assistant develop <codex|claude> [path] [--yolo]
-                                         Develop it with a supported coding agent.
-  shimpz assistant check [--project <path>]
-                                         Validate the project and its Actions.
-  shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]
-                                         Run one Action locally.
-  shimpz assistant publish --visibility <private|public> [--project <path>]
-                                         Publish an immutable Assistant release.
-  shimpz assistant install <source-digest> [--team <team-id>]
-                                         Install an exact release for a Team.
-
-Creator account:
-  shimpz auth [login|status|logout]       Manage Creator authentication.
-
-CLI:
-  shimpz upgrade                         Upgrade a standalone CLI.
-  shimpz --version                       Show the CLI version.
-
-Common workflows:
-  Start using Shimpz locally:
-    shimpz install
-    Open the Admin address printed when the Space is ready.
-
-  Create and validate an Assistant:
-    shimpz assistant new hello-assistant
-    cd hello-assistant
-    shimpz assistant check
-
-Documentation:
-  https://docs.shimpz.com/
-";
-
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
-    Help,
+    Help(Topic),
     Version,
     Execute(Command),
 }
@@ -174,10 +126,10 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         .map(unicode)
         .collect::<Result<Vec<_>, _>>()?;
     let Some((command, rest)) = values.split_first() else {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::Root));
     };
     match command.as_str() {
-        "-h" | "--help" | "help" => return Ok(Invocation::Help),
+        "-h" | "--help" | "help" => return Ok(Invocation::Help(Topic::Root)),
         "-V" | "--version" | "version" => return Ok(Invocation::Version),
         _ => {}
     }
@@ -188,10 +140,10 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
         "install" => parse_space_install(rest),
-        "reset" => parse_no_options(rest, Command::Reset, "reset"),
+        "reset" => parse_no_options(rest, Command::Reset, "reset", Topic::Reset),
         "start" => parse_space_start(rest),
-        "status" => parse_no_options(rest, Command::Status, "status"),
-        "stop" => parse_no_options(rest, Command::Stop, "stop"),
+        "status" => parse_no_options(rest, Command::Status, "status", Topic::Status),
+        "stop" => parse_no_options(rest, Command::Stop, "stop", Topic::Stop),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
@@ -204,7 +156,7 @@ fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
             print_graph: None,
             candidate: false,
         }))),
-        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(Topic::Install)),
         [option, profile] if option == "--print-graph" => {
             let print_graph = match profile.as_str() {
                 "linux-luks" => GraphProfile::LinuxLuks,
@@ -248,7 +200,9 @@ fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
 fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
     let (scheduled, release, candidate) = match arguments {
         [] => (false, None, false),
-        [option] if option == "--help" || option == "-h" => return Ok(Invocation::Help),
+        [option] if option == "--help" || option == "-h" => {
+            return Ok(Invocation::Help(Topic::Start));
+        }
         [option] if option == "--scheduled" => (true, None, false),
         [release_option, release, candidate_option]
             if release_option == "--release"
@@ -278,10 +232,11 @@ fn parse_no_options(
     arguments: &[String],
     command: Command,
     name: &str,
+    help: Topic,
 ) -> Result<Invocation, String> {
     match arguments {
         [] => Ok(Invocation::Execute(command)),
-        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(help)),
         _ => Err(format!("{name} accepts no options")),
     }
 }
@@ -301,7 +256,7 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
         return Err("assistant requires an operation".into());
     };
     match operation.as_str() {
-        "-h" | "--help" | "help" => Ok(Invocation::Help),
+        "-h" | "--help" | "help" => Ok(Invocation::Help(Topic::Assistant)),
         "new" => parse_assistant_new(rest),
         "develop" => parse_assistant_develop(rest),
         "check" => parse_assistant_check(rest),
@@ -314,7 +269,7 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
 
 fn parse_assistant_develop(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantDevelop));
     }
     let Some((agent, options)) = arguments.split_first() else {
         return Err("develop requires codex or claude".into());
@@ -355,7 +310,18 @@ fn parse_auth(arguments: &[String]) -> Result<Invocation, String> {
         [action] if action == "login" => AuthAction::Login,
         [action] if action == "status" => AuthAction::Status,
         [action] if action == "logout" => AuthAction::Logout,
-        [option] if option == "--help" || option == "-h" => return Ok(Invocation::Help),
+        [option] if option == "--help" || option == "-h" => {
+            return Ok(Invocation::Help(Topic::Auth));
+        }
+        [action, option] if option == "--help" || option == "-h" => {
+            let topic = match action.as_str() {
+                "login" => Topic::AuthLogin,
+                "status" => Topic::AuthStatus,
+                "logout" => Topic::AuthLogout,
+                _ => return Err("auth accepts login, status, or logout".into()),
+            };
+            return Ok(Invocation::Help(topic));
+        }
         _ => return Err("auth accepts login, status, or logout".into()),
     };
     Ok(Invocation::Execute(Command::Auth(action)))
@@ -363,7 +329,7 @@ fn parse_auth(arguments: &[String]) -> Result<Invocation, String> {
 
 fn parse_assistant_new(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantNew));
     }
     let mut name = None;
     let mut language = None;
@@ -406,7 +372,7 @@ fn set_language(language: &mut Option<String>, value: &str) -> Result<(), String
 
 fn parse_assistant_check(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantCheck));
     }
     let project = project_option(arguments)?;
     Ok(Invocation::Execute(Command::Assistant(
@@ -416,7 +382,7 @@ fn parse_assistant_check(arguments: &[String]) -> Result<Invocation, String> {
 
 fn parse_assistant_run(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantRun));
     }
     let Some(action) = arguments.first().filter(|value| !value.starts_with('-')) else {
         return Err("assistant run requires an Action id".into());
@@ -465,14 +431,14 @@ fn parse_assistant_run(arguments: &[String]) -> Result<Invocation, String> {
 fn parse_upgrade(arguments: &[String]) -> Result<Invocation, String> {
     match arguments {
         [] => Ok(Invocation::Execute(Command::Upgrade)),
-        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(Topic::Upgrade)),
         _ => Err("upgrade accepts no options".into()),
     }
 }
 
 fn parse_assistant_publish(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantPublish));
     }
     let mut project = PathBuf::from(".");
     let mut project_seen = false;
@@ -512,7 +478,7 @@ fn parse_assistant_publish(arguments: &[String]) -> Result<Invocation, String> {
 
 fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help);
+        return Ok(Invocation::Help(Topic::AssistantInstall));
     }
     let Some(source_digest) = arguments.first().filter(|value| !value.starts_with('-')) else {
         return Err("assistant install requires a source digest".into());
@@ -959,7 +925,7 @@ mod tests {
             parse(strings(&["space", "install"])),
             Err("unknown command".into())
         );
-        assert!(HELP.contains("shimpz stop"));
+        assert!(Topic::Root.text().contains("shimpz stop"));
     }
 
     #[test]
@@ -1006,14 +972,15 @@ mod tests {
                 candidate: true,
             })))
         );
-        assert!(!HELP.contains("--scheduled"));
-        assert!(!HELP.contains("--candidate"));
-        assert!(!HELP.contains("--print-graph"));
         assert_eq!(
             parse(strings(&["install", "--candidate"])),
             Err("install accepts no public options".into())
         );
-        assert!(!HELP.contains("--release"));
+        for topic in Topic::ALL {
+            for hidden in ["--scheduled", "--candidate", "--print-graph", "--release"] {
+                assert!(!topic.text().contains(hidden));
+            }
+        }
     }
 
     #[test]
@@ -1026,7 +993,7 @@ mod tests {
             "shimpz assistant publish",
             "shimpz assistant install",
         ] {
-            assert!(HELP.contains(current));
+            assert!(Topic::Root.text().contains(current));
         }
         for retired in [
             "shimpz new assistant",
@@ -1036,7 +1003,82 @@ mod tests {
             "shimpz publish",
             "shimpz install assistant",
         ] {
-            assert!(!HELP.contains(retired));
+            for topic in Topic::ALL {
+                assert!(!topic.text().contains(retired));
+            }
+        }
+    }
+
+    #[test]
+    fn parses_help_for_each_command_context() {
+        for (arguments, topic) in [
+            (&["install", "--help"][..], Topic::Install),
+            (&["reset", "--help"][..], Topic::Reset),
+            (&["start", "--help"][..], Topic::Start),
+            (&["status", "--help"][..], Topic::Status),
+            (&["stop", "--help"][..], Topic::Stop),
+            (&["upgrade", "--help"][..], Topic::Upgrade),
+            (&["auth", "--help"][..], Topic::Auth),
+            (&["auth", "login", "--help"][..], Topic::AuthLogin),
+            (&["auth", "status", "--help"][..], Topic::AuthStatus),
+            (&["auth", "logout", "--help"][..], Topic::AuthLogout),
+            (&["assistant", "--help"][..], Topic::Assistant),
+            (&["assistant", "new", "--help"][..], Topic::AssistantNew),
+            (
+                &["assistant", "develop", "--help"][..],
+                Topic::AssistantDevelop,
+            ),
+            (&["assistant", "check", "--help"][..], Topic::AssistantCheck),
+            (&["assistant", "run", "--help"][..], Topic::AssistantRun),
+            (
+                &["assistant", "publish", "--help"][..],
+                Topic::AssistantPublish,
+            ),
+            (
+                &["assistant", "install", "--help"][..],
+                Topic::AssistantInstall,
+            ),
+        ] {
+            assert_eq!(parse(strings(arguments)), Ok(Invocation::Help(topic)));
+            let mut short_arguments = arguments.to_vec();
+            *short_arguments.last_mut().unwrap() = "-h";
+            assert_eq!(
+                parse(strings(&short_arguments)),
+                Ok(Invocation::Help(topic))
+            );
+        }
+        assert_eq!(parse(strings(&[])), Ok(Invocation::Help(Topic::Root)));
+        assert_eq!(
+            parse(strings(&["--help"])),
+            Ok(Invocation::Help(Topic::Root))
+        );
+        assert_eq!(parse(strings(&["-h"])), Ok(Invocation::Help(Topic::Root)));
+        assert_eq!(parse(strings(&["help"])), Ok(Invocation::Help(Topic::Root)));
+        assert_eq!(
+            parse(strings(&["assistant", "help"])),
+            Ok(Invocation::Help(Topic::Assistant))
+        );
+    }
+
+    #[test]
+    fn command_help_remains_a_standalone_positional_flag() {
+        assert_eq!(
+            parse(strings(&["assistant", "run", "create-dns", "--help"])),
+            Err("--help requires a value".into())
+        );
+        assert_eq!(
+            parse(strings(&["reset", "--help", "extra"])),
+            Err("reset accepts no options".into())
+        );
+        for arguments in [
+            &["auth", "login", "logout"][..],
+            &["auth", "token", "--help"][..],
+            &["auth", "--help", "--help"][..],
+        ] {
+            assert_eq!(
+                parse(strings(arguments)),
+                Err("auth accepts login, status, or logout".into())
+            );
         }
     }
 }

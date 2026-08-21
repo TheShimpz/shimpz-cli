@@ -43,8 +43,120 @@ fn bare_command_prints_a_task_oriented_manual() {
     assert!(help.contains("Common workflows:"));
     assert!(help.contains("Install or reconcile the complete Local Space."));
     assert!(help.contains("Stop it without removing its data."));
+    assert!(help.contains("Run 'shimpz <command> --help' for details about a command."));
     assert!(help.contains("https://docs.shimpz.com/"));
     assert!(!help.contains("--print-graph"));
+}
+
+#[test]
+fn each_command_prints_its_own_help() {
+    for (arguments, expected_heading, expected_usage) in [
+        (
+            &["assistant", "--help"][..],
+            "shimpz assistant\n",
+            "shimpz assistant <operation> [options]",
+        ),
+        (
+            &["assistant", "new", "--help"][..],
+            "shimpz assistant new\n",
+            "shimpz assistant new <name> [--language python]",
+        ),
+        (
+            &["assistant", "develop", "--help"][..],
+            "shimpz assistant develop\n",
+            "shimpz assistant develop <codex|claude> [path] [--yolo]",
+        ),
+        (
+            &["assistant", "check", "--help"][..],
+            "shimpz assistant check\n",
+            "shimpz assistant check [--project <path>]",
+        ),
+        (
+            &["assistant", "run", "--help"][..],
+            "shimpz assistant run\n",
+            "shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]",
+        ),
+        (
+            &["assistant", "publish", "--help"][..],
+            "shimpz assistant publish\n",
+            "shimpz assistant publish --visibility <private|public> [--project <path>]",
+        ),
+        (
+            &["assistant", "install", "--help"][..],
+            "shimpz assistant install\n",
+            "shimpz assistant install <source-digest> [--team <team-id>]",
+        ),
+        (
+            &["auth", "--help"][..],
+            "shimpz auth\n",
+            "shimpz auth [login|status|logout]",
+        ),
+        (
+            &["auth", "login", "--help"][..],
+            "shimpz auth login\n",
+            "shimpz auth login",
+        ),
+        (
+            &["auth", "status", "--help"][..],
+            "shimpz auth status\n",
+            "shimpz auth status",
+        ),
+        (
+            &["auth", "logout", "--help"][..],
+            "shimpz auth logout\n",
+            "shimpz auth logout",
+        ),
+        (
+            &["install", "--help"][..],
+            "shimpz install\n",
+            "shimpz install",
+        ),
+        (&["reset", "--help"][..], "shimpz reset\n", "shimpz reset"),
+        (&["start", "--help"][..], "shimpz start\n", "shimpz start"),
+        (
+            &["status", "--help"][..],
+            "shimpz status\n",
+            "shimpz status",
+        ),
+        (&["stop", "--help"][..], "shimpz stop\n", "shimpz stop"),
+        (
+            &["upgrade", "--help"][..],
+            "shimpz upgrade\n",
+            "shimpz upgrade",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        let help = stdout(&output);
+
+        assert!(output.status.success(), "arguments: {arguments:?}");
+        assert!(
+            help.starts_with(expected_heading),
+            "arguments: {arguments:?}"
+        );
+        assert!(help.contains(expected_usage), "arguments: {arguments:?}");
+        assert!(
+            !help.contains("Common workflows:"),
+            "arguments: {arguments:?}"
+        );
+        assert!(stderr(&output).is_empty(), "arguments: {arguments:?}");
+    }
+}
+
+#[test]
+fn reset_help_explains_the_destructive_boundary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+        .args(["reset", "--help"])
+        .output()
+        .unwrap();
+    let help = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(help.contains("This operation is irreversible."));
+    assert!(help.contains("A Supervisor password is requested only after one has been created."));
+    assert!(!help.contains("Assistant development:"));
 }
 
 #[test]

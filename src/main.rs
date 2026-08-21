@@ -4,6 +4,7 @@ mod args;
 mod auth;
 mod credentials;
 mod develop;
+mod help;
 mod human_request;
 mod install;
 mod invoke;
@@ -28,8 +29,8 @@ use args::{AssistantCommand, AuthAction, Command, Invocation};
 
 fn main() -> ExitCode {
     match args::parse(env::args_os().skip(1)) {
-        Ok(Invocation::Help) => {
-            output::plain(args::HELP.trim_end());
+        Ok(Invocation::Help(topic)) => {
+            output::plain(topic.text().trim_end());
             ExitCode::SUCCESS
         }
         Ok(Invocation::Version) => {
