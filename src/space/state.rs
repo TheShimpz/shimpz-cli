@@ -17,6 +17,7 @@ const STOPPED: &str = "shimpz-space-stopped-v1\n";
 pub(crate) struct Installed {
     pub(crate) space_id: String,
     pub(crate) release_ref: String,
+    pub(crate) admin_image: String,
     pub(crate) ordinal: u64,
     pub(crate) port: u16,
 }
@@ -85,6 +86,7 @@ pub(crate) fn read_installed(paths: &Paths, profile: HostProfile) -> Result<Inst
     Ok(Installed {
         space_id: space_id.into(),
         release_ref: release_ref.into(),
+        admin_image: values["SHIMPZ_ADMIN_IMAGE"].into(),
         ordinal,
         port,
     })
@@ -486,6 +488,7 @@ mod tests {
                     super::super::release::RELEASE_REPOSITORY,
                     "0".repeat(64)
                 ),
+                admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
                 ordinal: 1,
                 port: 7777,
             })),

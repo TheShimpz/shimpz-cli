@@ -409,6 +409,7 @@ mod tests {
                 "ghcr.io/theshimpz/shimpz-local-release@sha256:{}",
                 "a".repeat(64)
             ),
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "b".repeat(64)),
             ordinal: 42,
             port: 7777,
         }

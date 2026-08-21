@@ -6,7 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use ureq::Agent;
@@ -32,6 +32,7 @@ const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
 // Admin bounds its authoritative Team reset call at 180 seconds; the client must outlast it.
 const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 const ADMIN_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_RESET_CAPABILITY_SECONDS: u64 = 120;
 const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
 const STOP_PROGRESS: [&str; 3] = [
     "Checking the Shimpz Space...",
@@ -193,10 +194,16 @@ enum ApplyOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdminPasswordState {
+enum AdminAuthenticationState {
     Uninitialized,
+    EnrollmentRequired,
     Configured,
     RecoveryRequired,
+}
+
+struct HostResetCapability {
+    secret: Zeroizing<String>,
+    document: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -462,23 +469,27 @@ impl Context {
                 Ok(outcome) | Err(outcome) => Err(format!("{storage_error}; {outcome}")),
             };
         }
-        output::progress("Verifying Supervisor password compatibility...");
+        output::progress("Verifying Supervisor authentication compatibility...");
         let was_upgrade = previous.is_some();
-        let password_error = match admin_password_state(port) {
-            Ok(AdminPasswordState::RecoveryRequired) if was_upgrade => Some(
-                "the selected release cannot use the existing Supervisor password record; run shimpz reset, then shimpz install"
+        let authentication_error = match admin_authentication_state(port) {
+            Ok(AdminAuthenticationState::RecoveryRequired) if was_upgrade => Some(
+                "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install"
                     .to_owned(),
             ),
-            Ok(AdminPasswordState::RecoveryRequired) => Some(
-                "the fresh release returned an invalid Supervisor password state".to_owned(),
+            Ok(AdminAuthenticationState::RecoveryRequired) => Some(
+                "the fresh release returned an invalid Supervisor authentication state".to_owned(),
             ),
-            Ok(AdminPasswordState::Uninitialized | AdminPasswordState::Configured) => None,
+            Ok(
+                AdminAuthenticationState::Uninitialized
+                | AdminAuthenticationState::EnrollmentRequired
+                | AdminAuthenticationState::Configured,
+            ) => None,
             Err(error) => Some(error),
         };
-        if let Some(password_error) = password_error {
+        if let Some(authentication_error) = authentication_error {
             let rollback = self.rollback(release, space_id, previous);
             return match rollback {
-                Ok(outcome) | Err(outcome) => Err(format!("{password_error}; {outcome}")),
+                Ok(outcome) | Err(outcome) => Err(format!("{authentication_error}; {outcome}")),
             };
         }
         let status =
@@ -528,7 +539,8 @@ impl Context {
         {
             self.start_admin_for_reset()
                 .map_err(|error| self.reset_failure(error, stopped))?;
-            admin_reset(current.port).map_err(|error| self.reset_failure(error, stopped))?;
+            admin_reset(&self.engine, current)
+                .map_err(|error| self.reset_failure(error, stopped))?;
         }
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
@@ -618,8 +630,11 @@ impl Context {
             AdminAttestation::Running { port } if admin_available(port) => Some(port),
             _ => None,
         };
-        if let Some(port) = admin_port {
-            admin_reset(port)?;
+        if admin_port.is_some()
+            && let Ok(installed) = state::read_installed(&self.paths, self.profile)
+            && installed_graph_is_current(&self.paths, self.profile)?
+        {
+            admin_reset(&self.engine, &installed)?;
         }
         let space_id = inventory.space_id.clone();
         let remaining = if admin_port.is_some() {
@@ -1457,11 +1472,11 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
     }
 }
 
-fn admin_password_state_response(
+fn admin_authentication_state_response(
     status: u16,
     body: &serde_json::Value,
-) -> Result<AdminPasswordState, String> {
-    let invalid = || "Admin returned an invalid Local password-state contract".to_owned();
+) -> Result<AdminAuthenticationState, String> {
+    let invalid = || "Admin returned an invalid Local authentication-state contract".to_owned();
     if status != 200 {
         return Err(invalid());
     }
@@ -1493,18 +1508,21 @@ fn admin_password_state_response(
     }
     match (
         object
-            .get("password_state")
+            .get("authentication_state")
             .and_then(serde_json::Value::as_str),
         object["initialized"].as_bool(),
     ) {
-        (Some("uninitialized"), Some(false)) => Ok(AdminPasswordState::Uninitialized),
-        (Some("configured"), Some(true)) => Ok(AdminPasswordState::Configured),
-        (Some("recovery-required"), Some(true)) => Ok(AdminPasswordState::RecoveryRequired),
+        (Some("uninitialized"), Some(false)) => Ok(AdminAuthenticationState::Uninitialized),
+        (Some("enrollment-required"), Some(true)) => {
+            Ok(AdminAuthenticationState::EnrollmentRequired)
+        }
+        (Some("configured"), Some(true)) => Ok(AdminAuthenticationState::Configured),
+        (Some("recovery-required"), Some(true)) => Ok(AdminAuthenticationState::RecoveryRequired),
         _ => Err(invalid()),
     }
 }
 
-fn admin_password_state(port: u16) -> Result<AdminPasswordState, String> {
+fn admin_authentication_state(port: u16) -> Result<AdminAuthenticationState, String> {
     let config = Agent::config_builder()
         .timeout_global(Some(ADMIN_SESSION_TIMEOUT))
         .max_redirects(0)
@@ -1514,15 +1532,15 @@ fn admin_password_state(port: u16) -> Result<AdminPasswordState, String> {
     let mut response = agent
         .post(format!("http://127.0.0.1:{port}/api/session"))
         .send_empty()
-        .map_err(|_| "Admin did not provide the Local password-state contract".to_owned())?;
+        .map_err(|_| "Admin did not provide the Local authentication-state contract".to_owned())?;
     let status = response.status().as_u16();
     let body: serde_json::Value = response
         .body_mut()
         .with_config()
         .limit(1_024)
         .read_json()
-        .map_err(|_| "Admin returned an invalid Local password-state contract".to_owned())?;
-    admin_password_state_response(status, &body)
+        .map_err(|_| "Admin returned an invalid Local authentication-state contract".to_owned())?;
+    admin_authentication_state_response(status, &body)
 }
 
 fn admin_available(port: u16) -> bool {
@@ -1554,6 +1572,8 @@ enum AdminResetDecision {
 fn admin_reset_decision(
     status: u16,
     body: &serde_json::Value,
+    retry_after: Option<&str>,
+    password_presented: bool,
 ) -> Result<AdminResetDecision, String> {
     if status == 200
         && body.as_object().is_some_and(|object| {
@@ -1562,64 +1582,81 @@ fn admin_reset_decision(
     {
         return Ok(AdminResetDecision::Complete);
     }
-    if status == 409
-        && body.get("code")
-            == Some(&serde_json::Value::String(
-                "supervisor-password-required".into(),
-            ))
+    if !password_presented
+        && status == 409
+        && body.as_object().is_some_and(|object| {
+            object.len() == 2
+                && object.get("code").and_then(serde_json::Value::as_str)
+                    == Some("supervisor-password-required")
+                && object
+                    .get("detail")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+        })
     {
         return Ok(AdminResetDecision::PasswordRequired);
     }
-    if status == 409
-        && body.get("code") == Some(&serde_json::Value::String("bootstrap-reset-refused".into()))
-    {
-        return Err(
-            "Admin found inconsistent Supervisor state; nothing was deleted. Run shimpz install for bounded recovery"
-                .into(),
-        );
+    if password_presented {
+        match status {
+            401 => return Err("the Supervisor password was rejected".into()),
+            429 => {
+                let wait = match retry_after_seconds(retry_after) {
+                    Some(1) => "wait 1 second".to_owned(),
+                    Some(seconds) => format!("wait {seconds} seconds"),
+                    None => "wait one minute".to_owned(),
+                };
+                return Err(format!(
+                    "too many Supervisor password attempts; {wait}, then re-run shimpz reset"
+                ));
+            }
+            _ => {}
+        }
     }
     Err(RESET_INCOMPLETE.into())
 }
 
-fn bootstrap_admin_reset(port: u16) -> Result<AdminResetDecision, String> {
+fn request_admin_reset(
+    port: u16,
+    capability: &str,
+    password: Option<&str>,
+) -> Result<AdminResetDecision, String> {
     let config = Agent::config_builder()
         .timeout_global(Some(ADMIN_RESET_TIMEOUT))
         .max_redirects(0)
         .http_status_as_error(false)
         .build();
     let agent = Agent::new_with_config(config);
-    let request =
-        ureq::http::Request::delete(format!("http://127.0.0.1:{port}/api/space/bootstrap"))
-            .header("Content-Type", "application/json")
-            .body("{}")
-            .map_err(|_| "could not build the bootstrap Space reset".to_owned())?;
+    let payload = match password {
+        Some(password) => serde_json::json!({"capability": capability, "password": password}),
+        None => serde_json::json!({"capability": capability}),
+    };
+    let body = serde_json::to_string(&payload)
+        .map_err(|_| "could not encode the authorized Space reset".to_owned())?;
+    let request = ureq::http::Request::delete(format!("http://127.0.0.1:{port}/api/space/host"))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .map_err(|_| "could not build the authorized Space reset".to_owned())?;
     let mut response = agent
         .run(request)
         .map_err(|_| RESET_INCOMPLETE.to_owned())?;
     let status = response.status().as_u16();
-    let body: serde_json::Value = response
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let response_body: serde_json::Value = response
         .body_mut()
         .with_config()
         .limit(1_024)
         .read_json()
         .map_err(|_| RESET_INCOMPLETE.to_owned())?;
-    admin_reset_decision(status, &body)
-}
-
-fn authenticated_reset_response(
-    status: u16,
-    body: Option<&serde_json::Value>,
-) -> Result<(), String> {
-    if status == 200
-        && body.is_some_and(|body| {
-            body.as_object().is_some_and(|object| {
-                object.len() == 1 && object.get("reset") == Some(&serde_json::Value::Bool(true))
-            })
-        })
-    {
-        return Ok(());
-    }
-    Err(RESET_INCOMPLETE.into())
+    admin_reset_decision(
+        status,
+        &response_body,
+        retry_after.as_deref(),
+        password.is_some(),
+    )
 }
 
 fn retry_after_seconds(value: Option<&str>) -> Option<u16> {
@@ -1633,31 +1670,64 @@ fn retry_after_seconds(value: Option<&str>) -> Option<u16> {
         .filter(|seconds| (1..=3_600).contains(seconds))
 }
 
-fn authenticated_login_response(status: u16, retry_after: Option<&str>) -> Result<(), String> {
-    match status {
-        200 => Ok(()),
-        429 => {
-            let wait = match retry_after_seconds(retry_after) {
-                Some(1) => "wait 1 second".to_owned(),
-                Some(seconds) => format!("wait {seconds} seconds"),
-                None => "wait one minute".to_owned(),
-            };
-            Err(format!(
-                "too many Supervisor password attempts; {wait}, then re-run shimpz reset"
-            ))
-        }
-        _ => Err("the Supervisor password was rejected".into()),
+fn generate_host_reset_capability(space_id: &str) -> Result<HostResetCapability, String> {
+    let mut source = fs::File::open("/dev/urandom")
+        .map_err(|_| "the system random source is unavailable".to_owned())?;
+    let mut secret_bytes = [0_u8; 32];
+    source
+        .read_exact(&mut secret_bytes)
+        .map_err(|_| "could not generate the Local reset capability".to_owned())?;
+    let mut secret = String::with_capacity(64);
+    for byte in secret_bytes {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        secret.push(char::from(HEX[usize::from(byte >> 4)]));
+        secret.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "the system clock cannot authorize a Local reset".to_owned())?
+        .as_secs();
+    let expires_at = created_at
+        .checked_add(HOST_RESET_CAPABILITY_SECONDS)
+        .ok_or_else(|| "the system clock cannot authorize a Local reset".to_owned())?;
+    let capability_sha256 = format!("{:x}", Sha256::digest(secret_bytes));
+    let document = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "purpose": "space-reset",
+        "space_id": space_id,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "capability_sha256": capability_sha256,
+    }))
+    .map_err(|_| "could not encode the Local reset capability".to_owned())?;
+    Ok(HostResetCapability {
+        secret: Zeroizing::new(secret),
+        document,
+    })
+}
+
+fn projected_admin_reset(
+    engine: &Engine,
+    installed: &Installed,
+    password: Option<&str>,
+) -> Result<AdminResetDecision, String> {
+    let capability = generate_host_reset_capability(&installed.space_id)?;
+    engine.project_reset_capability(&installed.admin_image, &capability.document)?;
+    let result = request_admin_reset(installed.port, capability.secret.as_str(), password);
+    let cleanup = engine.clear_reset_capability(&installed.admin_image);
+    match (result, cleanup) {
+        (Ok(decision), Ok(())) => Ok(decision),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error}; {cleanup_error}")),
     }
 }
 
-fn admin_reset(port: u16) -> Result<(), String> {
-    match bootstrap_admin_reset(port)? {
-        AdminResetDecision::Complete => Ok(()),
-        AdminResetDecision::PasswordRequired => authenticated_admin_reset(port),
+fn admin_reset(engine: &Engine, installed: &Installed) -> Result<(), String> {
+    output::progress("Authorizing the Shimpz Space reset...");
+    if projected_admin_reset(engine, installed, None)? == AdminResetDecision::Complete {
+        return Ok(());
     }
-}
-
-fn authenticated_admin_reset(port: u16) -> Result<(), String> {
     let password = Zeroizing::new(
         rpassword::prompt_password("Supervisor password: ")
             .map_err(|_| "could not read the Supervisor password".to_owned())?,
@@ -1665,50 +1735,14 @@ fn authenticated_admin_reset(port: u16) -> Result<(), String> {
     if password.is_empty() {
         return Err("the Supervisor password is required".into());
     }
-    let config = Agent::config_builder()
-        .timeout_global(Some(ADMIN_RESET_TIMEOUT))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let agent = Agent::new_with_config(config);
-    let url = format!("http://127.0.0.1:{port}");
-    let login = agent
-        .post(format!("{url}/api/login"))
-        .send_json(serde_json::json!({"password": password.as_str()}))
-        .map_err(|_| "the Local Supervisor login is unavailable".to_owned())?;
-    let retry_after = login
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok());
-    authenticated_login_response(login.status().as_u16(), retry_after)?;
-    let cookie = login
-        .headers()
-        .get("set-cookie")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .filter(|value| value.starts_with("shimpz_admin="))
-        .ok_or_else(|| "Admin returned an invalid Supervisor session".to_owned())?;
-    let reset_body = serde_json::to_string(&serde_json::json!({"password": password.as_str()}))
-        .map_err(|_| "could not encode the authenticated reset".to_owned())?;
-    let request = ureq::http::Request::delete(format!("{url}/api/space"))
-        .header("Cookie", cookie)
-        .header("Content-Type", "application/json")
-        .body(reset_body)
-        .map_err(|_| "could not build the authenticated reset".to_owned())?;
-    let mut response = agent
-        .run(request)
-        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
-    let status = response.status().as_u16();
-    if status != 200 {
-        return authenticated_reset_response(status, None);
+    output::progress("Verifying the Supervisor password...");
+    if projected_admin_reset(engine, installed, Some(password.as_str()))?
+        == AdminResetDecision::Complete
+    {
+        Ok(())
+    } else {
+        Err(RESET_INCOMPLETE.into())
     }
-    let body: serde_json::Value = response
-        .body_mut()
-        .with_config()
-        .limit(1_024)
-        .read_json()
-        .map_err(|_| RESET_INCOMPLETE.to_owned())?;
-    authenticated_reset_response(status, Some(&body))
 }
 
 fn remove_backup(backup: Option<Backup>) -> Result<(), String> {
@@ -1808,6 +1842,7 @@ mod tests {
         let installed = Installed {
             space_id: "space-0123456789abcdef01234567".into(),
             release_ref: release(2, 'b').reference,
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
         };
@@ -1824,6 +1859,7 @@ mod tests {
         let installed = Installed {
             space_id: "space-0123456789abcdef01234567".into(),
             release_ref: current.reference.clone(),
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
         };
@@ -1921,9 +1957,9 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_reset_prompts_only_for_the_exact_password_required_decision() {
+    fn host_reset_prompts_only_for_the_exact_password_required_decision() {
         assert_eq!(
-            admin_reset_decision(200, &serde_json::json!({"reset": true})),
+            admin_reset_decision(200, &serde_json::json!({"reset": true}), None, false),
             Ok(AdminResetDecision::Complete)
         );
         assert_eq!(
@@ -1931,9 +1967,10 @@ mod tests {
                 409,
                 &serde_json::json!({
                     "code": "supervisor-password-required",
-                    "detail": "ignored for control flow",
-                    "future": true
-                })
+                    "detail": "Supervisor password is required"
+                }),
+                None,
+                false,
             ),
             Ok(AdminResetDecision::PasswordRequired)
         );
@@ -1946,7 +1983,7 @@ mod tests {
             ),
         ] {
             assert!(
-                admin_reset_decision(status, &body)
+                admin_reset_decision(status, &body, None, false)
                     .unwrap_err()
                     .contains("re-run shimpz reset")
             );
@@ -1954,41 +1991,86 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_reset_names_inconsistent_supervisor_state_without_deleting() {
-        let error = admin_reset_decision(
-            409,
-            &serde_json::json!({"code": "bootstrap-reset-refused", "detail": "untrusted"}),
-        )
-        .unwrap_err();
+    fn generated_host_reset_capability_is_space_bound_bounded_and_secret_free() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let capability = generate_host_reset_capability("space-0123456789abcdef01234567").unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&capability.document).unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        assert!(error.contains("inconsistent Supervisor state"));
-        assert!(error.contains("nothing was deleted"));
-        assert!(!error.contains("untrusted"));
+        assert_eq!(capability.secret.len(), 64);
+        assert!(
+            capability
+                .secret
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_eq!(document["version"], 1);
+        assert_eq!(document["purpose"], "space-reset");
+        assert_eq!(document["space_id"], "space-0123456789abcdef01234567");
+        assert!(document["created_at"].as_u64().unwrap() >= before);
+        assert!(document["created_at"].as_u64().unwrap() <= after);
+        assert_eq!(
+            document["expires_at"].as_u64().unwrap() - document["created_at"].as_u64().unwrap(),
+            HOST_RESET_CAPABILITY_SECONDS
+        );
+        let secret = hex_bytes(capability.secret.as_str());
+        assert_eq!(
+            document["capability_sha256"],
+            format!("{:x}", Sha256::digest(secret))
+        );
+        assert!(
+            !String::from_utf8(capability.document)
+                .unwrap()
+                .contains(capability.secret.as_str())
+        );
     }
 
-    fn local_session(password_state: &str, initialized: bool) -> serde_json::Value {
+    fn hex_bytes(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn local_session(authentication_state: &str, initialized: bool) -> serde_json::Value {
         serde_json::json!({
             "profile": "local",
             "authenticated": false,
             "initialized": initialized,
-            "password_state": password_state,
+            "authentication_state": authentication_state,
             "features": {"teamCredentials": true}
         })
     }
 
     #[test]
-    fn release_gate_accepts_only_exact_consistent_local_password_states() {
+    fn release_gate_accepts_only_exact_consistent_local_authentication_states() {
         for (name, initialized, expected) in [
-            ("uninitialized", false, AdminPasswordState::Uninitialized),
-            ("configured", true, AdminPasswordState::Configured),
+            (
+                "uninitialized",
+                false,
+                AdminAuthenticationState::Uninitialized,
+            ),
+            (
+                "enrollment-required",
+                true,
+                AdminAuthenticationState::EnrollmentRequired,
+            ),
+            ("configured", true, AdminAuthenticationState::Configured),
             (
                 "recovery-required",
                 true,
-                AdminPasswordState::RecoveryRequired,
+                AdminAuthenticationState::RecoveryRequired,
             ),
         ] {
             assert_eq!(
-                admin_password_state_response(200, &local_session(name, initialized)),
+                admin_authentication_state_response(200, &local_session(name, initialized)),
                 Ok(expected)
             );
         }
@@ -2003,7 +2085,7 @@ mod tests {
                     "profile": "hosted",
                     "authenticated": false,
                     "initialized": true,
-                    "password_state": "configured",
+                    "authentication_state": "configured",
                     "features": {"teamCredentials": true}
                 }),
             ),
@@ -2013,57 +2095,47 @@ mod tests {
                     "profile": "local",
                     "authenticated": false,
                     "initialized": true,
-                    "password_state": "configured",
+                    "authentication_state": "configured",
                     "features": {"teamCredentials": true},
                     "extra": true
                 }),
             ),
         ] {
-            assert!(admin_password_state_response(status, &body).is_err());
+            assert!(admin_authentication_state_response(status, &body).is_err());
         }
     }
 
     #[test]
-    fn authenticated_reset_requires_exact_success_and_names_the_retry() {
-        assert_eq!(
-            authenticated_reset_response(200, Some(&serde_json::json!({"reset": true}))),
-            Ok(())
-        );
-        assert_eq!(
-            authenticated_reset_response(503, None),
-            Err(RESET_INCOMPLETE.into())
-        );
-        for body in [
-            serde_json::json!({"reset": false}),
-            serde_json::json!({"reset": true, "extra": true}),
-        ] {
-            assert_eq!(
-                authenticated_reset_response(200, Some(&body)),
-                Err(RESET_INCOMPLETE.into())
-            );
-        }
-    }
-
-    #[test]
-    fn authenticated_reset_distinguishes_throttling_from_password_rejection() {
-        assert_eq!(authenticated_login_response(200, None), Ok(()));
+    fn host_reset_distinguishes_throttling_from_password_rejection() {
         assert!(
-            authenticated_login_response(429, Some("1"))
-                .unwrap_err()
-                .contains("wait 1 second")
+            admin_reset_decision(
+                429,
+                &serde_json::json!({"detail": "hidden"}),
+                Some("1"),
+                true
+            )
+            .unwrap_err()
+            .contains("wait 1 second")
         );
         assert!(
-            authenticated_login_response(429, Some("60"))
-                .unwrap_err()
-                .contains("wait 60 seconds")
+            admin_reset_decision(
+                429,
+                &serde_json::json!({"detail": "hidden"}),
+                Some("60"),
+                true
+            )
+            .unwrap_err()
+            .contains("wait 60 seconds")
         );
         for invalid in [None, Some("0"), Some("3601"), Some("untrusted\nvalue")] {
-            let error = authenticated_login_response(429, invalid).unwrap_err();
+            let error =
+                admin_reset_decision(429, &serde_json::json!({"detail": "hidden"}), invalid, true)
+                    .unwrap_err();
             assert!(error.contains("wait one minute"));
             assert!(!error.contains("untrusted"));
         }
         assert!(
-            authenticated_login_response(401, None)
+            admin_reset_decision(401, &serde_json::json!({"detail": "hidden"}), None, true)
                 .unwrap_err()
                 .contains("password was rejected")
         );

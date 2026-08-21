@@ -30,7 +30,7 @@ macro_rules! live_trace {
     };
 }
 
-const VOLUME_SPECS: [(&str, u32, u32, u32); 23] = [
+const VOLUME_SPECS: [(&str, u32, u32, u32); 24] = [
     ("config", 1000, 1000, 0o700),
     ("data", 1000, 1000, 0o700),
     ("controller_token", 10001, 10010, 0o2750),
@@ -51,6 +51,7 @@ const VOLUME_SPECS: [(&str, u32, u32, u32); 23] = [
     ("controller_chat_continuation_key", 10001, 10001, 0o700),
     ("supervisor_key", 0, 10021, 0o2770),
     ("release_status", 1000, 1000, 0o700),
+    ("reset_capability", 1000, 1000, 0o700),
     ("assistant_egress_policy", 10001, 10017, 0o750),
     ("assistant_egress_audit", 10005, 10005, 0o700),
     ("assistant_release_audit", 10004, 10004, 0o700),

@@ -16,6 +16,7 @@ use super::release::{self, RELEASE_REPOSITORY, Release};
 const RELEASE_CHANNEL: &str = "stable";
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
+const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
 
 pub(crate) struct Engine {
     docker: PathBuf,
@@ -292,6 +293,93 @@ impl Engine {
         }
     }
 
+    pub(crate) fn project_reset_capability(
+        &self,
+        admin_image: &str,
+        document: &[u8],
+    ) -> Result<(), String> {
+        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin")
+            || document.is_empty()
+            || document.len() > 1_024
+        {
+            return Err("the Local reset capability projection is invalid".into());
+        }
+        self.validate_reset_capability_volume()?;
+        let mount = format!(
+            "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
+        );
+        let arguments = reset_capability_arguments(
+            self.platform,
+            &self.cpuset,
+            &mount,
+            admin_image,
+            true,
+            reset_capability_write_script(),
+        );
+        let mut child = Command::new(&self.docker)
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "Docker reset capability input is unavailable".to_owned())?
+            .write_all(document)
+            .map_err(|_| "the Local reset capability could not be sent to Docker".to_owned())?;
+        if child
+            .wait()
+            .map_err(|error| format!("could not execute Docker: {error}"))?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err("the Local reset capability could not be projected to Admin".into())
+        }
+    }
+
+    pub(crate) fn clear_reset_capability(&self, admin_image: &str) -> Result<(), String> {
+        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") {
+            return Err("the Local reset capability cleanup is invalid".into());
+        }
+        self.validate_reset_capability_volume()?;
+        let mount = format!(
+            "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
+        );
+        let arguments = reset_capability_arguments(
+            self.platform,
+            &self.cpuset,
+            &mount,
+            admin_image,
+            false,
+            reset_capability_clear_script(),
+        );
+        if self
+            .run_quiet_status("Docker reset capability cleanup", arguments)?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err("the Local reset capability could not be removed".into())
+        }
+    }
+
+    fn validate_reset_capability_volume(&self) -> Result<(), String> {
+        let identity = self.run_output([
+            "volume",
+            "inspect",
+            "--format",
+            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
+            RESET_CAPABILITY_VOLUME,
+        ])?;
+        if identity.trim() == "shimpz-space_reset_capability|shimpz-space|reset_capability" {
+            Ok(())
+        } else {
+            Err("the Local reset capability volume is not owned by this Space".into())
+        }
+    }
+
     pub(crate) fn run_output<I, S>(&self, arguments: I) -> Result<String, String>
     where
         I: IntoIterator<Item = S>,
@@ -504,6 +592,67 @@ fn status_projection_arguments(
     .into_iter()
     .map(OsString::from)
     .collect()
+}
+
+fn reset_capability_write_script() -> &'static str {
+    "import json,os,stat,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert 0<len(raw)<=1024 and set(document)=={'version','purpose','space_id','created_at','expires_at','capability_sha256'}; target='/run/shimpz-local-reset/capability.json'; temporary=target+'.tmp'; flags=os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0); descriptor=os.open(temporary,flags,0o600); record=os.fstat(descriptor); assert stat.S_ISREG(record.st_mode) and record.st_nlink==1 and record.st_uid==1000 and record.st_gid==1000; assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.fsync(descriptor); os.close(descriptor); os.replace(temporary,target)"
+}
+
+fn reset_capability_clear_script() -> &'static str {
+    "import os; root='/run/shimpz-local-reset'; [(os.unlink(path) if os.path.lexists(path) else None) for path in (root+'/capability.json',root+'/capability.json.tmp')]"
+}
+
+fn reset_capability_arguments(
+    platform: &str,
+    cpuset: &str,
+    mount: &str,
+    admin_image: &str,
+    interactive: bool,
+    script: &str,
+) -> Vec<OsString> {
+    let mut arguments = vec![OsString::from("run"), OsString::from("--rm")];
+    if interactive {
+        arguments.push(OsString::from("--interactive"));
+    }
+    arguments.extend(
+        [
+            "--platform",
+            platform,
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--user",
+            "1000:1000",
+            "--cpuset-cpus",
+            cpuset,
+            "--cpus",
+            "0.25",
+            "--memory",
+            "64m",
+            "--memory-swap",
+            "64m",
+            "--pids-limit",
+            "32",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=8m",
+            "--mount",
+            mount,
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            admin_image,
+            "-c",
+            script,
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    arguments
 }
 
 fn validate_endpoint(docker: &Path, profile: HostProfile, paths: &Paths) -> Result<(), String> {
@@ -1043,5 +1192,57 @@ mod tests {
             )
         );
         assert!(arguments.iter().all(|argument| argument != "--tty"));
+    }
+
+    #[test]
+    fn reset_capability_projection_is_offline_unprivileged_and_stdin_only() {
+        let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
+        let mount = "type=volume,src=reset,dst=/run/reset,volume-nocopy";
+        let arguments = reset_capability_arguments(
+            "linux/amd64",
+            "0-3",
+            mount,
+            &image,
+            true,
+            reset_capability_write_script(),
+        );
+
+        for required in [
+            "--interactive",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "no-new-privileges:true",
+            "--user",
+            "1000:1000",
+            "--pull",
+            "never",
+            mount,
+            image.as_str(),
+        ] {
+            assert!(arguments.iter().any(|argument| argument == required));
+        }
+        assert!(arguments.iter().all(|argument| argument != "--tty"));
+        assert!(reset_capability_write_script().contains("O_NOFOLLOW"));
+        assert!(reset_capability_write_script().contains("os.fsync"));
+    }
+
+    #[test]
+    fn reset_capability_cleanup_cannot_receive_secret_input() {
+        let arguments = reset_capability_arguments(
+            "linux/amd64",
+            "0-3",
+            "type=volume,src=reset,dst=/run/reset,volume-nocopy",
+            &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
+            false,
+            reset_capability_clear_script(),
+        );
+
+        assert!(arguments.iter().all(|argument| argument != "--interactive"));
+        assert!(arguments.iter().all(|argument| argument != "--tty"));
+        assert!(reset_capability_clear_script().contains("capability.json"));
+        assert!(!reset_capability_clear_script().contains("sys.stdin"));
     }
 }

@@ -481,6 +481,7 @@ services:
       SHIMPZ_TEAM_TOKEN_FILE: /run/shimpz-local/token
       SHIMPZ_TEAM_CREDENTIALS_ENABLED: "0"
       SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
+      SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must pin Space identity}
     volumes:
       - type: volume
         source: config
@@ -506,6 +507,12 @@ services:
       - type: volume
         source: release_status
         target: /run/shimpz-local-release
+        read_only: true
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: reset_capability
+        target: /run/shimpz-local-reset
         read_only: true
         volume:
           nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
