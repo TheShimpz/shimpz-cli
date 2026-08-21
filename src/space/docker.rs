@@ -800,7 +800,7 @@ mod tests {
         );
 
         let refused = Engine {
-            docker: PathBuf::from("/bin/false"),
+            docker: PathBuf::from("/usr/bin/false"),
             platform: "linux/amd64",
             cpuset: "0".into(),
         };
@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn macos_controller_names_a_failed_socket_identity_probe() {
         let engine = Engine {
-            docker: PathBuf::from("/bin/false"),
+            docker: PathBuf::from("/usr/bin/false"),
             platform: "linux/arm64",
             cpuset: "0".into(),
         };
