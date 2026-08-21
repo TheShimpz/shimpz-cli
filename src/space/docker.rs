@@ -382,6 +382,7 @@ impl Engine {
 }
 
 fn stop_arguments(containers: &[String]) -> Vec<OsString> {
+    // Omitting a timeout lets Docker honor each container's configured StopTimeout.
     let mut arguments = vec![OsString::from("stop")];
     arguments.extend(containers.iter().map(OsString::from));
     arguments
@@ -791,10 +792,21 @@ mod tests {
     }
 
     #[test]
-    fn managed_stop_uses_each_containers_declared_grace_period() {
+    fn managed_stop_omits_a_timeout_override_and_keeps_bounded_failures() {
         assert_eq!(
             stop_arguments(&["first".to_owned(), "second".to_owned()]),
             ["stop", "first", "second"].map(OsString::from)
+        );
+
+        let refused = Engine {
+            docker: PathBuf::from("/bin/false"),
+            platform: "linux/amd64",
+            cpuset: "0".into(),
+        };
+        assert_eq!(refused.stop_containers(&[]), Ok(()));
+        assert_eq!(
+            refused.stop_containers(&["first".to_owned()]),
+            Err("could not stop every managed Local container".into())
         );
     }
 
