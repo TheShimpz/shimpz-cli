@@ -32,6 +32,11 @@ const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
 // Admin bounds its authoritative Team reset call at 180 seconds; the client must outlast it.
 const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
+const STOP_PROGRESS: [&str; 3] = [
+    "Checking the Shimpz Space...",
+    "Stopping the Shimpz Space...",
+    "Verifying that the Shimpz Space is fully stopped...",
+];
 
 pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
     if let Some(profile) = options.print_graph {
@@ -148,6 +153,7 @@ pub(crate) fn stop() -> Result<String, String> {
     let paths = Paths::discover()?;
     validate_existing_install_home(&paths)?;
     let _lock = Lock::acquire(&paths)?;
+    output::progress(STOP_PROGRESS[0]);
     if !paths.marker_is_current()? {
         return stop_absent(&paths);
     }
@@ -308,7 +314,9 @@ impl Context {
         state::stopped(&self.paths)?;
         let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         state::write_stopped(&self.paths)?;
+        output::progress(STOP_PROGRESS[1]);
         self.stop_owned_containers(&inventory)?;
+        output::progress(STOP_PROGRESS[2]);
         let stopped_inventory =
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped_inventory)?;
@@ -1700,6 +1708,24 @@ mod tests {
             "updated"
         );
         assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+    }
+
+    #[test]
+    fn stop_progress_is_bounded_redacted_and_ordered_by_stage() {
+        let [checking, stopping, verifying] = STOP_PROGRESS;
+        assert!(checking.starts_with("Checking"));
+        assert!(stopping.starts_with("Stopping"));
+        assert!(verifying.starts_with("Verifying"));
+        for stage in STOP_PROGRESS {
+            assert!(stage.ends_with("..."));
+            assert_eq!(output::sanitize(stage), stage);
+            assert!(!stage.contains("sha256:"));
+            assert!(!stage.contains("space-"));
+            assert!(!stage.bytes().any(|byte| byte.is_ascii_digit()));
+            for name in crate::space::resources::RESERVED {
+                assert!(!stage.contains(name), "{stage}");
+            }
+        }
     }
 
     #[test]
