@@ -745,7 +745,7 @@ impl Context {
                         .into(),
                 ),
                 Err(cleanup) => Err(format!(
-                    "the fresh Local release did not become healthy; compensation also failed: {cleanup}"
+                    "the partial fresh Local release could not be removed; compensation failed: {cleanup}"
                 )),
             };
         };
