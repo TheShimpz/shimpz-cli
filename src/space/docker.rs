@@ -318,11 +318,7 @@ impl Engine {
         if containers.is_empty() {
             return Ok(());
         }
-        let mut arguments = vec![
-            OsString::from("stop"),
-            OsString::from("--time"),
-            OsString::from("30"),
-        ];
+        let mut arguments = vec![OsString::from("stop")];
         arguments.extend(containers.iter().map(OsString::from));
         if self
             .run_quiet_status("Docker managed container stop", arguments)?
@@ -787,6 +783,49 @@ mod tests {
         ] {
             assert!(validate_managed_endpoint(profile, home, context, endpoint).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_stop_uses_each_containers_declared_grace_period() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let command = temporary.path().join("docker");
+        let calls = temporary.path().join("calls");
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = Engine {
+            docker: command,
+            platform: "linux/amd64",
+            cpuset: "0".into(),
+        };
+
+        engine.stop_containers(&[]).unwrap();
+        assert!(!calls.exists());
+
+        engine
+            .stop_containers(&["first".to_owned(), "second".to_owned()])
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(calls).unwrap(), "stop first second\n");
+
+        let refused = Engine {
+            docker: PathBuf::from("/bin/false"),
+            platform: "linux/amd64",
+            cpuset: "0".into(),
+        };
+        assert_eq!(
+            refused.stop_containers(&["first".to_owned()]),
+            Err("could not stop every managed Local container".into())
+        );
     }
 
     #[cfg(unix)]
