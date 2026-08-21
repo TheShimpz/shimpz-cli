@@ -833,18 +833,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn macos_controller_names_a_failed_socket_identity_probe() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temporary = tempfile::tempdir().unwrap();
-        let command = temporary.path().join("docker");
-        fs::write(
-            &command,
-            "#!/bin/sh\nprintf 'probe failed\\n' >&2\nexit 7\n",
-        )
-        .unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
         let engine = Engine {
-            docker: command,
+            docker: PathBuf::from("/bin/false"),
             platform: "linux/arm64",
             cpuset: "0".into(),
         };
@@ -856,7 +846,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "the Team controller Docker socket identity probe failed: Docker operation failed; Docker returned exit status: 7"
+            "the Team controller Docker socket identity probe failed: Docker operation failed; Docker returned exit status: 1"
         );
     }
 

@@ -152,6 +152,35 @@ impl Inventory {
         Ok(names.into_iter().collect())
     }
 
+    pub(crate) fn container_ids(&self) -> Vec<String> {
+        self.project_containers
+            .iter()
+            .chain(self.dynamic_containers.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn team_container_id(&self, engine: &Engine) -> Result<Option<String>, String> {
+        for identifier in &self.project_containers {
+            let name = one_line(
+                &engine.run_output([
+                    "inspect",
+                    "--type=container",
+                    "--format",
+                    "{{.Name}}",
+                    identifier,
+                ])?,
+                "container name",
+            )?;
+            if name == "/shimpz-team" {
+                return Ok(Some(identifier.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn assistant_containers(&self) -> Vec<&str> {
         let project: BTreeSet<_> = self.project_containers.iter().map(String::as_str).collect();
         self.dynamic_containers
@@ -544,6 +573,10 @@ mod tests {
         assert_eq!(
             inventory.assistant_containers(),
             ["assistant-b", "assistant-a"]
+        );
+        assert_eq!(
+            inventory.container_ids(),
+            ["assistant-a", "assistant-b", "static"]
         );
     }
 }

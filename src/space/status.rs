@@ -199,6 +199,19 @@ pub(crate) fn fully_stopped(
             .all(|assistant| matches!(assistant.runtime, Runtime::Exited(_))))
 }
 
+pub(crate) fn incomplete_stop_error(
+    observations: &[Observation],
+    assistants: &[AssistantObservation],
+) -> Result<String, String> {
+    validate_snapshot(observations)?;
+    Ok(if stop_requires_reconciliation(observations, assistants) {
+        "the Space stop is incomplete; run shimpz install to reconcile it, then run shimpz stop"
+            .into()
+    } else {
+        "the Space stop is incomplete; re-run shimpz stop".into()
+    })
+}
+
 pub(crate) fn render(
     installed: &Installed,
     graph_current: bool,
@@ -225,8 +238,13 @@ pub(crate) fn render(
                 installed.ordinal,
             ));
         }
+        let next = if stop_requires_reconciliation(observations, assistants) {
+            "shimpz install, then shimpz stop"
+        } else {
+            "shimpz stop"
+        };
         return Ok(format!(
-            "Shimpz Space needs attention.\nServices: {stopped_services} of {SERVICE_COUNT} stopped\n{}\nRelease: ordinal {}\nProblem: the requested stop is incomplete.\nNext: shimpz stop",
+            "Shimpz Space needs attention.\nServices: {stopped_services} of {SERVICE_COUNT} stopped\n{}\nRelease: ordinal {}\nProblem: the requested stop is incomplete.\nNext: {next}",
             assistant_summary(stopped_assistants, assistants.len(), "stopped"),
             installed.ordinal,
         ));
@@ -295,6 +313,21 @@ fn static_stopped(observations: &[Observation]) -> bool {
             (Expectation::Service, Runtime::Exited(_)) | (Expectation::Init, Runtime::Exited(0))
         )
     })
+}
+
+fn stop_requires_reconciliation(
+    observations: &[Observation],
+    assistants: &[AssistantObservation],
+) -> bool {
+    observations.iter().any(|observation| {
+        matches!(
+            (observation.component.expectation, observation.runtime),
+            (Expectation::Service, Runtime::Missing | Runtime::Dead(_))
+        ) || (observation.component.expectation == Expectation::Init
+            && !matches!(observation.runtime, Runtime::Exited(0)))
+    }) || assistants
+        .iter()
+        .any(|assistant| matches!(assistant.runtime, Runtime::Dead(_)))
 }
 
 fn stopped_services(observations: &[Observation]) -> usize {
@@ -480,6 +513,25 @@ mod tests {
             "Shimpz Space needs attention.\nServices: 6 of 7 stopped\nAssistants: 1 of 2 stopped\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
         );
         assert!(!fully_stopped(&observations, &[]).unwrap());
+        assert_eq!(
+            incomplete_stop_error(&observations, &[]).unwrap(),
+            "the Space stop is incomplete; re-run shimpz stop"
+        );
+    }
+
+    #[test]
+    fn an_unstoppable_runtime_names_reconciliation_before_another_stop() {
+        let mut observations = stopped_observations();
+        observations[0] = observe(COMPONENTS[0], None).unwrap();
+        let assistants = [assistant("dead|2")];
+
+        let rendered = render(&installed(), true, true, &observations, &assistants).unwrap();
+
+        assert!(rendered.ends_with("Next: shimpz install, then shimpz stop"));
+        assert_eq!(
+            incomplete_stop_error(&observations, &assistants).unwrap(),
+            "the Space stop is incomplete; run shimpz install to reconcile it, then run shimpz stop"
+        );
     }
 
     #[test]

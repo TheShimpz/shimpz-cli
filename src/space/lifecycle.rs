@@ -237,7 +237,7 @@ impl Context {
         {
             output::warning(recommendation);
         }
-        self.apply(&release, installed.as_ref(), false)
+        self.apply(&release, installed.as_ref(), false, false)
     }
 
     fn validate_installation_storage(&self, installed: Installed) -> Result<Installed, String> {
@@ -262,10 +262,12 @@ impl Context {
         let mut release = self
             .engine
             .resolve_release(options.release.as_deref(), &self.paths.home)?;
+        let mut preserve_failed_release = false;
         if options.release.is_none()
             && state::failed_release_matches(&self.paths, &release.reference)?
         {
             if stopped {
+                preserve_failed_release = true;
                 release = self
                     .engine
                     .resolve_release(Some(&installed.release_ref), &self.paths.home)?;
@@ -273,13 +275,21 @@ impl Context {
                 return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
             }
         }
-        if options.release.is_none() && self.handoff_if_needed(&release, options.scheduled)? {
+        if options.release.is_none()
+            && !preserve_failed_release
+            && self.handoff_if_needed(&release, options.scheduled)?
+        {
             return Ok("The release-bound CLI completed reconciliation.".into());
         }
         if options.candidate && options.release.is_none() {
             return Err("a candidate start requires an exact release".into());
         }
-        self.apply(&release, Some(&installed), options.scheduled)
+        self.apply(
+            &release,
+            Some(&installed),
+            options.scheduled,
+            preserve_failed_release,
+        )
     }
 
     fn stop(&self) -> Result<String, String> {
@@ -295,7 +305,10 @@ impl Context {
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped_inventory)?;
         if !status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
-            return Err("the Space stop is incomplete; re-run shimpz stop".into());
+            return Err(status_report::incomplete_stop_error(
+                &snapshot.components,
+                &snapshot.assistants,
+            )?);
         }
         status_report::render(
             &installed,
@@ -311,6 +324,7 @@ impl Context {
         release: &ResolvedRelease,
         installed: Option<&Installed>,
         scheduled: bool,
+        preserve_failed_release: bool,
     ) -> Result<String, String> {
         validate_forward_release(release, installed)?;
         verify_running_cli(release, self.profile)?;
@@ -334,7 +348,13 @@ impl Context {
         if fresh {
             state::write_marker(&self.paths)?;
         }
-        let outcome = match self.apply_owned(release, installed, scheduled, &space_id) {
+        let outcome = match self.apply_owned(
+            release,
+            installed,
+            scheduled,
+            &space_id,
+            preserve_failed_release,
+        ) {
             Ok(outcome) => outcome,
             Err(error) if fresh => match self.compensate_fresh_failure(&space_id) {
                 Ok(()) => return Err(error),
@@ -362,6 +382,7 @@ impl Context {
         installed: Option<&Installed>,
         scheduled: bool,
         space_id: &str,
+        preserve_failed_release: bool,
     ) -> Result<ApplyOutcome, String> {
         match self.ensure_storage(space_id, installed.is_none(), scheduled)? {
             linux::Admission::Locked => {
@@ -429,7 +450,7 @@ impl Context {
             };
         }
         remove_backup(previous)?;
-        remove_regular_if_present(&self.paths.failed_release)?;
+        finish_failed_release_memory(&self.paths, preserve_failed_release)?;
         Ok(ApplyOutcome::Ready { port })
     }
 
@@ -462,18 +483,9 @@ impl Context {
         if !inventory.empty()
             && let Some(current) = &installed
         {
-            self.start_admin_for_reset()?;
-            if let Err(error) = admin_reset(current.port) {
-                if stopped {
-                    self.restore_stopped_after_reset_failure()
-                        .map_err(|stop_error| {
-                            format!(
-                                "{error}; the stopped Space could not be restored: {stop_error}"
-                            )
-                        })?;
-                }
-                return Err(error);
-            }
+            self.start_admin_for_reset()
+                .map_err(|error| self.reset_failure(error, stopped))?;
+            admin_reset(current.port).map_err(|error| self.reset_failure(error, stopped))?;
         }
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
@@ -507,12 +519,26 @@ impl Context {
     }
 
     fn stop_owned_containers(&self, inventory: &Inventory) -> Result<(), String> {
-        let mut names = inventory.container_names(&self.engine)?;
-        if let Ok(index) = names.binary_search(&"shimpz-team".to_owned()) {
-            let team = vec![names.remove(index)];
+        let mut identifiers = inventory.container_ids();
+        if let Some(team_id) = inventory.team_container_id(&self.engine)?
+            && let Ok(index) = identifiers.binary_search(&team_id)
+        {
+            let team = vec![identifiers.remove(index)];
             self.engine.stop_containers(&team)?;
         }
-        self.engine.stop_containers(&names)
+        self.engine.stop_containers(&identifiers)
+    }
+
+    fn reset_failure(&self, error: String, was_stopped: bool) -> String {
+        if !was_stopped {
+            return error;
+        }
+        match self.restore_stopped_after_reset_failure() {
+            Ok(()) => error,
+            Err(stop_error) => {
+                format!("{error}; the stopped Space could not be restored: {stop_error}")
+            }
+        }
     }
 
     fn restore_stopped_after_reset_failure(&self) -> Result<(), String> {
@@ -1552,6 +1578,14 @@ fn remove_backup(backup: Option<Backup>) -> Result<(), String> {
     Ok(())
 }
 
+fn finish_failed_release_memory(paths: &Paths, preserve: bool) -> Result<(), String> {
+    if preserve {
+        Ok(())
+    } else {
+        remove_regular_if_present(&paths.failed_release)
+    }
+}
+
 fn remove_regular_if_present(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -1650,6 +1684,21 @@ mod tests {
             "updated"
         );
         assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+    }
+
+    #[test]
+    fn a_stopped_resume_preserves_failed_release_memory_until_the_channel_moves() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let failed = release(3, 'c');
+        state::remember_failed_release(&paths, &failed).unwrap();
+
+        finish_failed_release_memory(&paths, true).unwrap();
+        assert!(state::failed_release_matches(&paths, &failed.reference).unwrap());
+
+        finish_failed_release_memory(&paths, false).unwrap();
+        assert!(!paths.failed_release.exists());
     }
 
     #[test]
