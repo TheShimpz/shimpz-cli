@@ -470,8 +470,7 @@ impl Context {
                     .to_owned(),
             ),
             Ok(AdminPasswordState::RecoveryRequired) => Some(
-                "the fresh release returned an invalid Supervisor password state; retry shimpz install"
-                    .to_owned(),
+                "the fresh release returned an invalid Supervisor password state".to_owned(),
             ),
             Ok(AdminPasswordState::Uninitialized | AdminPasswordState::Configured) => None,
             Err(error) => Some(error),
@@ -742,7 +741,7 @@ impl Context {
         let Some(backup) = backup else {
             return match self.compensate_fresh_failure(space_id) {
                 Ok(()) => Err(
-                    "the fresh Local release did not become healthy; its partial state was removed, so installation can be retried"
+                    "the partial fresh Local release was removed, so installation can be retried"
                         .into(),
                 ),
                 Err(cleanup) => Err(format!(
@@ -1623,13 +1622,30 @@ fn authenticated_reset_response(
     Err(RESET_INCOMPLETE.into())
 }
 
-fn authenticated_login_response(status: u16) -> Result<(), String> {
+fn retry_after_seconds(value: Option<&str>) -> Option<u16> {
+    let value = value?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|seconds| (1..=3_600).contains(seconds))
+}
+
+fn authenticated_login_response(status: u16, retry_after: Option<&str>) -> Result<(), String> {
     match status {
         200 => Ok(()),
-        429 => Err(
-            "too many Supervisor password attempts; wait one minute, then re-run shimpz reset"
-                .into(),
-        ),
+        429 => {
+            let wait = match retry_after_seconds(retry_after) {
+                Some(1) => "wait 1 second".to_owned(),
+                Some(seconds) => format!("wait {seconds} seconds"),
+                None => "wait one minute".to_owned(),
+            };
+            Err(format!(
+                "too many Supervisor password attempts; {wait}, then re-run shimpz reset"
+            ))
+        }
         _ => Err("the Supervisor password was rejected".into()),
     }
 }
@@ -1660,7 +1676,11 @@ fn authenticated_admin_reset(port: u16) -> Result<(), String> {
         .post(format!("{url}/api/login"))
         .send_json(serde_json::json!({"password": password.as_str()}))
         .map_err(|_| "the Local Supervisor login is unavailable".to_owned())?;
-    authenticated_login_response(login.status().as_u16())?;
+    let retry_after = login
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok());
+    authenticated_login_response(login.status().as_u16(), retry_after)?;
     let cookie = login
         .headers()
         .get("set-cookie")
@@ -2026,14 +2046,24 @@ mod tests {
 
     #[test]
     fn authenticated_reset_distinguishes_throttling_from_password_rejection() {
-        assert_eq!(authenticated_login_response(200), Ok(()));
+        assert_eq!(authenticated_login_response(200, None), Ok(()));
         assert!(
-            authenticated_login_response(429)
+            authenticated_login_response(429, Some("1"))
                 .unwrap_err()
-                .contains("wait one minute")
+                .contains("wait 1 second")
         );
         assert!(
-            authenticated_login_response(401)
+            authenticated_login_response(429, Some("60"))
+                .unwrap_err()
+                .contains("wait 60 seconds")
+        );
+        for invalid in [None, Some("0"), Some("3601"), Some("untrusted\nvalue")] {
+            let error = authenticated_login_response(429, invalid).unwrap_err();
+            assert!(error.contains("wait one minute"));
+            assert!(!error.contains("untrusted"));
+        }
+        assert!(
+            authenticated_login_response(401, None)
                 .unwrap_err()
                 .contains("password was rejected")
         );
