@@ -62,6 +62,7 @@ fn standalone_release_closes_registry_draft_and_latest_in_order() {
     );
     assert!(run_steps(finalize).contains("--draft=false --latest"));
     assert!(run_steps(finalize).contains("/releases/latest"));
+    assert!(run_steps(finalize).contains("Waiting for ${TAG} to become the latest GitHub release"));
 }
 
 #[test]

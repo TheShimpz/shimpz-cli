@@ -313,7 +313,19 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
-          test "$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)" = "${TAG}"
+          latest_verified=0
+          for attempt in $(seq 1 30); do
+            if test "$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)" = "${TAG}"; then
+              latest_verified=1
+              break
+            fi
+            echo "Waiting for ${TAG} to become the latest GitHub release (${attempt}/30)."
+            sleep 5
+          done
+          if test "${latest_verified}" != 1; then
+            echo "::error::${TAG} did not become the latest GitHub release"
+            exit 1
+          fi
           curl --fail --silent --show-error \
             --retry 5 --retry-all-errors --retry-delay 2 \
             --output crate-index \
