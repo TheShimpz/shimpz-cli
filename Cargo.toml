@@ -27,6 +27,7 @@ rpassword = "7.5.4"
 sha2 = "0.10"
 toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 self_update = { version = "0.44.0", default-features = false, features = ["compression-flate2", "compression-zip-deflate", "rustls", "ureq"] }
+tempfile = "3"
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
 zeroize = "1"
 
@@ -40,7 +41,6 @@ winapi-util = "0.1.11"
 
 [dev-dependencies]
 serde_yaml = "0.9.34"
-tempfile = "3"
 
 [[bin]]
 name = "shimpz"
