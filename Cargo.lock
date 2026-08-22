@@ -1684,6 +1684,7 @@ dependencies = [
  "atomic-write-file",
  "base64",
  "crc32fast",
+ "flate2",
  "libc",
  "memsafe",
  "nix",
@@ -1694,11 +1695,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tar",
  "tempfile",
  "toml",
  "ureq",
  "winapi-util",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

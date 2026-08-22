@@ -131,7 +131,7 @@ jobs:
           cp "target/${{ matrix.platform.target }}/release/${{ matrix.platform.executable }}" "dist/${name}/"
           cp LICENSE NOTICE README.md "dist/${name}/"
           if test "${{ matrix.platform.format }}" = "zip"; then
-            7z a "dist/${name}.zip" "./dist/${name}/*"
+            7z a "dist/${name}.zip" "./dist/${name}"
           else
             tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           fi

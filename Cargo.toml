@@ -40,7 +40,10 @@ rustix = { version = "1", features = ["fs", "process", "termios"] }
 winapi-util = "0.1.11"
 
 [dev-dependencies]
+flate2 = "1"
 serde_yaml = "0.9.34"
+tar = "0.4"
+zip = { version = "6", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "shimpz"

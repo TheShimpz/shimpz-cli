@@ -67,6 +67,7 @@ fn standalone_release_closes_registry_draft_and_latest_in_order() {
 fn every_declared_target_has_one_archive_in_both_release_gates() {
     let document = workflow();
     let jobs = jobs(&document);
+    let build = run_steps(job(jobs, "build"));
     let release = run_steps(job(jobs, "release"));
     let draft = run_steps(job(jobs, "verify-draft"));
     let targets = [
@@ -82,4 +83,6 @@ fn every_declared_target_has_one_archive_in_both_release_gates() {
         assert_eq!(release.matches(target).count(), 1, "release gate: {target}");
         assert_eq!(draft.matches(target).count(), 1, "draft gate: {target}");
     }
+    assert!(build.contains("7z a \"dist/${name}.zip\" \"./dist/${name}\""));
+    assert!(!build.contains("${name}/*"));
 }

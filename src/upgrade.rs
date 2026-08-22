@@ -219,8 +219,12 @@ fn archive_name(version: &str, target: &str) -> Result<String, String> {
 }
 
 fn archive_binary_path(version: &str, target: &str) -> PathBuf {
-    PathBuf::from(format!("shimpz-{version}-{target}"))
-        .join(format!("shimpz{}", std::env::consts::EXE_SUFFIX))
+    let executable = if target == "x86_64-pc-windows-msvc" {
+        "shimpz.exe"
+    } else {
+        "shimpz"
+    };
+    PathBuf::from(format!("shimpz-{version}-{target}")).join(executable)
 }
 
 fn download_url(tag: &str, asset: &str) -> String {
@@ -379,9 +383,12 @@ fn newer_than_current(version: &str) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    use flate2::{Compression, write::GzEncoder};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use tar::{Builder, Header};
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use super::*;
 
@@ -479,6 +486,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn extracts_the_binary_from_each_published_archive_layout() {
+        let temporary = tempfile::tempdir().unwrap();
+        let version = "9.8.7";
+        let cases = [
+            ("x86_64-unknown-linux-gnu", "tar.gz"),
+            ("x86_64-pc-windows-msvc", "zip"),
+        ];
+
+        for (target, extension) in cases {
+            let binary = archive_binary_path(version, target);
+            let archive = temporary
+                .path()
+                .join(format!("archive-{target}.{extension}"));
+            if extension == "zip" {
+                write_zip(&archive, &binary);
+            } else {
+                write_tar_gz(&archive, &binary);
+            }
+            let extracted = temporary.path().join(format!("extracted-{target}"));
+            std::fs::create_dir(&extracted).unwrap();
+            self_update::Extract::from_source(&archive)
+                .extract_file(&extracted, &binary)
+                .unwrap();
+            assert_eq!(std::fs::read(extracted.join(binary)).unwrap(), b"binary");
+        }
+    }
+
+    fn write_zip(archive: &Path, binary: &Path) {
+        let mut writer = ZipWriter::new(File::create(archive).unwrap());
+        writer
+            .start_file(
+                binary.to_str().unwrap(),
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(b"binary").unwrap();
+        writer.finish().unwrap();
+    }
+
+    fn write_tar_gz(archive: &Path, binary: &Path) {
+        let encoder = GzEncoder::new(File::create(archive).unwrap(), Compression::default());
+        let mut writer = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_size(6);
+        header.set_mode(0o755);
+        header.set_cksum();
+        writer
+            .append_data(&mut header, binary, &b"binary"[..])
+            .unwrap();
+        writer.into_inner().unwrap().finish().unwrap();
     }
 
     #[test]
