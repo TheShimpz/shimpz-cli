@@ -53,6 +53,7 @@ fn standalone_release_closes_registry_draft_and_latest_in_order() {
         draft["needs"],
         serde_yaml::from_str::<Value>("[metadata, release]").unwrap()
     );
+    assert_eq!(draft["permissions"]["contents"], "write");
     assert!(run_steps(draft).contains("sha256sum --check SHA256SUMS"));
     assert!(run_steps(draft).contains("gh attestation verify"));
     assert_eq!(
