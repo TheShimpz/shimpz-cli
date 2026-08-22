@@ -33,6 +33,7 @@
 - Run focused tests with `cargo test --all-features --locked --jobs "$(( $(nproc) / 2 ))" <filter>`; omit the
   filter when the affected contract requires the complete suite. GitHub Actions uses `$(nproc)` rather than the
   local half-host worker count.
+- Run `cargo package --locked` for release, packaging, archive-layout, or published-file changes.
 
 ## Engineering
 
