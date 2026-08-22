@@ -224,7 +224,7 @@ fn archive_binary_path(version: &str, target: &str) -> PathBuf {
     } else {
         "shimpz"
     };
-    PathBuf::from(format!("shimpz-{version}-{target}")).join(executable)
+    PathBuf::from(format!("shimpz-{version}-{target}/{executable}"))
 }
 
 fn download_url(tag: &str, asset: &str) -> String {
@@ -499,6 +499,7 @@ mod tests {
 
         for (target, extension) in cases {
             let binary = archive_binary_path(version, target);
+            assert!(binary.to_str().unwrap().contains('/'));
             let archive = temporary
                 .path()
                 .join(format!("archive-{target}.{extension}"));
