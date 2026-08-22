@@ -359,18 +359,6 @@ impl Context {
     ) -> Result<String, String> {
         validate_forward_release(release, installed)?;
         verify_running_cli(release, self.profile)?;
-        output::progress("Downloading Shimpz Space (1/4): Admin...");
-        self.engine
-            .pull_exact(&release.metadata.admin, ADMIN_REPOSITORY)?;
-        output::progress("Downloading Shimpz Space (2/4): Team...");
-        self.engine
-            .pull_exact(&release.metadata.team, TEAM_REPOSITORY)?;
-        output::progress("Downloading Shimpz Space (3/4): Brain...");
-        self.engine
-            .pull_exact(&release.metadata.brain, BRAIN_REPOSITORY)?;
-        output::progress("Downloading Shimpz Space (4/4): network boundaries...");
-        self.engine
-            .pull_exact(&release.metadata.egress, EGRESS_REPOSITORY)?;
         let space_id = match installed {
             Some(installed) => installed.space_id.clone(),
             None => state::random_space_id()?,
@@ -421,6 +409,7 @@ impl Context {
             }
             linux::Admission::Verified => {}
         }
+        self.download_and_admit_candidate(release, installed)?;
         let port = state::selected_port(installed)?;
         let (docker_socket, docker_gid) = self
             .engine
@@ -506,6 +495,42 @@ impl Context {
         remove_backup(previous)?;
         finish_failed_release_memory(&self.paths, preserve_failed_release)?;
         Ok(ApplyOutcome::Ready { port })
+    }
+
+    fn download_and_admit_candidate(
+        &self,
+        release: &ResolvedRelease,
+        installed: Option<&Installed>,
+    ) -> Result<(), String> {
+        output::progress("Downloading Shimpz Space (1/4): Admin...");
+        self.engine
+            .pull_exact(&release.metadata.admin, ADMIN_REPOSITORY)?;
+        if installed.is_some() {
+            output::progress("Checking existing Supervisor authentication...");
+            let authentication_state = admin_authentication_state_probe_response(
+                &self
+                    .engine
+                    .admin_authentication_state(&release.metadata.admin)
+                    .map_err(|error| candidate_admission_error(&error))?,
+            )
+            .map_err(|error| candidate_admission_error(&error))?;
+            if authentication_state == AdminAuthenticationState::RecoveryRequired {
+                return Err(
+                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install; the previous healthy release remains active"
+                        .into(),
+                );
+            }
+        }
+        output::progress("Downloading Shimpz Space (2/4): Team...");
+        self.engine
+            .pull_exact(&release.metadata.team, TEAM_REPOSITORY)?;
+        output::progress("Downloading Shimpz Space (3/4): Brain...");
+        self.engine
+            .pull_exact(&release.metadata.brain, BRAIN_REPOSITORY)?;
+        output::progress("Downloading Shimpz Space (4/4): network boundaries...");
+        self.engine
+            .pull_exact(&release.metadata.egress, EGRESS_REPOSITORY)?;
+        Ok(())
     }
 
     fn reset(&self) -> Result<String, String> {
@@ -1472,6 +1497,10 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
     }
 }
 
+fn candidate_admission_error(error: &str) -> String {
+    format!("{error}; the previous healthy release remains active")
+}
+
 fn admin_authentication_state_response(
     status: u16,
     body: &serde_json::Value,
@@ -1519,6 +1548,18 @@ fn admin_authentication_state_response(
         (Some("configured"), Some(true)) => Ok(AdminAuthenticationState::Configured),
         (Some("recovery-required"), Some(true)) => Ok(AdminAuthenticationState::RecoveryRequired),
         _ => Err(invalid()),
+    }
+}
+
+fn admin_authentication_state_probe_response(
+    response: &str,
+) -> Result<AdminAuthenticationState, String> {
+    match response {
+        "uninitialized" => Ok(AdminAuthenticationState::Uninitialized),
+        "enrollment-required" => Ok(AdminAuthenticationState::EnrollmentRequired),
+        "configured" => Ok(AdminAuthenticationState::Configured),
+        "recovery-required" => Ok(AdminAuthenticationState::RecoveryRequired),
+        _ => Err("the selected Admin returned an invalid authentication-state contract".into()),
     }
 }
 
@@ -2102,6 +2143,30 @@ mod tests {
             ),
         ] {
             assert!(admin_authentication_state_response(status, &body).is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_authentication_probe_accepts_only_exact_bounded_states() {
+        for (value, expected) in [
+            ("uninitialized", AdminAuthenticationState::Uninitialized),
+            (
+                "enrollment-required",
+                AdminAuthenticationState::EnrollmentRequired,
+            ),
+            ("configured", AdminAuthenticationState::Configured),
+            (
+                "recovery-required",
+                AdminAuthenticationState::RecoveryRequired,
+            ),
+        ] {
+            assert_eq!(
+                admin_authentication_state_probe_response(value),
+                Ok(expected)
+            );
+        }
+        for invalid in ["", "configured\n", "recovery_required", "future-state"] {
+            assert!(admin_authentication_state_probe_response(invalid).is_err());
         }
     }
 

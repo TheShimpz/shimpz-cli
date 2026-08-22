@@ -6,7 +6,9 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::command::Tool;
 use super::host::HostProfile;
@@ -16,6 +18,10 @@ use super::release::{self, RELEASE_REPOSITORY, Release};
 const RELEASE_CHANNEL: &str = "stable";
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
+const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space_data";
+const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
+const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
+const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
 
 pub(crate) struct Engine {
@@ -173,6 +179,108 @@ impl Engine {
         } else {
             Err("Docker did not preserve the pinned component digest".into())
         }
+    }
+
+    pub(crate) fn admin_authentication_state(&self, admin_image: &str) -> Result<String, String> {
+        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") {
+            return Err("the selected Admin image reference is invalid".into());
+        }
+        self.validate_admin_authentication_volume()?;
+        let mount = format!(
+            "type=volume,src={ADMIN_AUTHENTICATION_VOLUME},dst=/data,volume-nocopy,readonly"
+        );
+        for attempt in 0..ADMIN_AUTHENTICATION_ATTEMPTS {
+            let container = format!(
+                "shimpz-admin-authentication-probe-{}-{}",
+                std::process::id(),
+                attempt + 1
+            );
+            let arguments = admin_authentication_probe_arguments(
+                self.platform,
+                &self.cpuset,
+                &mount,
+                admin_image,
+                &container,
+            );
+            match execute_bounded_stdout(
+                Command::new(&self.docker)
+                    .args(arguments)
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null()),
+                ADMIN_AUTHENTICATION_TIMEOUT,
+            )? {
+                BoundedOutput::Completed {
+                    status,
+                    bytes,
+                    truncated,
+                } if status.success() => {
+                    if truncated || bytes.len() > ADMIN_AUTHENTICATION_OUTPUT_BYTES {
+                        return Err(
+                            "the selected Admin returned an invalid authentication-state contract"
+                                .into(),
+                        );
+                    }
+                    return String::from_utf8(bytes).map_err(|_| {
+                        "the selected Admin returned an invalid authentication-state contract"
+                            .into()
+                    });
+                }
+                BoundedOutput::Completed { .. } if attempt + 1 < ADMIN_AUTHENTICATION_ATTEMPTS => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                BoundedOutput::Completed { .. } => {
+                    return Err(
+                        "the selected Admin could not inspect the existing Supervisor authentication record"
+                            .into(),
+                    );
+                }
+                BoundedOutput::TimedOut => {
+                    if !self.remove_authentication_probe(&container)? {
+                        return Err(format!(
+                            "the selected Admin authentication check timed out and its temporary container could not be removed; run docker rm --force {container}"
+                        ));
+                    }
+                    return Err("the selected Admin authentication check timed out".into());
+                }
+            }
+        }
+        unreachable!("the bounded authentication attempts always return")
+    }
+
+    fn validate_admin_authentication_volume(&self) -> Result<(), String> {
+        let identity = self.run_output([
+            "volume",
+            "inspect",
+            "--format",
+            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
+            ADMIN_AUTHENTICATION_VOLUME,
+        ])?;
+        if identity.trim() == "shimpz-space_data|shimpz-space|data" {
+            Ok(())
+        } else {
+            Err("the Admin data volume is not owned by this Space".into())
+        }
+    }
+
+    fn remove_authentication_probe(&self, container: &str) -> Result<bool, String> {
+        let inspect = Command::new(&self.docker)
+            .args(["container", "inspect", container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        if !inspect.success() {
+            return Ok(true);
+        }
+        let removed = Command::new(&self.docker)
+            .args(["rm", "--force", container])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        Ok(removed.success())
     }
 
     #[cfg(unix)]
@@ -545,6 +653,60 @@ fn socket_probe_arguments(
     arguments
 }
 
+fn admin_authentication_probe_arguments(
+    platform: &str,
+    cpuset: &str,
+    mount: &str,
+    admin_image: &str,
+    container: &str,
+) -> Vec<OsString> {
+    [
+        "run",
+        "--rm",
+        "--name",
+        container,
+        "--label",
+        "com.shimpz.local.managed=1",
+        "--label",
+        "com.shimpz.local.kind=admin-authentication-probe",
+        "--platform",
+        platform,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--user",
+        "1000:1000",
+        "--cpuset-cpus",
+        cpuset,
+        "--cpus",
+        "0.25",
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--pids-limit",
+        "32",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=8m",
+        "--mount",
+        mount,
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        admin_image,
+        "-m",
+        "authentication_state",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
 fn status_projection_arguments(
     platform: &str,
     cpuset: &str,
@@ -777,6 +939,82 @@ fn execute_quiet(command: &mut Command) -> Result<(ExitStatus, String), String> 
     let captured = captured?;
     let diagnostic = render_diagnostic(&captured);
     Ok((status, diagnostic))
+}
+
+enum BoundedOutput {
+    Completed {
+        status: ExitStatus,
+        bytes: Vec<u8>,
+        truncated: bool,
+    },
+    TimedOut,
+}
+
+fn execute_bounded_stdout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<BoundedOutput, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
+    let captured = thread::spawn(move || drain_bounded_stdout(stdout));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not execute Docker: {error}"))?
+        {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            child
+                .wait()
+                .map_err(|error| format!("could not execute Docker: {error}"))?;
+            break None;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let captured = captured
+        .join()
+        .map_err(|_| "Docker authentication-state output could not be read".to_owned())??;
+    match status {
+        Some(status) => Ok(BoundedOutput::Completed {
+            status,
+            bytes: captured.bytes,
+            truncated: captured.truncated,
+        }),
+        None => Ok(BoundedOutput::TimedOut),
+    }
+}
+
+fn drain_bounded_stdout(mut stdout: ChildStdout) -> Result<CapturedProbeOutput, String> {
+    let mut bytes = Vec::with_capacity(ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1);
+    let mut truncated = false;
+    let mut buffer = [0_u8; 256];
+    loop {
+        let count = stdout
+            .read(&mut buffer)
+            .map_err(|_| "Docker authentication-state output could not be read".to_owned())?;
+        if count == 0 {
+            break;
+        }
+        let retained =
+            count.min((ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1).saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < count;
+    }
+    Ok(CapturedProbeOutput { bytes, truncated })
+}
+
+struct CapturedProbeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 struct CapturedDiagnostic {
@@ -1088,6 +1326,63 @@ mod tests {
                 .windows(2)
                 .any(|pair| { pair[0] == "--entrypoint" && pair[1] == "/opt/venv/bin/python" })
         );
+    }
+
+    #[test]
+    fn admin_authentication_probe_is_read_only_offline_and_resource_bounded() {
+        let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
+        let mount = "type=volume,src=shimpz-space_data,dst=/data,volume-nocopy,readonly";
+        let arguments = admin_authentication_probe_arguments(
+            "linux/amd64",
+            "0-3",
+            mount,
+            &image,
+            "shimpz-admin-authentication-probe-1-1",
+        );
+
+        for required in [
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "no-new-privileges:true",
+            "--user",
+            "1000:1000",
+            "--pull",
+            "never",
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "--pids-limit",
+            "32",
+            mount,
+            "/opt/venv/bin/python",
+            image.as_str(),
+            "authentication_state",
+        ] {
+            assert!(arguments.iter().any(|argument| argument == required));
+        }
+        assert!(arguments.iter().all(|argument| argument != "--interactive"));
+        assert!(arguments.iter().all(|argument| argument != "--tty"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_probe_terminates_a_silent_process_at_its_deadline() {
+        let started = Instant::now();
+        let result = execute_bounded_stdout(
+            Command::new("/bin/sh")
+                .args(["-c", "exec sleep 5"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null()),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        assert!(matches!(result, BoundedOutput::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[cfg(unix)]
