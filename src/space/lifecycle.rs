@@ -515,10 +515,9 @@ impl Context {
             )
             .map_err(|error| candidate_admission_error(&error))?;
             if authentication_state == AdminAuthenticationState::RecoveryRequired {
-                return Err(
-                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install; the previous healthy release remains active"
-                        .into(),
-                );
+                return Err(candidate_admission_error(
+                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install",
+                ));
             }
         }
         output::progress("Downloading Shimpz Space (2/4): Team...");
@@ -1498,7 +1497,7 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
 }
 
 fn candidate_admission_error(error: &str) -> String {
-    format!("{error}; the previous healthy release remains active")
+    format!("{error}; the installed release is unchanged")
 }
 
 fn admin_authentication_state_response(
@@ -2168,6 +2167,10 @@ mod tests {
         for invalid in ["", "configured\n", "recovery_required", "future-state"] {
             assert!(admin_authentication_state_probe_response(invalid).is_err());
         }
+        assert_eq!(
+            candidate_admission_error("the candidate check failed"),
+            "the candidate check failed; the installed release is unchanged"
+        );
     }
 
     #[test]
