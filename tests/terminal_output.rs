@@ -156,6 +156,10 @@ fn reset_help_explains_the_destructive_boundary() {
     assert!(output.status.success());
     assert!(help.contains("This operation is irreversible."));
     assert!(help.contains("A Supervisor password is requested only after one has been created."));
+    assert!(help.contains("shimpz reset --hard"));
+    assert!(help.contains("bypasses Shimpz Supervisor authorization"));
+    assert!(help.contains("interactive terminal"));
+    assert!(help.contains("Creator credentials and pulled images are retained"));
     assert!(!help.contains("Assistant development:"));
 }
 

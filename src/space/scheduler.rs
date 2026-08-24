@@ -6,6 +6,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::output;
+
 use super::command::{self, Tool};
 use super::host::HostProfile;
 use super::paths::Paths;
@@ -501,16 +503,7 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
 }
 
 fn display_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect()
+    output::sanitize_inline(&path.to_string_lossy())
 }
 
 fn systemd_quote(path: &Path) -> Result<String, String> {

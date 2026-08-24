@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
 pub(crate) const MARKER: &str = "shimpz-space-managed-v1";
 pub(crate) const STORAGE_MARKER: &str = "shimpz-local-storage-v1";
 
@@ -83,11 +86,34 @@ impl Paths {
         }
         Ok(true)
     }
+
+    #[cfg(unix)]
+    pub(crate) fn marker_is_owned(&self) -> Result<bool, String> {
+        let metadata = match self.marker.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!("could not inspect the Local Space marker: {error}"));
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("the Local Space marker ownership or permissions are invalid".into());
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::fs;
 
     #[test]
     fn derives_every_owned_path_below_exact_roots() {
@@ -105,6 +131,22 @@ mod tests {
             paths.systemd_timer,
             user_home.join(".config/systemd/user/shimpz-update.timer")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_reset_marker_proof_ignores_content_but_not_ownership_shape() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::write(&paths.marker, "incompatible-release-marker\n").unwrap();
+        fs::set_permissions(&paths.marker, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(paths.marker_is_owned().unwrap());
+        assert!(paths.marker_is_current().is_err());
+
+        fs::set_permissions(&paths.marker, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(paths.marker_is_owned().is_err());
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lifecycle {
     //! Native Windows retains Creator operations; Local Space runs inside WSL2.
 
-    use crate::args::{GraphProfile, SpaceInstall, SpaceStart};
+    use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 
     use super::graph::{self, StorageProfile};
 
@@ -34,7 +34,7 @@ pub(crate) mod lifecycle {
         unsupported()
     }
 
-    pub(crate) fn reset() -> Result<String, String> {
+    pub(crate) fn reset(_options: &SpaceReset) -> Result<String, String> {
         unsupported()
     }
 

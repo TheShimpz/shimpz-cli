@@ -63,9 +63,22 @@ pub(crate) fn sanitize(message: &str) -> String {
         .collect()
 }
 
+pub(crate) fn sanitize_inline(message: &str) -> String {
+    message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ERROR, INFO, SUCCESS, WARNING, labeled, sanitize};
+    use super::{ERROR, INFO, SUCCESS, WARNING, labeled, sanitize, sanitize_inline};
 
     #[test]
     fn severity_is_expressed_by_text_as_well_as_color() {
@@ -88,5 +101,6 @@ mod tests {
             sanitize("safe\u{1b}[2J\rspoofed\nnext"),
             "safe�[2J�spoofed\nnext"
         );
+        assert_eq!(sanitize_inline("safe\n\u{1b}[2J"), "safe��[2J");
     }
 }

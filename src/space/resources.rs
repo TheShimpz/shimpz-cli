@@ -130,6 +130,15 @@ impl Inventory {
             && self.dynamic_networks.is_empty()
     }
 
+    pub(crate) fn same_targets(&self, other: &Self) -> bool {
+        self.space_id == other.space_id
+            && same_ids(&self.project_containers, &other.project_containers)
+            && same_ids(&self.project_volumes, &other.project_volumes)
+            && same_ids(&self.project_networks, &other.project_networks)
+            && same_ids(&self.dynamic_containers, &other.dynamic_containers)
+            && same_ids(&self.dynamic_networks, &other.dynamic_networks)
+    }
+
     pub(crate) fn container_names(&self, engine: &Engine) -> Result<Vec<String>, String> {
         let mut names = BTreeSet::new();
         for identifier in self
@@ -509,6 +518,10 @@ fn ids(document: &str) -> Vec<String> {
     document.split_whitespace().map(str::to_owned).collect()
 }
 
+fn same_ids(left: &[String], right: &[String]) -> bool {
+    left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
+}
+
 fn one_line(value: &str, label: &str) -> Result<String, String> {
     let mut lines = value.lines();
     let line = lines.next().filter(|line| !line.is_empty());
@@ -560,6 +573,23 @@ mod tests {
     #[test]
     fn an_empty_inventory_is_a_successful_absence_proof() {
         assert!(Inventory::default().empty());
+    }
+
+    #[test]
+    fn hard_reset_target_comparison_is_order_independent_and_closed() {
+        let left = Inventory {
+            space_id: Some("space-0123456789abcdef01234567".into()),
+            project_containers: vec!["b".into(), "a".into()],
+            ..Inventory::default()
+        };
+        let mut reordered = left.clone();
+        reordered.project_containers.reverse();
+        assert!(left.same_targets(&reordered));
+        reordered.project_containers.push("new".into());
+        assert!(!left.same_targets(&reordered));
+        reordered.project_containers.pop();
+        reordered.space_id = Some("space-fedcba9876543210fedcba98".into());
+        assert!(!left.same_targets(&reordered));
     }
 
     #[test]

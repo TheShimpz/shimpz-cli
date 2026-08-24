@@ -550,6 +550,11 @@ impl<'a> Pool<'a> {
     #[cfg(target_os = "linux")]
     fn validate_mapping_unprivileged(&self) -> Result<(), String> {
         validate_metadata(self.paths)?;
+        self.validate_mapping_identity_unprivileged()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_mapping_identity_unprivileged(&self) -> Result<(), String> {
         let mapping = self.mapping_path().metadata().map_err(io_error)?;
         if !mapping.file_type().is_block_device() {
             return Err("encrypted Local storage mapping is not a block device".into());
@@ -596,6 +601,11 @@ impl<'a> Pool<'a> {
 
     #[cfg(not(target_os = "linux"))]
     fn validate_mapping_unprivileged(&self) -> Result<(), String> {
+        Err("unprivileged encrypted mapping validation requires Linux".into())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn validate_mapping_identity_unprivileged(&self) -> Result<(), String> {
         Err("unprivileged encrypted mapping validation requires Linux".into())
     }
 
@@ -764,13 +774,80 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
     remove_pool_files(paths)
 }
 
+pub(crate) fn preflight_reset(
+    paths: &Paths,
+    expected_space_id: Option<&str>,
+) -> Result<(), String> {
+    if !paths.security.exists() {
+        return Ok(());
+    }
+    if expected_space_id.is_some_and(|value| !valid_space_id(value)) {
+        return Err("the Local Space identity is invalid".into());
+    }
+    validate_security_entries(paths)?;
+    let marker = reset_marker(paths)?;
+    if reset_layout_is_incomplete(paths, marker.is_some())? {
+        return preflight_incomplete_reset(paths, marker.as_deref());
+    }
+    if paths.pool_uuid.with_extension("tmp").exists() {
+        return Err("the encrypted Local storage has an unexpected UUID temporary".into());
+    }
+    admit_cryptsetup()?;
+    validate_metadata_with_marker(
+        paths,
+        marker.as_deref().expect("complete layout has marker"),
+    )?;
+    let mappings = discover_pool_mappings(paths)?;
+    let identity = reset_mapping_identity(expected_space_id, &mappings)?;
+    let mounted = command::status(
+        Tool::Mountpoint,
+        ["--quiet", &paths.pool_mount.to_string_lossy()],
+    )?
+    .success();
+    if let Some(identity) = identity {
+        let pool = Pool::new(paths, &identity)?;
+        if mounted {
+            pool.validate_mount_identity()?;
+        }
+    } else if mounted {
+        return Err("refusing to unmount Local storage without its owned mapping".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn incomplete(paths: &Paths) -> Result<bool, String> {
     if !paths.security.exists() {
         return Ok(false);
     }
     validate_security_entries(paths)?;
     reconcile_storage_marker(paths)?;
-    let marker = paths.storage_marker.exists();
+    reset_layout_is_incomplete(paths, paths.storage_marker.exists())
+}
+
+fn reset_marker(paths: &Paths) -> Result<Option<PathBuf>, String> {
+    let temporary = paths.storage_marker.with_extension("tmp");
+    let current = paths.storage_marker.exists();
+    let pending = temporary.exists();
+    if current && pending {
+        return Err("the encrypted Local storage has an unexpected marker temporary".into());
+    }
+    let marker = if current {
+        Some(paths.storage_marker.clone())
+    } else if pending {
+        Some(temporary)
+    } else {
+        None
+    };
+    if let Some(marker) = &marker {
+        exact_regular_file(marker)?;
+        if fs::read_to_string(marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
+            return Err("encrypted Local storage marker is invalid".into());
+        }
+    }
+    Ok(marker)
+}
+
+fn reset_layout_is_incomplete(paths: &Paths, marker: bool) -> Result<bool, String> {
     let image = paths.pool_image.exists();
     let uuid = paths.pool_uuid.exists();
     let mount = paths.pool_mount.exists();
@@ -779,6 +856,41 @@ pub(crate) fn incomplete(paths: &Paths) -> Result<bool, String> {
         (_, false, false, false) | (true, true, _, false) => Ok(true),
         _ => Err("the encrypted Local storage has an impossible partial layout".into()),
     }
+}
+
+fn preflight_incomplete_reset(paths: &Paths, marker: Option<&Path>) -> Result<(), String> {
+    if marker.is_none() {
+        if fs::read_dir(&paths.security)
+            .map_err(io_error)?
+            .next()
+            .is_some()
+        {
+            return Err("the incomplete Local security directory is not empty".into());
+        }
+        return Ok(());
+    }
+    if paths.pool_image.exists() {
+        exact_regular_file(&paths.pool_image)?;
+        refuse_open_partial_pool(paths)?;
+    }
+    if paths.pool_mount.exists() {
+        let metadata = paths.pool_mount.symlink_metadata().map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("encrypted Local storage mountpoint is invalid".into());
+        }
+        if fs::read_dir(&paths.pool_mount)
+            .map_err(io_error)?
+            .next()
+            .is_some()
+        {
+            return Err("the incomplete Local storage mountpoint is not empty".into());
+        }
+    }
+    let uuid_temporary = paths.pool_uuid.with_extension("tmp");
+    if uuid_temporary.exists() {
+        exact_regular_file(&uuid_temporary)?;
+    }
+    Ok(())
 }
 
 fn reset_incomplete(paths: &Paths) -> Result<(), String> {
@@ -944,7 +1056,7 @@ fn validate_discovered_mapping(
         return Err("the encrypted Local storage mapping UUID is invalid".into());
     }
     let identity = format!("space-{suffix}");
-    Pool::new(paths, &identity)?.validate_mapping_unprivileged()?;
+    Pool::new(paths, &identity)?.validate_mapping_identity_unprivileged()?;
     Ok(identity)
 }
 
@@ -972,11 +1084,14 @@ fn remove_pool_files(paths: &Paths) -> Result<(), String> {
 }
 
 fn validate_metadata(paths: &Paths) -> Result<(), String> {
-    exact_regular_file(&paths.storage_marker)?;
+    validate_metadata_with_marker(paths, &paths.storage_marker)
+}
+
+fn validate_metadata_with_marker(paths: &Paths, marker: &Path) -> Result<(), String> {
+    exact_regular_file(marker)?;
     exact_regular_file(&paths.pool_image)?;
     exact_regular_file(&paths.pool_uuid)?;
-    if fs::read_to_string(&paths.storage_marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n")
-    {
+    if fs::read_to_string(marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
         return Err("encrypted Local storage marker is invalid".into());
     }
     let expected_document = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
@@ -1360,6 +1475,25 @@ mod tests {
         assert!(!paths.security.exists());
     }
 
+    #[test]
+    fn hard_reset_preflight_admits_current_partial_storage_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(&paths.security).unwrap();
+        fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
+        let temporary = paths.storage_marker.with_extension("tmp");
+        fs::write(&temporary, format!("{STORAGE_MARKER}\n")).unwrap();
+
+        preflight_reset(&paths, None).unwrap();
+
+        assert!(temporary.exists());
+        assert!(!paths.storage_marker.exists());
+        let foreign = paths.security.join("foreign");
+        fs::write(&foreign, "foreign").unwrap();
+        assert!(preflight_reset(&paths, None).is_err());
+        assert!(foreign.exists());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires real LUKS, loop, mount, sudo, and a controlling terminal"]
@@ -1372,9 +1506,11 @@ mod tests {
         fs::create_dir(&paths.home).unwrap();
         let pool = Pool::new(&paths, "space-0123456789abcdef01234567").unwrap();
         assert_eq!(pool.ensure(true, false).unwrap(), Admission::Verified);
+        preflight_reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();
         pool.validate_mount().unwrap();
         Pool::root(Tool::Umount, [paths.pool_mount.as_os_str().to_owned()]).unwrap();
         Pool::cryptsetup([OsString::from("close"), OsString::from(pool.mapping_name())]).unwrap();
+        preflight_reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
         reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();

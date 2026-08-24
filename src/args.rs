@@ -30,7 +30,7 @@ pub(crate) enum Command {
     Auth(AuthAction),
     Assistant(AssistantCommand),
     Install(SpaceInstall),
-    Reset,
+    Reset(SpaceReset),
     Start(SpaceStart),
     Status,
     Stop,
@@ -55,6 +55,11 @@ pub(crate) struct SpaceStart {
     pub(crate) scheduled: bool,
     pub(crate) release: Option<String>,
     pub(crate) candidate: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SpaceReset {
+    pub(crate) hard: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -140,7 +145,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         "assistant" => parse_assistant(rest),
         "auth" => parse_auth(rest),
         "install" => parse_space_install(rest),
-        "reset" => parse_no_options(rest, Command::Reset, "reset", Topic::Reset),
+        "reset" => parse_space_reset(rest),
         "start" => parse_space_start(rest),
         "status" => parse_no_options(rest, Command::Status, "status", Topic::Status),
         "stop" => parse_no_options(rest, Command::Stop, "stop", Topic::Stop),
@@ -226,6 +231,19 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
         release,
         candidate,
     })))
+}
+
+fn parse_space_reset(arguments: &[String]) -> Result<Invocation, String> {
+    match arguments {
+        [] => Ok(Invocation::Execute(Command::Reset(SpaceReset {
+            hard: false,
+        }))),
+        [option] if option == "--hard" => Ok(Invocation::Execute(Command::Reset(SpaceReset {
+            hard: true,
+        }))),
+        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(Topic::Reset)),
+        _ => Err("reset accepts only --hard".into()),
+    }
 }
 
 fn parse_no_options(
@@ -919,7 +937,25 @@ mod tests {
         );
         assert_eq!(
             parse(strings(&["reset"])),
-            Ok(Invocation::Execute(Command::Reset))
+            Ok(Invocation::Execute(Command::Reset(SpaceReset {
+                hard: false
+            })))
+        );
+        assert_eq!(
+            parse(strings(&["reset", "--hard"])),
+            Ok(Invocation::Execute(Command::Reset(SpaceReset {
+                hard: true
+            })))
+        );
+        for invalid in [
+            &["reset", "--hard", "--hard"][..],
+            &["reset", "--hard", "extra"][..],
+        ] {
+            assert!(parse(strings(invalid)).is_err());
+        }
+        assert_eq!(
+            parse(strings(&["hardreset"])),
+            Err("unknown command".into())
         );
         assert_eq!(
             parse(strings(&["space", "install"])),
@@ -1068,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             parse(strings(&["reset", "--help", "extra"])),
-            Err("reset accepts no options".into())
+            Err("reset accepts only --hard".into())
         );
         for arguments in [
             &["auth", "login", "logout"][..],

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use ureq::Agent;
 use zeroize::Zeroizing;
 
-use crate::args::{GraphProfile, SpaceInstall, SpaceStart};
+use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output;
 
 use super::docker::{Engine, ResolvedRelease};
@@ -162,10 +162,14 @@ pub(crate) fn stop() -> Result<String, String> {
     Context::open(false)?.stop()
 }
 
-pub(crate) fn reset() -> Result<String, String> {
+pub(crate) fn reset(options: &SpaceReset) -> Result<String, String> {
     let context = Context::open(false)?;
     let _lock = Lock::acquire(&context.paths)?;
-    context.reset()
+    if options.hard {
+        context.hard_reset()
+    } else {
+        context.reset()
+    }
 }
 
 struct Context {
@@ -462,7 +466,7 @@ impl Context {
         let was_upgrade = previous.is_some();
         let authentication_error = match admin_authentication_state(port) {
             Ok(AdminAuthenticationState::RecoveryRequired) if was_upgrade => Some(
-                "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install"
+                "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install"
                     .to_owned(),
             ),
             Ok(AdminAuthenticationState::RecoveryRequired) => Some(
@@ -516,7 +520,7 @@ impl Context {
             .map_err(|error| candidate_admission_error(&error))?;
             if authentication_state == AdminAuthenticationState::RecoveryRequired {
                 return Err(candidate_admission_error(
-                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset, then shimpz install",
+                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install",
                 ));
             }
         }
@@ -553,7 +557,7 @@ impl Context {
         };
         if !inventory.empty() && installed.is_none() {
             return Err(
-                "the current Local Space cannot be authenticated safely; run shimpz install for bounded recovery"
+                "the current Local Space cannot be authenticated safely; run shimpz reset --hard for explicit host recovery"
                     .into(),
             );
         }
@@ -579,6 +583,68 @@ impl Context {
         preserved.extend(scheduler.preserved);
         Ok(reset_outcome(
             false,
+            &preserved,
+            scheduler.execution_unverified,
+        ))
+    }
+
+    fn hard_reset(&self) -> Result<String, String> {
+        output::progress("Checking the Shimpz Space hard reset scope...");
+        self.paths
+            .marker_is_owned()
+            .map_err(|error| hard_reset_preflight(&error))?;
+        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())
+            .map_err(|error| hard_reset_preflight(&error))?;
+        scheduler::preflight_remove(self.profile, &self.paths)
+            .map_err(|error| hard_reset_preflight(&error))?;
+        let preserved_files =
+            preflight_remove_files(&self.paths, self.profile == HostProfile::Linux)
+                .map_err(|error| hard_reset_preflight(&error))?;
+        if self.profile == HostProfile::Linux {
+            linux::preflight_reset(&self.paths, inventory.space_id.as_deref())
+                .map_err(|error| hard_reset_preflight(&error))?;
+        }
+        let names = inventory
+            .container_names(&self.engine)
+            .map_err(|error| hard_reset_preflight(&error))?;
+        if !hard_reset_prompt(&inventory, &names, &preserved_files)? {
+            return Err("the Shimpz Space was preserved; nothing changed".into());
+        }
+
+        output::progress("Stopping the Shimpz Space for hard reset...");
+        self.stop_owned_containers(&inventory)
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        let stopped = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        if !inventory.same_targets(&stopped) {
+            return Err(hard_reset_incomplete(
+                "the owned reset scope changed after confirmation",
+            ));
+        }
+
+        output::progress("Removing the Shimpz Space owned state...");
+        let space_id = inventory.space_id.clone();
+        stopped
+            .remove(&self.engine)
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        if !remaining.empty() {
+            return Err(hard_reset_incomplete(
+                "owned Docker resources remain after hard reset",
+            ));
+        }
+        if self.profile == HostProfile::Linux && self.paths.security.exists() {
+            linux::reset(&self.paths, space_id.as_deref())
+                .map_err(|error| hard_reset_incomplete(&error))?;
+        }
+        let scheduler = scheduler::remove(self.profile, &self.paths)
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        let mut preserved = self
+            .remove_files()
+            .map_err(|error| hard_reset_incomplete(&error))?;
+        preserved.extend(scheduler.preserved);
+        Ok(hard_reset_outcome(
             &preserved,
             scheduler.execution_unverified,
         ))
@@ -999,7 +1065,7 @@ impl Context {
                         .parent()
                         .expect("managed CLI has a parent")
                 {
-                    validate_unmarked_bin(&self.paths)?;
+                    record_retained_bin_entries(&self.paths, &mut preserved)?;
                 } else {
                     preserved.record(path);
                 }
@@ -1010,7 +1076,14 @@ impl Context {
 }
 
 fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
-    for path in [
+    for path in managed_runtime_files(paths) {
+        remove_regular_if_present(&path)?;
+    }
+    Ok(())
+}
+
+fn managed_runtime_files(paths: &Paths) -> [PathBuf; 15] {
+    [
         paths.compose.clone(),
         paths.environment.clone(),
         paths.status.clone(),
@@ -1026,8 +1099,58 @@ fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
         paths.home.join("release.env.tmp"),
         paths.marker.with_extension("tmp"),
         paths.marker.clone(),
-    ] {
-        remove_regular_if_present(&path)?;
+    ]
+}
+
+fn preflight_remove_files(paths: &Paths, protected_storage: bool) -> Result<Vec<String>, String> {
+    let managed = managed_runtime_files(paths);
+    for path in &managed {
+        validate_regular_if_present(path)?;
+    }
+    let mut preserved = PathReport::default();
+    if paths.home.exists() {
+        let bin = paths
+            .managed_cli
+            .parent()
+            .expect("managed CLI has a parent");
+        for entry in fs::read_dir(&paths.home).map_err(io_error)? {
+            let path = entry.map_err(io_error)?.path();
+            if path == bin {
+                record_retained_bin_entries(paths, &mut preserved)?;
+            } else if !(managed.contains(&path) || protected_storage && path == paths.security) {
+                preserved.record(path);
+            }
+        }
+    }
+    Ok(preserved.into_strings())
+}
+
+fn record_retained_bin_entries(paths: &Paths, preserved: &mut PathReport) -> Result<(), String> {
+    let bin = paths
+        .managed_cli
+        .parent()
+        .expect("managed CLI has a parent");
+    let metadata = match bin.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "the managed CLI directory is invalid: {}",
+            bin.display()
+        ));
+    }
+    for entry in fs::read_dir(bin).map_err(io_error)? {
+        let path = entry.map_err(io_error)?.path();
+        if path == paths.managed_cli
+            || path == paths.managed_cli.with_extension("candidate")
+            || path == paths.managed_cli.with_extension("previous")
+        {
+            validate_private_cli(&path)?;
+        } else {
+            preserved.record(path);
+        }
     }
     Ok(())
 }
@@ -1087,6 +1210,34 @@ fn reset_outcome(
     format!("{action} {suffix}{scheduler}")
 }
 
+fn hard_reset_outcome(preserved: &[String], scheduler_execution_unverified: bool) -> String {
+    let cleanup = if preserved.is_empty() {
+        "No managed Space data remains.".to_owned()
+    } else {
+        format!("Preserved unrecognized content: {}.", preserved.join(", "))
+    };
+    let scheduler = if scheduler_execution_unverified {
+        " Scheduler execution state is unverified; review the preserved entry before reinstalling."
+    } else {
+        ""
+    };
+    format!(
+        "Shimpz Space hard reset completed. {cleanup} Retained: the shimpz command, lifecycle lock, Creator credentials, and pulled images.{scheduler}\nNext: shimpz install"
+    )
+}
+
+fn hard_reset_incomplete(error: &str) -> String {
+    format!(
+        "{error}; hard reset did not complete and the Space may be stopped; re-run shimpz reset --hard"
+    )
+}
+
+fn hard_reset_preflight(error: &str) -> String {
+    format!(
+        "{error}; nothing changed; resolve the reported Local ownership or host prerequisite, then re-run shimpz reset --hard"
+    )
+}
+
 #[derive(Debug)]
 struct Backup {
     compose: PathBuf,
@@ -1131,7 +1282,7 @@ impl PathReport {
         let mut rendered = self
             .named
             .iter()
-            .map(|path| path.display().to_string())
+            .map(|path| output::sanitize_inline(&path.to_string_lossy()))
             .collect::<Vec<_>>()
             .join(", ");
         if self.total > self.named.len() {
@@ -1151,7 +1302,7 @@ impl PathReport {
         let mut rendered = self
             .named
             .into_iter()
-            .map(|path| path.display().to_string())
+            .map(|path| output::sanitize_inline(&path.to_string_lossy()))
             .collect::<Vec<_>>();
         if hidden > 0 {
             rendered.push(format!("and {hidden} more unrecognized entries"));
@@ -1496,6 +1647,78 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
     }
 }
 
+fn hard_reset_prompt(
+    inventory: &Inventory,
+    names: &[String],
+    preserved: &[String],
+) -> Result<bool, String> {
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| "hard reset requires an interactive terminal; nothing changed".to_owned())?;
+    writeln!(
+        tty,
+        "Hard reset bypasses Shimpz Supervisor authorization and permanently removes the current owned Local Space."
+    )
+    .map_err(io_error)?;
+    writeln!(
+        tty,
+        "Owned Docker scope: {} containers, {} volumes, {} networks",
+        inventory.project_containers.len() + inventory.dynamic_containers.len(),
+        inventory.project_volumes.len(),
+        inventory.project_networks.len() + inventory.dynamic_networks.len()
+    )
+    .map_err(io_error)?;
+    if !names.is_empty() {
+        writeln!(tty, "Containers: {}", names.join(", ")).map_err(io_error)?;
+    }
+    if !preserved.is_empty() {
+        writeln!(
+            tty,
+            "Preserved unrecognized content: {}",
+            preserved.join(", ")
+        )
+        .map_err(io_error)?;
+    }
+    writeln!(
+        tty,
+        "Owned runtime files, scheduler state, and protected Linux storage are also removed when present."
+    )
+    .map_err(io_error)?;
+    writeln!(
+        tty,
+        "Docker and host authorization remain required. Creator credentials, pulled images, the shimpz command, and lifecycle lock are retained."
+    )
+    .map_err(io_error)?;
+    hard_reset_confirmation(&mut tty)
+}
+
+fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, String> {
+    write!(
+        terminal,
+        "Permanently hard reset this exact owned Local Space? [Yes/No] "
+    )
+    .map_err(io_error)?;
+    terminal.flush().map_err(io_error)?;
+    let mut answer = String::new();
+    let mut byte = [0_u8; 1];
+    while terminal.read(&mut byte).map_err(io_error)? == 1 {
+        if byte[0] == b'\n' {
+            break;
+        }
+        if answer.len() >= 8 || byte[0].is_ascii_control() {
+            return Err("the hard reset answer is invalid; nothing changed".into());
+        }
+        answer.push(char::from(byte[0]));
+    }
+    match answer.as_str() {
+        "Yes" => Ok(true),
+        "No" | "" => Ok(false),
+        _ => Err("the hard reset answer is invalid; nothing changed".into()),
+    }
+}
+
 fn candidate_admission_error(error: &str) -> String {
     format!("{error}; the installed release is unchanged")
 }
@@ -1810,17 +2033,25 @@ fn failed_release_decision(stopped: bool, selected_failed: bool) -> FailedReleas
 }
 
 fn remove_regular_if_present(path: &Path) -> Result<(), String> {
-    if !path.exists() {
+    if !validate_regular_if_present(path)? {
         return Ok(());
     }
-    let metadata = path.symlink_metadata().map_err(io_error)?;
+    fs::remove_file(path).map_err(io_error)
+}
+
+fn validate_regular_if_present(path: &Path) -> Result<bool, String> {
+    let metadata = match path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(error)),
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!(
             "refusing to remove invalid managed file: {}",
             path.display()
         ));
     }
-    fs::remove_file(path).map_err(io_error)
+    Ok(true)
 }
 
 fn io_error(error: std::io::Error) -> String {
@@ -1833,6 +2064,8 @@ fn io_error(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use crate::space::release::Release;
+
+    use std::io::Cursor;
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -1993,6 +2226,78 @@ mod tests {
         assert!(scheduler.contains("run shimpz install from an interactive terminal"));
         for outcome in [already_clean, changed, scheduler] {
             assert!(outcome.contains("Shimpz Space was reset successfully"));
+        }
+    }
+
+    #[test]
+    fn hard_reset_outcome_names_retained_and_preserved_state() {
+        let clean = hard_reset_outcome(&[], false);
+        assert!(clean.contains("hard reset completed"));
+        assert!(clean.contains("No managed Space data remains"));
+        assert!(clean.contains("Creator credentials"));
+        assert!(clean.contains("pulled images"));
+        assert!(clean.ends_with("Next: shimpz install"));
+
+        let preserved = hard_reset_outcome(&["/home/ada/.shimpz/notes".into()], true);
+        assert!(preserved.contains("/home/ada/.shimpz/notes"));
+        assert!(preserved.contains("Scheduler execution state is unverified"));
+        let preflight = hard_reset_preflight("the Local Space identity is invalid");
+        assert!(preflight.contains("nothing changed"));
+        assert!(preflight.contains("re-run shimpz reset --hard"));
+    }
+
+    struct MemoryTerminal {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl MemoryTerminal {
+        fn new(input: &[u8]) -> Self {
+            Self {
+                input: Cursor::new(input.to_vec()),
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for MemoryTerminal {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for MemoryTerminal {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.output.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hard_reset_confirmation_accepts_only_exact_yes() {
+        for (input, expected) in [
+            (b"Yes\n".as_slice(), true),
+            (b"No\n", false),
+            (b"\n", false),
+        ] {
+            let mut terminal = MemoryTerminal::new(input);
+            assert_eq!(hard_reset_confirmation(&mut terminal), Ok(expected));
+            assert!(
+                String::from_utf8(terminal.output)
+                    .unwrap()
+                    .contains("[Yes/No]")
+            );
+        }
+        for input in [b"yes\n".as_slice(), b"Yes\r\n", b"123456789\n"] {
+            let mut terminal = MemoryTerminal::new(input);
+            assert!(
+                hard_reset_confirmation(&mut terminal)
+                    .unwrap_err()
+                    .contains("nothing changed")
+            );
         }
     }
 
@@ -2340,6 +2645,30 @@ mod tests {
 
         assert!(unowned.exists());
         assert!(adopt_unmarked_home(&paths).is_err());
+    }
+
+    #[test]
+    fn reset_preserves_unrecognized_entries_beside_the_managed_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir_all(bin).unwrap();
+        fs::set_permissions(bin, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&paths.managed_cli, "managed").unwrap();
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let unrecognized = bin.join("notes");
+        fs::write(&unrecognized, "preserve").unwrap();
+
+        let mut preserved = PathReport::default();
+        record_retained_bin_entries(&paths, &mut preserved).unwrap();
+        let preflight = preflight_remove_files(&paths, false).unwrap();
+
+        assert!(unrecognized.exists());
+        assert_eq!(
+            preserved.into_strings(),
+            [unrecognized.display().to_string()]
+        );
+        assert_eq!(preflight, [unrecognized.display().to_string()]);
     }
 
     #[test]

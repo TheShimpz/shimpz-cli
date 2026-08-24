@@ -302,9 +302,14 @@ Permanently remove the Local Space data owned by Shimpz.
 
 Usage:
   shimpz reset
+  shimpz reset --hard
 
 This operation is irreversible. It retains the shimpz command and lifecycle lock so you can install a fresh Space.
 A Supervisor password is requested only after one has been created.
+
+Use '--hard' only when the installed Space cannot authorize an ordinary reset. It bypasses Shimpz Supervisor authorization
+and requires the exact answer 'Yes' on an interactive terminal. Docker and operating-system authorization are still
+required. Creator credentials and pulled images are retained.
 
 Next:
   Run 'shimpz install' to create a fresh Local Space.

@@ -86,7 +86,7 @@ fn run(command: &Command) -> ExitCode {
                 Presentation::Success
             },
         ),
-        Command::Reset => (space::lifecycle::reset(), Presentation::Success),
+        Command::Reset(options) => (space::lifecycle::reset(options), Presentation::Success),
         Command::Start(options) => (space::lifecycle::start(options), Presentation::Success),
         Command::Status => (space::lifecycle::status(), Presentation::Info),
         Command::Stop => (space::lifecycle::stop(), Presentation::Success),
