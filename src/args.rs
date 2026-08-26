@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::help::Topic;
 
-const TOP_LEVEL_COMMANDS: [&str; 8] = [
+const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
     "auth",
     "install",
@@ -13,11 +13,12 @@ const TOP_LEVEL_COMMANDS: [&str; 8] = [
     "start",
     "status",
     "stop",
+    "update",
     "upgrade",
 ];
 
 pub(crate) const USAGE: &str =
-    "Usage: shimpz <assistant|auth|install|reset|start|status|stop|upgrade> [options]";
+    "Usage: shimpz <assistant|auth|install|reset|start|status|stop|update|upgrade> [options]";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
     Help(Topic),
@@ -34,6 +35,7 @@ pub(crate) enum Command {
     Start(SpaceStart),
     Status,
     Stop,
+    Update,
     Upgrade,
 }
 
@@ -149,6 +151,7 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
         "start" => parse_space_start(rest),
         "status" => parse_no_options(rest, Command::Status, "status", Topic::Status),
         "stop" => parse_no_options(rest, Command::Stop, "stop", Topic::Stop),
+        "update" => parse_no_options(rest, Command::Update, "update", Topic::Update),
         "upgrade" => parse_upgrade(rest),
         _ => Err("unknown command".into()),
     }
@@ -892,6 +895,7 @@ mod tests {
                 "start",
                 "status",
                 "stop",
+                "update",
                 "upgrade"
             ]
         );
@@ -931,6 +935,16 @@ mod tests {
             parse(strings(&["stop"])),
             Ok(Invocation::Execute(Command::Stop))
         );
+        assert_eq!(
+            parse(strings(&["update"])),
+            Ok(Invocation::Execute(Command::Update))
+        );
+        for option in ["--force", "--scheduled", "--candidate", "--release"] {
+            assert_eq!(
+                parse(strings(&["update", option])),
+                Err("update accepts no options".into())
+            );
+        }
         assert_eq!(
             parse(strings(&["stop", "--force"])),
             Err("stop accepts no options".into())
@@ -1053,6 +1067,7 @@ mod tests {
             (&["start", "--help"][..], Topic::Start),
             (&["status", "--help"][..], Topic::Status),
             (&["stop", "--help"][..], Topic::Stop),
+            (&["update", "--help"][..], Topic::Update),
             (&["upgrade", "--help"][..], Topic::Upgrade),
             (&["auth", "--help"][..], Topic::Auth),
             (&["auth", "login", "--help"][..], Topic::AuthLogin),

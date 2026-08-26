@@ -19,12 +19,13 @@ pub(crate) enum Topic {
     Start,
     Status,
     Stop,
+    Update,
     Upgrade,
 }
 
 impl Topic {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::Root,
         Self::Assistant,
         Self::AssistantNew,
@@ -42,6 +43,7 @@ impl Topic {
         Self::Start,
         Self::Status,
         Self::Stop,
+        Self::Update,
         Self::Upgrade,
     ];
 
@@ -64,6 +66,7 @@ impl Topic {
             Self::Start => START,
             Self::Status => STATUS,
             Self::Stop => STOP,
+            Self::Update => UPDATE,
             Self::Upgrade => UPGRADE,
         }
     }
@@ -80,6 +83,7 @@ Usage:
 Local Space:
   shimpz install                         Install or reconcile the complete Local Space.
   shimpz start                           Start it and reconcile its atomic release.
+  shimpz update                          Apply a newer atomic release without resuming a stopped Space.
   shimpz stop                            Stop it without removing its data.
   shimpz status                          Show its health, Admin address, and release ordinal.
   shimpz reset                           Permanently remove its Shimpz-owned data.
@@ -354,6 +358,20 @@ Next:
   Run 'shimpz start' to resume the Space.
 ";
 
+const UPDATE: &str = "\
+shimpz update
+
+Apply a newer atomic release to the Local Space.
+
+Usage:
+  shimpz update
+
+The command does not repair the current release and never resumes a stopped Space.
+
+Next:
+  Run 'shimpz status' to inspect the Space.
+";
+
 const UPGRADE: &str = "\
 shimpz upgrade
 
@@ -362,5 +380,5 @@ Upgrade a standalone Shimpz CLI.
 Usage:
   shimpz upgrade
 
-A Space-managed CLI is upgraded only through the atomic Local release. Run 'shimpz install' to reconcile it.
+A Space-managed CLI is upgraded only through the atomic Local release. Run 'shimpz update' to check for one.
 ";

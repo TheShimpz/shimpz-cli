@@ -34,6 +34,10 @@ pub(crate) mod lifecycle {
         unsupported()
     }
 
+    pub(crate) fn update() -> Result<String, String> {
+        unsupported()
+    }
+
     pub(crate) fn reset(_options: &SpaceReset) -> Result<String, String> {
         unsupported()
     }

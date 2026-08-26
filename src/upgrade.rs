@@ -19,6 +19,8 @@ const RELEASE_TAG_URL: &str = "https://github.com/TheShimpz/shimpz-cli/releases/
 const MAX_CHECKSUM_BYTES: u64 = 8 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const MANAGED_SPACE_GUIDANCE: &str =
+    "this CLI is managed by Shimpz Space; run shimpz update to check its atomic release";
 
 struct Release {
     tag: String,
@@ -43,10 +45,7 @@ fn refuse_managed_space_cli() -> Result<(), String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let current = std::env::current_exe().ok();
     if managed_space_verdict(cfg!(unix), home.as_deref(), current.as_deref())? {
-        return Err(
-            "this CLI is managed by Shimpz Space; run shimpz install to reconcile its atomic release"
-                .into(),
-        );
+        return Err(MANAGED_SPACE_GUIDANCE.into());
     }
     Ok(())
 }
@@ -406,6 +405,8 @@ mod tests {
         assert!(!managed_space_verdict(true, Some(home.path()), None).unwrap());
         assert!(managed_space_verdict(true, None, Some(&managed)).is_err());
         assert!(!managed_space_verdict(false, None, Some(&managed)).unwrap());
+        assert!(MANAGED_SPACE_GUIDANCE.contains("shimpz update"));
+        assert!(!MANAGED_SPACE_GUIDANCE.contains("shimpz install"));
     }
 
     #[test]

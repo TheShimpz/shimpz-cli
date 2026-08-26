@@ -120,6 +120,11 @@ fn each_command_prints_its_own_help() {
         ),
         (&["stop", "--help"][..], "shimpz stop\n", "shimpz stop"),
         (
+            &["update", "--help"][..],
+            "shimpz update\n",
+            "shimpz update",
+        ),
+        (
             &["upgrade", "--help"][..],
             "shimpz upgrade\n",
             "shimpz upgrade",

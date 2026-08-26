@@ -1,4 +1,4 @@
-//! Native install, reconcile, stop, status, and reset orchestration.
+//! Native install, reconcile, update, stop, status, and reset orchestration.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -34,6 +34,7 @@ const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 const ADMIN_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RESET_CAPABILITY_SECONDS: u64 = 120;
 const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
+const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const STOP_PROGRESS: [&str; 3] = [
     "Checking the Shimpz Space...",
     "Stopping the Shimpz Space...",
@@ -60,6 +61,12 @@ pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
         .then(|| Lock::acquire(&context.paths))
         .transpose()?;
     context.start(options)
+}
+
+pub(crate) fn update() -> Result<String, String> {
+    let context = Context::open(false)?;
+    let _lock = Lock::acquire(&context.paths)?;
+    context.update()
 }
 
 pub(crate) fn status() -> Result<String, String> {
@@ -217,6 +224,14 @@ enum FailedReleaseDecision {
     KeepRunning,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpdateDecision {
+    Current,
+    Failed,
+    Available,
+    Apply,
+}
+
 impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
@@ -260,6 +275,7 @@ impl Context {
         let release = self
             .engine
             .resolve_release(exact_release, &self.paths.home)?;
+        validate_forward_release(&release, installed.as_ref())?;
         if exact_release.is_none() && self.handoff_if_needed(&release, installed.as_ref(), false)? {
             return Ok("The release-bound CLI completed the installation.".into());
         }
@@ -294,6 +310,7 @@ impl Context {
         let mut release = self
             .engine
             .resolve_release(options.release.as_deref(), &self.paths.home)?;
+        validate_forward_release(&release, Some(&installed))?;
         let selected_failed = options.release.is_none()
             && state::failed_release_matches(&self.paths, &release.reference)?;
         let preserve_failed_release = match failed_release_decision(stopped, selected_failed) {
@@ -323,6 +340,30 @@ impl Context {
             options.scheduled,
             preserve_failed_release,
         )
+    }
+
+    fn update(&self) -> Result<String, String> {
+        if !self.paths.marker_is_current()? {
+            return Err("Shimpz Space is not installed; run shimpz install".into());
+        }
+        let installed = self.validate_installation_storage(self.installed_state()?)?;
+        Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        let stopped = state::stopped(&self.paths)?;
+        output::progress(UPDATE_PROGRESS);
+        let release = self.engine.resolve_release(None, &self.paths.home)?;
+        validate_forward_release(&release, Some(&installed))?;
+        let selected_failed = state::failed_release_matches(&self.paths, &release.reference)?;
+        match update_decision(&installed, &release, stopped, selected_failed) {
+            UpdateDecision::Current => Ok(current_release_outcome(&installed, stopped)),
+            UpdateDecision::Failed => Ok(failed_update_outcome(stopped)),
+            UpdateDecision::Available => Ok(available_release_outcome(&installed, &release)),
+            UpdateDecision::Apply => {
+                if self.handoff_if_needed(&release, Some(&installed), false)? {
+                    return Ok("The release-bound CLI completed the update.".into());
+                }
+                self.apply(&release, Some(&installed), false, false)
+            }
+        }
     }
 
     fn stop(&self) -> Result<String, String> {
@@ -1179,6 +1220,35 @@ fn ready_outcome(release: &ResolvedRelease, port: u16) -> String {
         "Shimpz Space is ready.\nAdmin: http://127.0.0.1:{port}\nRelease: ordinal {}\nNext: open the Admin address above.",
         release.metadata.ordinal
     )
+}
+
+fn current_release_outcome(installed: &Installed, stopped: bool) -> String {
+    let next = if stopped {
+        "Stopped intent was preserved.\nNext: shimpz start"
+    } else {
+        "Next: shimpz status"
+    };
+    format!(
+        "The installed Shimpz Space release is current.\nRelease: ordinal {}\n{next}",
+        installed.ordinal
+    )
+}
+
+fn available_release_outcome(installed: &Installed, release: &ResolvedRelease) -> String {
+    format!(
+        "A newer Shimpz Space release is available.\nInstalled release: ordinal {}\nAvailable release: ordinal {}\nStopped intent was preserved.\nNext: shimpz start",
+        installed.ordinal, release.metadata.ordinal
+    )
+}
+
+fn failed_update_outcome(stopped: bool) -> String {
+    if stopped {
+        "The selected Local release previously failed health.\nStopped intent was preserved.\nNext: shimpz start to resume the installed release."
+            .into()
+    } else {
+        "The selected Local release previously failed health; the current Space remains unchanged.\nNext: wait for a different Local release selection."
+            .into()
+    }
 }
 
 fn scheduler_outcome(
@@ -2051,6 +2121,25 @@ fn failed_release_decision(stopped: bool, selected_failed: bool) -> FailedReleas
     }
 }
 
+fn update_decision(
+    installed: &Installed,
+    release: &ResolvedRelease,
+    stopped: bool,
+    selected_failed: bool,
+) -> UpdateDecision {
+    if selected_failed {
+        UpdateDecision::Failed
+    } else if installed.release_ref == release.reference
+        && installed.ordinal == release.metadata.ordinal
+    {
+        UpdateDecision::Current
+    } else if stopped {
+        UpdateDecision::Available
+    } else {
+        UpdateDecision::Apply
+    }
+}
+
 fn remove_regular_if_present(path: &Path) -> Result<(), String> {
     if !validate_regular_if_present(path)? {
         return Ok(());
@@ -2183,6 +2272,81 @@ mod tests {
             "updated"
         );
         assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+    }
+
+    #[test]
+    fn explicit_update_decision_covers_current_failed_stopped_and_running_releases() {
+        let current = release(2, 'b');
+        let forward = release(3, 'c');
+        let installed = Installed {
+            space_id: "space-0123456789abcdef01234567".into(),
+            release_ref: current.reference.clone(),
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
+            ordinal: 2,
+            port: 7777,
+        };
+
+        for stopped in [false, true] {
+            assert_eq!(
+                update_decision(&installed, &current, stopped, false),
+                UpdateDecision::Current
+            );
+            assert_eq!(
+                update_decision(&installed, &forward, stopped, true),
+                UpdateDecision::Failed
+            );
+        }
+        assert_eq!(
+            update_decision(&installed, &forward, true, false),
+            UpdateDecision::Available
+        );
+        assert_eq!(
+            update_decision(&installed, &forward, false, false),
+            UpdateDecision::Apply
+        );
+    }
+
+    #[test]
+    fn explicit_update_outcomes_are_bounded_and_do_not_claim_space_health() {
+        let current = release(2, 'b');
+        let forward = release(3, 'c');
+        let installed = Installed {
+            space_id: "space-0123456789abcdef01234567".into(),
+            release_ref: current.reference.clone(),
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
+            ordinal: 2,
+            port: 7777,
+        };
+        let outcomes = [
+            current_release_outcome(&installed, false),
+            current_release_outcome(&installed, true),
+            available_release_outcome(&installed, &forward),
+            failed_update_outcome(false),
+            failed_update_outcome(true),
+        ];
+
+        assert!(outcomes[0].contains("release is current"));
+        assert!(outcomes[0].contains("Next: shimpz status"));
+        assert!(outcomes[1].contains("Stopped intent was preserved"));
+        assert!(outcomes[1].contains("Next: shimpz start"));
+        assert!(outcomes[2].contains("Available release: ordinal 3"));
+        assert!(outcomes[3].contains("wait for a different Local release selection"));
+        assert!(outcomes[4].contains("resume the installed release"));
+        for outcome in outcomes {
+            assert!(outcome.len() < 320);
+            assert!(!outcome.contains("healthy"));
+            assert!(!outcome.contains("sha256:"));
+            assert!(!outcome.contains("space-0123456789abcdef01234567"));
+            assert_eq!(output::sanitize(&outcome), outcome);
+        }
+    }
+
+    #[test]
+    fn update_progress_is_bounded_and_redacted() {
+        assert_eq!(UPDATE_PROGRESS, "Checking for Shimpz Space updates...");
+        assert!(UPDATE_PROGRESS.len() < 64);
+        assert!(!UPDATE_PROGRESS.contains("sha256:"));
+        assert_eq!(output::sanitize(UPDATE_PROGRESS), UPDATE_PROGRESS);
     }
 
     #[test]

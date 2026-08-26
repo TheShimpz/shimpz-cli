@@ -74,7 +74,7 @@
   no independent lifecycle. Reserve `test` for engineering test suites.
 - Top-level commands are limited to CLI-wide or session-wide operations. ADR-0049 admits the complete Local Space
   operations without a redundant `space` noun. The exact current top-level command set is `assistant`, `auth`,
-  `install`, `reset`, `start`, `status`, `stop`, and `upgrade`; help and version flags are syntax, not product
+  `install`, `reset`, `start`, `status`, `stop`, `update`, and `upgrade`; help and version flags are syntax, not product
   resources.
   Expanding this set requires an explicit ontology and authority review plus parser tests that prove the resulting
   closed set. The `space` alias is retired and rejected.

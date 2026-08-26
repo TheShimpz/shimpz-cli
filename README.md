@@ -29,6 +29,7 @@ shimpz assistant publish --visibility public
 shimpz install
 shimpz status
 shimpz start
+shimpz update
 shimpz stop
 shimpz reset
 shimpz upgrade
@@ -59,8 +60,9 @@ provided.
 
 `shimpz install` installs or reconciles the complete Local Space from one atomic,
 digest-pinned release. `shimpz status` summarizes its health, Admin address, and
-release ordinal; `shimpz start` reconciles it, `shimpz stop` stops every owned
-workload without removing data, and `shimpz reset` removes its exact owned state.
+release ordinal; `shimpz start` resumes or repairs it, `shimpz update` applies only a newer atomic release without
+resuming a stopped Space, `shimpz stop` stops every owned workload without removing data, and `shimpz reset` removes
+its exact owned state.
 A stopped Space resumes with `shimpz start`. A corrupt prior installation is removed only after an exact
 interactive `Yes`; benign absence is successful.
 On native Linux, Shimpz creates and verifies a LUKS2-backed storage pool. On
@@ -70,7 +72,7 @@ operating system's disk encryption.
 
 `shimpz upgrade` checks the latest stable GitHub release and replaces a
 standalone executable only when a newer version is available. A Space-managed
-CLI is updated exclusively by the atomic Local release.
+CLI is updated exclusively by the atomic Local release through `shimpz update` or complete reconciliation.
 
 Integration tokens are read from environment variables and never accepted as CLI
 arguments. For example, Integration `cloudflare` uses
