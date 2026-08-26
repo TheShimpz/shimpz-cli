@@ -260,7 +260,7 @@ impl Context {
         let release = self
             .engine
             .resolve_release(exact_release, &self.paths.home)?;
-        if exact_release.is_none() && self.handoff_if_needed(&release, false)? {
+        if exact_release.is_none() && self.handoff_if_needed(&release, installed.as_ref(), false)? {
             return Ok("The release-bound CLI completed the installation.".into());
         }
         if let Some(recommendation) = self
@@ -310,7 +310,7 @@ impl Context {
         };
         if options.release.is_none()
             && !preserve_failed_release
-            && self.handoff_if_needed(&release, options.scheduled)?
+            && self.handoff_if_needed(&release, Some(&installed), options.scheduled)?
         {
             return Ok("The release-bound CLI completed reconciliation.".into());
         }
@@ -764,6 +764,17 @@ impl Context {
     }
 
     fn handoff_if_needed(
+        &self,
+        release: &ResolvedRelease,
+        installed: Option<&Installed>,
+        scheduled: bool,
+    ) -> Result<bool, String> {
+        admit_before_handoff(release, installed, || {
+            self.handoff_admitted_release(release, scheduled)
+        })
+    }
+
+    fn handoff_admitted_release(
         &self,
         release: &ResolvedRelease,
         scheduled: bool,
@@ -1564,13 +1575,21 @@ fn validate_forward_release(
     let Some(installed) = installed else {
         return Ok(());
     };
-    if release.metadata.ordinal < installed.ordinal
-        || (release.metadata.ordinal == installed.ordinal
-            && release.reference != installed.release_ref)
-    {
+    let same_reference = release.reference == installed.release_ref;
+    let same_ordinal = release.metadata.ordinal == installed.ordinal;
+    if release.metadata.ordinal < installed.ordinal || same_reference != same_ordinal {
         return Err("the Local release channel moved backward or became ambiguous".into());
     }
     Ok(())
+}
+
+fn admit_before_handoff<T>(
+    release: &ResolvedRelease,
+    installed: Option<&Installed>,
+    handoff: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    validate_forward_release(release, installed)?;
+    handoff()
 }
 
 fn expected_cli_hash(release: &ResolvedRelease, profile: HostProfile) -> &str {
@@ -2123,7 +2142,29 @@ mod tests {
         assert!(validate_forward_release(&release(2, 'b'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_err());
         assert!(validate_forward_release(&release(2, 'c'), Some(&installed)).is_err());
+        assert!(validate_forward_release(&release(3, 'b'), Some(&installed)).is_err());
         assert!(validate_forward_release(&release(1, 'a'), None).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_invalid_release_before_cli_handoff() {
+        let installed = Installed {
+            space_id: "space-0123456789abcdef01234567".into(),
+            release_ref: release(2, 'b').reference,
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
+            ordinal: 2,
+            port: 7777,
+        };
+        for invalid in [release(1, 'a'), release(2, 'c'), release(3, 'b')] {
+            let mut called = false;
+            let outcome = admit_before_handoff(&invalid, Some(&installed), || {
+                called = true;
+                Ok(())
+            });
+
+            assert!(outcome.is_err());
+            assert!(!called);
+        }
     }
 
     #[test]
