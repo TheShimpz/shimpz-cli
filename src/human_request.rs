@@ -12,6 +12,7 @@ const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "desc
 pub(crate) enum ActionResponse {
     Result(Value),
     Request(HumanRequest),
+    StoredInputRejected(String),
 }
 
 pub(crate) struct HumanRequest {
@@ -37,7 +38,27 @@ pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
         Some("request") if exact_fields(object, &["type", "request"]) => {
             parse_request(object.get("request")).map(ActionResponse::Request)
         }
+        Some("stored_input_rejected")
+            if exact_fields(object, &["type", "stored_input"])
+                && object
+                    .get("stored_input")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_stored_input_id) =>
+        {
+            Ok(ActionResponse::StoredInputRejected(
+                object["stored_input"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        }
         _ => Err("Python SDK response is invalid".into()),
+    }
+}
+
+impl HumanRequest {
+    pub(crate) fn contains_secret_input(&self) -> bool {
+        self.kind == "input:password"
     }
 }
 
@@ -126,7 +147,24 @@ fn valid_request_fields(fields: &Map<String, Value>, kind: &str) -> bool {
         }
         _ => return false,
     }
+    if kind == "input:password" && fields.contains_key("stored_input") {
+        expected.insert("stored_input");
+    }
     fields.keys().map(String::as_str).collect::<HashSet<_>>() == expected
+        && fields
+            .get("stored_input")
+            .is_none_or(|value| value.as_str().is_some_and(valid_stored_input_id))
+}
+
+fn valid_stored_input_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !bytes.windows(2).any(|pair| pair == b"--")
 }
 
 fn confirm(prompt: &str) -> Result<bool, String> {
@@ -262,6 +300,42 @@ mod tests {
             );
             let parsed = parse_response(&source).expect("authentication request");
             assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == kind));
+        }
+    }
+
+    #[test]
+    fn parses_only_canonical_stored_input_password_requests() {
+        let source = r#"{"type":"request","request":{"kind":"input:password","ordinal":1,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"WhatsApp access token","description":"Enter the token.","label":"Meta access token","required":true,"placeholder":"","min_length":1,"max_length":1024,"stored_input":"whatsapp-token"}}"#;
+        let parsed = parse_response(source).expect("stored input password request");
+        assert!(
+            matches!(parsed, ActionResponse::Request(request) if request.contains_secret_input())
+        );
+
+        for stored_input in ["", "Whatsapp_Token", "a--b", &"a".repeat(65)] {
+            let invalid = source.replace("whatsapp-token", stored_input);
+            assert!(
+                parse_response(&invalid).is_err(),
+                "stored input: {stored_input}"
+            );
+        }
+        assert!(parse_response(&source.replace("input:password", "input:text")).is_err());
+    }
+
+    #[test]
+    fn parses_only_the_closed_stored_input_rejection_terminal() {
+        let parsed =
+            parse_response(r#"{"type":"stored_input_rejected","stored_input":"whatsapp-token"}"#)
+                .expect("stored input rejection");
+        assert!(matches!(
+            parsed,
+            ActionResponse::StoredInputRejected(stored_input) if stored_input == "whatsapp-token"
+        ));
+        for invalid in [
+            r#"{"type":"stored_input_rejected"}"#,
+            r#"{"type":"stored_input_rejected","stored_input":"Whatsapp_Token"}"#,
+            r#"{"type":"stored_input_rejected","stored_input":"whatsapp-token","extra":true}"#,
+        ] {
+            assert!(parse_response(invalid).is_err());
         }
     }
 

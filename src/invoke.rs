@@ -19,12 +19,16 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     let integration_ids = action_integrations(&contract, action_id)?;
     let integrations = integration_tokens(&integration_ids)?;
     let mut request = request(input, &integrations)?;
+    let mut secret_answered = false;
     for _ in 0..=8 {
         let output = assistant.invoke(action_id, request.to_string().as_bytes())?;
         match parse_response(&output)? {
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
                     .map_err(|_| "Action result is invalid".into());
+            }
+            ActionResponse::Request(_) if secret_answered => {
+                return Err("Action requested human input after a password response".into());
             }
             ActionResponse::Request(frame) => {
                 let response = answer(&frame)?;
@@ -36,6 +40,10 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
                     .as_array_mut()
                     .ok_or_else(|| "Action invocation is invalid".to_owned())?
                     .push(response);
+                secret_answered = frame.contains_secret_input();
+            }
+            ActionResponse::StoredInputRejected(stored_input) => {
+                return Err(format!("Action rejected Stored Input {stored_input}"));
             }
         }
     }
@@ -106,7 +114,11 @@ fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Val
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
-    Ok(serde_json::json!({ "input": value, "integrations": integrations }))
+    Ok(serde_json::json!({
+        "input": value,
+        "integrations": integrations,
+        "stored_inputs": {}
+    }))
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -210,7 +222,8 @@ mod tests {
             ),
             Ok(serde_json::json!({
                 "input": {"zone": "example.com"},
-                "integrations": {}
+                "integrations": {},
+                "stored_inputs": {}
             }))
         );
     }
