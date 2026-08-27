@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io;
 
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
 use crate::output;
 
@@ -69,10 +70,13 @@ pub(crate) fn answer(request: &HumanRequest) -> Result<Value, String> {
         "approval" => Value::Bool(confirm("Approve this action? [y/N]")?),
         "input:text" | "input:phone" => Value::String(line("Enter the requested value:")?),
         "input:textarea" => Value::String(textarea()?),
-        "input:password" => Value::String(
-            rpassword::prompt_password("response: ")
-                .map_err(|_| "Human request input is unavailable")?,
-        ),
+        "input:password" => {
+            let secret = Zeroizing::new(
+                rpassword::prompt_password("response: ")
+                    .map_err(|_| "Human request input is unavailable")?,
+            );
+            Value::String(secret.as_str().to_owned())
+        }
         "input:select" | "input:choice" => Value::String(select(request)?),
         "input:choices" => Value::Array(choices(request)?),
         kind if kind.starts_with("auth:") => {

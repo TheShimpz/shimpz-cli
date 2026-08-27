@@ -2,16 +2,78 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use serde_json::Value;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::args::Input;
 use crate::human_request::{ActionResponse, answer, parse_response};
 use crate::python;
 
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
+const MAX_INVOCATION_BYTES: usize = 512 * 1_024;
+
+struct Invocation(Value);
+
+impl Invocation {
+    fn push_response(&mut self, response: Value) -> Result<(), String> {
+        self.0
+            .as_object_mut()
+            .ok_or_else(|| "Action invocation is invalid".to_owned())?
+            .entry("responses")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| "Action invocation is invalid".to_owned())?
+            .push(response);
+        Ok(())
+    }
+
+    fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, String> {
+        let mut counter = ByteCounter::default();
+        serde_json::to_writer(&mut counter, &self.0)
+            .map_err(|_| "Action invocation is invalid".to_owned())?;
+        if counter.0 > MAX_INVOCATION_BYTES {
+            return Err("Action invocation is outside the accepted size".into());
+        }
+        let mut encoded = Zeroizing::new(Vec::with_capacity(counter.0));
+        serde_json::to_writer(&mut *encoded, &self.0)
+            .map_err(|_| "Action invocation is invalid".to_owned())?;
+        Ok(encoded)
+    }
+}
+
+impl Drop for Invocation {
+    fn drop(&mut self) {
+        // The release profile aborts on panic, so this protects normal returns and
+        // handled errors only. The Python bridge retains its own unavoidable copy.
+        zeroize_strings(&mut self.0);
+    }
+}
+
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(buffer.len());
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn zeroize_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => text.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_strings),
+        Value::Object(values) => values.values_mut().for_each(zeroize_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
 
 pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
@@ -21,7 +83,8 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     let mut request = request(input, &integrations)?;
     let mut secret_answered = false;
     for _ in 0..=8 {
-        let output = assistant.invoke(action_id, request.to_string().as_bytes())?;
+        let serialized = request.serialized()?;
+        let output = assistant.invoke(action_id, serialized.as_slice())?;
         match parse_response(&output)? {
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
@@ -32,14 +95,7 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
             }
             ActionResponse::Request(frame) => {
                 let response = answer(&frame)?;
-                request
-                    .as_object_mut()
-                    .ok_or_else(|| "Action invocation is invalid".to_owned())?
-                    .entry("responses")
-                    .or_insert_with(|| Value::Array(Vec::new()))
-                    .as_array_mut()
-                    .ok_or_else(|| "Action invocation is invalid".to_owned())?
-                    .push(response);
+                request.push_response(response)?;
                 secret_answered = frame.contains_secret_input();
             }
             ActionResponse::StoredInputRejected(stored_input) => {
@@ -107,18 +163,18 @@ fn integration_variable(integration_id: &str) -> String {
     format!("SHIMPZ_INTEGRATION_{suffix}")
 }
 
-fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Value, String> {
+fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Invocation, String> {
     let raw = read_input(input)?;
     let value: Value =
         serde_json::from_str(&raw).map_err(|_| "--input must be a JSON object".to_owned())?;
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
-    Ok(serde_json::json!({
+    Ok(Invocation(serde_json::json!({
         "input": value,
         "integrations": integrations,
         "stored_inputs": {}
-    }))
+    })))
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -215,22 +271,66 @@ mod tests {
     #[test]
     fn preserves_json_for_strict_sdk_parsing() {
         let integrations = BTreeMap::new();
+        let invocation = request(
+            &Input::Inline(r#"{"zone":"example.com"}"#.into()),
+            &integrations,
+        )
+        .expect("valid invocation");
         assert_eq!(
-            request(
-                &Input::Inline(r#"{"zone":"example.com"}"#.into()),
-                &integrations
-            ),
-            Ok(serde_json::json!({
+            invocation.0,
+            serde_json::json!({
                 "input": {"zone": "example.com"},
                 "integrations": {},
                 "stored_inputs": {}
-            }))
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_into_a_zeroizing_bounded_buffer() {
+        let invocation = request(
+            &Input::Inline(r#"{"zone":"example.com"}"#.into()),
+            &BTreeMap::new(),
+        )
+        .expect("valid invocation");
+
+        let serialized: Zeroizing<Vec<u8>> =
+            invocation.serialized().expect("bounded serialization");
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&serialized).expect("serialized invocation"),
+            invocation.0
+        );
+        assert!(serialized.len() <= MAX_INVOCATION_BYTES);
+    }
+
+    #[test]
+    fn traverses_every_nested_invocation_string_for_zeroization() {
+        let mut invocation = serde_json::json!({
+            "input": {"message": "private message", "nested": ["private token", 7]},
+            "integrations": {"cloudflare": "private integration"},
+            "stored_inputs": {},
+            "active": true
+        });
+
+        zeroize_strings(&mut invocation);
+
+        assert_eq!(
+            invocation,
+            serde_json::json!({
+                "input": {"message": "", "nested": ["", 7]},
+                "integrations": {"cloudflare": ""},
+                "stored_inputs": {},
+                "active": true
+            })
         );
     }
 
     #[test]
     fn rejects_non_object_input() {
-        let error = request(&Input::Inline("42".into()), &BTreeMap::new()).unwrap_err();
+        let error = request(&Input::Inline("42".into()), &BTreeMap::new())
+            .err()
+            .expect("non-object input must fail");
         assert!(
             error.contains("--input"),
             "error must name --input: {error}"
@@ -240,7 +340,9 @@ mod tests {
     #[test]
     fn rejects_key_injecting_input() {
         let injected = r#"{},"integrations":{"attacker":"token"}"#;
-        let error = request(&Input::Inline(injected.into()), &BTreeMap::new()).unwrap_err();
+        let error = request(&Input::Inline(injected.into()), &BTreeMap::new())
+            .err()
+            .expect("injected input must fail");
         assert!(
             error.contains("--input"),
             "error must name --input: {error}"
