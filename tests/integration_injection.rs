@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn fake_uv(name: &str) -> (PathBuf, PathBuf) {
+fn fake_uv(name: &str, fail_invocation: bool) -> (PathBuf, PathBuf) {
     let directory =
         std::env::temp_dir().join(format!("shimpz-integration-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
@@ -17,6 +17,7 @@ fn fake_uv(name: &str) -> (PathBuf, PathBuf) {
     let script = format!(
         r#"#!/bin/sh
 SHIMPZ_INVOKE_STDIN='{}'
+SHIMPZ_FAIL_INVOKE='{}'
 if [ "$1" = "--version" ]; then
   echo "uv 0.11.32"
   exit 0
@@ -32,6 +33,10 @@ if [ "$1" = "run" ]; then
     fi
     if [ "$argument" = "invoke" ]; then
       cat > "$SHIMPZ_INVOKE_STDIN"
+      if [ "$SHIMPZ_FAIL_INVOKE" = "true" ]; then
+        cat "$SHIMPZ_INVOKE_STDIN" >&2
+        exit 1
+      fi
       echo '{{"type":"result","result":{{"token_length":16}}}}'
       exit 0
     fi
@@ -39,7 +44,8 @@ if [ "$1" = "run" ]; then
 fi
 exit 1
 "#,
-        capture.display()
+        capture.display(),
+        fail_invocation
     );
     fs::write(&shim, script).unwrap();
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
@@ -71,7 +77,7 @@ fn run_report(shim: &Path, token: Option<&str>) -> Output {
 
 #[test]
 fn injects_declared_integration_token() {
-    let (shim, capture) = fake_uv("success");
+    let (shim, capture) = fake_uv("success", false);
     let output = run_report(&shim, Some("integration-secret"));
     assert!(
         output.status.success(),
@@ -88,7 +94,7 @@ fn injects_declared_integration_token() {
 
 #[test]
 fn fails_closed_when_integration_variable_is_missing() {
-    let (shim, capture) = fake_uv("missing");
+    let (shim, capture) = fake_uv("missing", false);
     let output = run_report(&shim, None);
     assert!(!output.status.success());
     assert!(
@@ -99,4 +105,17 @@ fn fails_closed_when_integration_variable_is_missing() {
         !capture.exists(),
         "invoke must not run without its Integration"
     );
+}
+
+#[test]
+fn discards_private_invocation_stderr_on_failure() {
+    let (shim, _capture) = fake_uv("private-failure", true);
+
+    let output = run_report(&shim, Some("integration-secret"));
+
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("Action execution failed; review the Action source and tests"));
+    assert!(!diagnostic.contains("integration-secret"));
+    assert!(!diagnostic.contains("integrations"));
 }

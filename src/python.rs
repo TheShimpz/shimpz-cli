@@ -12,6 +12,7 @@ use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.4.1";
+const PRIVATE_BRIDGE_FAILURE: &str = "Action execution failed; review the Action source and tests";
 
 pub(crate) struct Assistant {
     root: PathBuf,
@@ -53,6 +54,7 @@ fn bridge<const SIZE: usize>(
     arguments: [&OsStr; SIZE],
     input: Option<&[u8]>,
 ) -> Result<String, String> {
+    let secret_bearing = input.is_some();
     let mut command = toolchain::uv()?;
     command.env_clear();
     for key in [
@@ -104,8 +106,14 @@ fn bridge<const SIZE: usize>(
         .args(arguments)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if input.is_some() {
+        // The SDK currently redirects Action-authored stdout to stderr. Never capture
+        // that mixed stream while the bridge receives credentials or hidden input.
+        .stderr(if secret_bearing {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        });
+    if secret_bearing {
         command.stdin(Stdio::piped());
     } else {
         command.stdin(Stdio::null());
@@ -122,7 +130,15 @@ fn bridge<const SIZE: usize>(
     if output.status.success() {
         decode(output.stdout)
     } else {
-        Err(diagnostic(&output.stderr, "Assistant validation failed"))
+        Err(bridge_failure(&output.stderr, secret_bearing))
+    }
+}
+
+fn bridge_failure(stderr: &[u8], secret_bearing: bool) -> String {
+    if secret_bearing {
+        PRIVATE_BRIDGE_FAILURE.into()
+    } else {
+        diagnostic(stderr, "Assistant validation failed")
     }
 }
 
@@ -204,11 +220,15 @@ impl Drop for Requirements {
 
 #[cfg(test)]
 mod tests {
-    use super::decode;
+    use super::{PRIVATE_BRIDGE_FAILURE, bridge_failure, decode};
 
     #[test]
     fn rejects_stdout_with_leading_noise() {
-        assert!(decode(b"junk\n{\"ok\":1}\n".to_vec()).is_err());
+        let private_output = "private-output-sentinel";
+        assert_eq!(
+            decode(format!("{private_output}\n{{\"ok\":1}}\n").into_bytes()),
+            Err("Python SDK returned invalid output".to_owned())
+        );
     }
 
     #[test]
@@ -221,6 +241,24 @@ mod tests {
         assert_eq!(
             decode(b"{\"ok\":1}\n".to_vec()),
             Ok("{\"ok\":1}".to_owned())
+        );
+    }
+
+    #[test]
+    fn discards_secret_bearing_bridge_diagnostics() {
+        let private_output = b"private-output-sentinel";
+
+        let diagnostic = bridge_failure(private_output, true);
+
+        assert_eq!(diagnostic, PRIVATE_BRIDGE_FAILURE);
+        assert!(!diagnostic.contains("private-output-sentinel"));
+    }
+
+    #[test]
+    fn preserves_non_secret_bridge_diagnostics() {
+        assert_eq!(
+            bridge_failure(b"shimpz: contract failure", false),
+            "contract failure"
         );
     }
 }
