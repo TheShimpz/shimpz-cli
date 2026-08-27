@@ -14,6 +14,8 @@ use crate::python;
 
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 const MAX_INVOCATION_BYTES: usize = 512 * 1_024;
+const MIN_PROTECTED_VALUE_CHARACTERS: usize = 8;
+const MAX_SECRET_INSPECTION_DEPTH: usize = 32;
 
 struct Invocation(Value);
 
@@ -41,6 +43,42 @@ impl Invocation {
         serde_json::to_writer(&mut *encoded, &self.0)
             .map_err(|_| "Action invocation is invalid".to_owned())?;
         Ok(encoded)
+    }
+
+    fn response_exposes_secret(&self, response: &Value) -> bool {
+        let secrets = self.protected_values();
+        !secrets.is_empty() && contains_secret(response, &secrets, 0)
+    }
+
+    fn protected_values(&self) -> Vec<&str> {
+        let Some(invocation) = self.0.as_object() else {
+            return Vec::new();
+        };
+        let mut secrets = Vec::new();
+        for field in ["integrations", "stored_inputs"] {
+            secrets.extend(
+                invocation
+                    .get(field)
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flat_map(|values| values.values())
+                    .filter_map(Value::as_str)
+                    .filter(|value| protected_value(value)),
+            );
+        }
+        secrets.extend(
+            invocation
+                .get("responses")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|response| {
+                    response.get("kind").and_then(Value::as_str) == Some("input:password")
+                })
+                .filter_map(|response| response.get("value").and_then(Value::as_str))
+                .filter(|value| protected_value(value)),
+        );
+        secrets
     }
 }
 
@@ -75,6 +113,33 @@ fn zeroize_strings(value: &mut Value) {
     }
 }
 
+fn protected_value(value: &str) -> bool {
+    // Local creators commonly use short placeholders. Team runtime values are provider-issued,
+    // so the CLI deliberately applies this floor only to its additional defense-in-depth scan.
+    value.chars().count() >= MIN_PROTECTED_VALUE_CHARACTERS
+}
+
+fn contains_secret(value: &Value, secrets: &[&str], depth: usize) -> bool {
+    if depth > MAX_SECRET_INSPECTION_DEPTH {
+        return true;
+    }
+    match value {
+        Value::String(text) => secrets.iter().any(|secret| text.contains(secret)),
+        Value::Array(values) => values
+            .iter()
+            .any(|item| contains_secret(item, secrets, depth + 1)),
+        Value::Object(values) => values.iter().any(|(key, item)| {
+            contains_secret_text(key, secrets, depth + 1)
+                || contains_secret(item, secrets, depth + 1)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn contains_secret_text(text: &str, secrets: &[&str], depth: usize) -> bool {
+    depth > MAX_SECRET_INSPECTION_DEPTH || secrets.iter().any(|secret| text.contains(secret))
+}
+
 pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
     let contract = assistant.contract()?;
@@ -85,6 +150,11 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     for _ in 0..=8 {
         let serialized = request.serialized()?;
         let output = assistant.invoke(action_id, serialized.as_slice())?;
+        let response_value: Value = serde_json::from_str(&output)
+            .map_err(|_| "Python SDK response is invalid".to_owned())?;
+        if request.response_exposes_secret(&response_value) {
+            return Err("Action response exposes private input".into());
+        }
         match parse_response(&output)? {
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
@@ -324,6 +394,87 @@ mod tests {
                 "active": true
             })
         );
+    }
+
+    #[test]
+    fn rejects_private_values_in_nested_response_arrays_and_keys() {
+        let invocation = Invocation(serde_json::json!({
+            "input": {},
+            "integrations": {"cloudflare": "integration-secret"},
+            "stored_inputs": {},
+            "responses": []
+        }));
+
+        assert_private(
+            &invocation,
+            &serde_json::json!({"result": ["prefix-integration-secret-suffix"]}),
+        );
+        assert_private(
+            &invocation,
+            &serde_json::json!({"integration-secret-key": "value"}),
+        );
+        assert_private(
+            &invocation,
+            &serde_json::json!({"type": "request", "request": {"title": "integration-secret"}}),
+        );
+        assert!(!invocation.response_exposes_secret(&serde_json::json!({"result": "safe"})));
+    }
+
+    #[test]
+    fn recomputes_password_protection_after_each_response() {
+        let mut invocation = Invocation(serde_json::json!({
+            "input": {},
+            "integrations": {},
+            "stored_inputs": {}
+        }));
+        let result = serde_json::json!({"result": "typed-password"});
+        assert!(!invocation.response_exposes_secret(&result));
+
+        invocation
+            .push_response(serde_json::json!({
+                "kind": "input:password",
+                "ordinal": 0,
+                "fingerprint": "a".repeat(64),
+                "value": "typed-password"
+            }))
+            .expect("password response");
+
+        assert!(invocation.response_exposes_secret(&result));
+    }
+
+    #[test]
+    fn bounds_secret_inspection_and_ignores_short_placeholders() {
+        let short = Invocation(serde_json::json!({
+            "input": {},
+            "integrations": {"provider": "test"},
+            "stored_inputs": {"future": ""}
+        }));
+        assert!(!short.response_exposes_secret(&serde_json::json!({"result": "test"})));
+
+        let protected = Invocation(serde_json::json!({
+            "input": {},
+            "integrations": {"provider": "12345678"},
+            "stored_inputs": {}
+        }));
+        let at_limit = nested_array(Value::String("safe".into()), MAX_SECRET_INSPECTION_DEPTH);
+        let beyond_limit = nested_array(
+            Value::String("safe".into()),
+            MAX_SECRET_INSPECTION_DEPTH + 1,
+        );
+        assert!(!protected.response_exposes_secret(&at_limit));
+        assert!(protected.response_exposes_secret(&beyond_limit));
+        assert!(protected.response_exposes_secret(&Value::String("12345678".into())));
+    }
+
+    fn assert_private(invocation: &Invocation, response: &Value) {
+        assert!(invocation.response_exposes_secret(response));
+    }
+
+    fn nested_array(mut value: Value, depth: usize) -> Value {
+        for _ in 0..depth {
+            value = Value::Array(vec![value]);
+        }
+        value
     }
 
     #[test]
