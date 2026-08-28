@@ -52,6 +52,7 @@ pub(crate) struct SourcePackage {
     pub(crate) bytes: Vec<u8>,
     pub(crate) digest: String,
     pub(crate) manifest: Vec<u8>,
+    pub(crate) pyproject: Vec<u8>,
     pub(crate) excluded_roots: Vec<String>,
 }
 
@@ -79,7 +80,10 @@ impl std::fmt::Display for Error {
 
 pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
     let (mut entries, excluded_roots) = collect(root).map_err(|error| error.to_string())?;
-    let manifest = snapshot_manifest(&mut entries).map_err(|error| error.to_string())?;
+    let manifest =
+        snapshot_required(&mut entries, "shimpz.toml").map_err(|error| error.to_string())?;
+    let pyproject =
+        snapshot_required(&mut entries, "pyproject.toml").map_err(|error| error.to_string())?;
     snapshot_icon(&mut entries).map_err(|error| error.to_string())?;
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
@@ -87,6 +91,7 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         bytes,
         digest,
         manifest,
+        pyproject,
         excluded_roots,
     })
 }
@@ -222,10 +227,10 @@ fn validate_ihdr(ihdr: &[u8], palette_before_idat: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn snapshot_manifest(entries: &mut [InputEntry]) -> Result<Vec<u8>, Error> {
+fn snapshot_required(entries: &mut [InputEntry], path: &str) -> Result<Vec<u8>, Error> {
     let entry = entries
         .iter_mut()
-        .find(|entry| entry.path == "shimpz.toml")
+        .find(|entry| entry.path == path)
         .ok_or_else(|| Error::new("required_file_missing"))?;
     if entry.kind != EntryKind::RegularFile {
         return reject("invalid_entry");

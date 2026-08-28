@@ -82,6 +82,9 @@ pub(crate) enum AssistantCommand {
         action: String,
         input: Input,
     },
+    Stage {
+        project: PathBuf,
+    },
     Publish {
         project: PathBuf,
         visibility: PublicationVisibility,
@@ -282,6 +285,7 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
         "develop" => parse_assistant_develop(rest),
         "check" => parse_assistant_check(rest),
         "run" => parse_assistant_run(rest),
+        "stage" => parse_assistant_stage(rest),
         "publish" => parse_assistant_publish(rest),
         "install" => parse_assistant_install(rest),
         _ => Err("unknown assistant operation".into()),
@@ -395,9 +399,19 @@ fn parse_assistant_check(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
         return Ok(Invocation::Help(Topic::AssistantCheck));
     }
-    let project = project_option(arguments)?;
+    let project = project_option(arguments, "check")?;
     Ok(Invocation::Execute(Command::Assistant(
         AssistantCommand::Check { project },
+    )))
+}
+
+fn parse_assistant_stage(arguments: &[String]) -> Result<Invocation, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Invocation::Help(Topic::AssistantStage));
+    }
+    let project = project_option(arguments, "stage")?;
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Stage { project },
     )))
 }
 
@@ -522,12 +536,14 @@ fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
     )))
 }
 
-fn project_option(arguments: &[String]) -> Result<PathBuf, String> {
+fn project_option(arguments: &[String], operation: &str) -> Result<PathBuf, String> {
     match arguments {
         [] => Ok(PathBuf::from(".")),
         [option, value] if option == "--project" => Ok(PathBuf::from(value)),
         [option] if option == "--project" => Err("--project requires a value".into()),
-        _ => Err("assistant check accepts only --project <path>".into()),
+        _ => Err(format!(
+            "assistant {operation} accepts only --project <path>"
+        )),
     }
 }
 
@@ -590,6 +606,30 @@ mod tests {
                     project: PathBuf::from(".")
                 }
             )))
+        );
+    }
+
+    #[test]
+    fn parses_local_stage_with_an_optional_project() {
+        assert_eq!(
+            parse(strings(&["assistant", "stage"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Stage {
+                    project: PathBuf::from(".")
+                }
+            )))
+        );
+        assert_eq!(
+            parse(strings(&["assistant", "stage", "--project", "whatsapp"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Stage {
+                    project: PathBuf::from("whatsapp")
+                }
+            )))
+        );
+        assert_eq!(
+            parse(strings(&["assistant", "stage", "--team", "team_1"])),
+            Err("assistant stage accepts only --project <path>".into())
         );
     }
 
@@ -1040,6 +1080,7 @@ mod tests {
             "shimpz assistant develop",
             "shimpz assistant check",
             "shimpz assistant run",
+            "shimpz assistant stage",
             "shimpz assistant publish",
             "shimpz assistant install",
         ] {
@@ -1081,6 +1122,7 @@ mod tests {
             ),
             (&["assistant", "check", "--help"][..], Topic::AssistantCheck),
             (&["assistant", "run", "--help"][..], Topic::AssistantRun),
+            (&["assistant", "stage", "--help"][..], Topic::AssistantStage),
             (
                 &["assistant", "publish", "--help"][..],
                 Topic::AssistantPublish,

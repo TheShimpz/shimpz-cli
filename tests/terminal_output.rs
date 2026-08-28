@@ -26,6 +26,7 @@ fn help_exposes_the_resource_first_assistant_surface() {
 
     assert!(output.status.success());
     assert!(help.contains("shimpz assistant run <action-id>"));
+    assert!(help.contains("shimpz assistant stage [--project <path>]"));
     assert!(help.contains("shimpz assistant install <source-digest>"));
     assert!(!help.contains("shimpz test"));
     assert!(!help.contains("shimpz install assistant"));
@@ -49,8 +50,8 @@ fn bare_command_prints_a_task_oriented_manual() {
 }
 
 #[test]
-fn each_command_prints_its_own_help() {
-    for (arguments, expected_heading, expected_usage) in [
+fn each_assistant_command_prints_its_own_help() {
+    assert_command_help(&[
         (
             &["assistant", "--help"][..],
             "shimpz assistant\n",
@@ -77,6 +78,11 @@ fn each_command_prints_its_own_help() {
             "shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]",
         ),
         (
+            &["assistant", "stage", "--help"][..],
+            "shimpz assistant stage\n",
+            "shimpz assistant stage [--project <path>]",
+        ),
+        (
             &["assistant", "publish", "--help"][..],
             "shimpz assistant publish\n",
             "shimpz assistant publish --visibility <private|public> [--project <path>]",
@@ -86,6 +92,12 @@ fn each_command_prints_its_own_help() {
             "shimpz assistant install\n",
             "shimpz assistant install <source-digest> [--team <team-id>]",
         ),
+    ]);
+}
+
+#[test]
+fn each_account_and_space_command_prints_its_own_help() {
+    assert_command_help(&[
         (
             &["auth", "--help"][..],
             "shimpz auth\n",
@@ -129,19 +141,23 @@ fn each_command_prints_its_own_help() {
             "shimpz upgrade\n",
             "shimpz upgrade",
         ),
-    ] {
+    ]);
+}
+
+fn assert_command_help(cases: &[(&[&str], &str, &str)]) {
+    for (arguments, expected_heading, expected_usage) in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
-            .args(arguments)
+            .args(*arguments)
             .output()
             .unwrap();
         let help = stdout(&output);
 
         assert!(output.status.success(), "arguments: {arguments:?}");
         assert!(
-            help.starts_with(expected_heading),
+            help.starts_with(*expected_heading),
             "arguments: {arguments:?}"
         );
-        assert!(help.contains(expected_usage), "arguments: {arguments:?}");
+        assert!(help.contains(*expected_usage), "arguments: {arguments:?}");
         assert!(
             !help.contains("Common workflows:"),
             "arguments: {arguments:?}"

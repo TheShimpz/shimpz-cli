@@ -15,6 +15,7 @@ mod publish;
 mod python;
 mod source_package;
 mod space;
+mod stage;
 mod toolchain;
 mod upgrade;
 mod ustar;
@@ -67,6 +68,9 @@ fn run(command: &Command) -> ExitCode {
             action,
             input,
         }) => (invoke::run(project, action, input), Presentation::Data),
+        Command::Assistant(AssistantCommand::Stage { project }) => {
+            (stage::run(project), Presentation::Success)
+        }
         Command::Assistant(AssistantCommand::Publish {
             project,
             visibility,

@@ -817,7 +817,11 @@ fn reset_capability_arguments(
     arguments
 }
 
-fn validate_endpoint(docker: &Path, profile: HostProfile, paths: &Paths) -> Result<(), String> {
+pub(crate) fn validate_endpoint(
+    docker: &Path,
+    profile: HostProfile,
+    paths: &Paths,
+) -> Result<(), String> {
     let configured = std::env::var_os("DOCKER_HOST");
     if profile != HostProfile::Linux && configured.is_some() {
         return Err("DOCKER_HOST cannot select the managed Local Docker engine".into());

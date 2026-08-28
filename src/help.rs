@@ -8,6 +8,7 @@ pub(crate) enum Topic {
     AssistantDevelop,
     AssistantCheck,
     AssistantRun,
+    AssistantStage,
     AssistantPublish,
     AssistantInstall,
     Auth,
@@ -25,13 +26,14 @@ pub(crate) enum Topic {
 
 impl Topic {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Root,
         Self::Assistant,
         Self::AssistantNew,
         Self::AssistantDevelop,
         Self::AssistantCheck,
         Self::AssistantRun,
+        Self::AssistantStage,
         Self::AssistantPublish,
         Self::AssistantInstall,
         Self::Auth,
@@ -55,6 +57,7 @@ impl Topic {
             Self::AssistantDevelop => ASSISTANT_DEVELOP,
             Self::AssistantCheck => ASSISTANT_CHECK,
             Self::AssistantRun => ASSISTANT_RUN,
+            Self::AssistantStage => ASSISTANT_STAGE,
             Self::AssistantPublish => ASSISTANT_PUBLISH,
             Self::AssistantInstall => ASSISTANT_INSTALL,
             Self::Auth => AUTH,
@@ -97,6 +100,8 @@ Assistant development:
                                          Validate the project and its Actions.
   shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]
                                          Run one Action locally.
+  shimpz assistant stage [--project <path>]
+                                         Stage an unpublished snapshot for Local Admin.
   shimpz assistant publish --visibility <private|public> [--project <path>]
                                          Publish an immutable Assistant release.
   shimpz assistant install <source-digest> [--team <team-id>]
@@ -139,6 +144,7 @@ Operations:
                                          Develop it with a supported coding agent.
   check [--project <path>]               Validate the project and its Actions.
   run <action-id> [options]              Run one Action locally.
+  stage [--project <path>]               Stage an unpublished Local snapshot.
   publish --visibility <private|public> [--project <path>]
                                          Publish an immutable release.
   install <source-digest> [--team <team-id>]
@@ -205,6 +211,20 @@ Options:
   --input <json>                         Inline JSON input. Use '-' to read from stdin.
   --input-file <path>                    Read JSON input from a file.
   --project <path>                       Project directory. Defaults to the current directory.
+";
+
+const ASSISTANT_STAGE: &str = "\
+shimpz assistant stage
+
+Build one unpublished Assistant snapshot in the local Docker daemon.
+
+Usage:
+  shimpz assistant stage [--project <path>]
+
+Options:
+  --project <path>                       Project directory. Defaults to the current directory.
+
+The command needs no Shimpz Account. Finish installation from authenticated Local Admin.
 ";
 
 const ASSISTANT_PUBLISH: &str = "\

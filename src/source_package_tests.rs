@@ -118,6 +118,7 @@ fn collects_only_publishable_roots_from_disk() {
     );
     assert_eq!(package.excluded_roots, ["README.md"]);
     assert_eq!(package.manifest, b"spec = 1\n");
+    assert_eq!(package.pyproject, b"[project]\nname = \"hello\"\n");
     assert_eq!(package.bytes.len() % 512, 0);
     assert_eq!(
         source_package::exclusion_warning(&package).as_deref(),
