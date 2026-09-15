@@ -336,16 +336,28 @@ fn collect_directory(
         let children = fs::read_dir(current).map_err(|_| Error::new("invalid_entry"))?;
         for child in children {
             let child = child.map_err(|_| Error::new("invalid_entry"))?;
+            let child_path = child.path();
             let metadata =
-                fs::symlink_metadata(child.path()).map_err(|_| Error::new("invalid_entry"))?;
+                fs::symlink_metadata(&child_path).map_err(|_| Error::new("invalid_entry"))?;
+            if is_generated_python_artifact(&child_path, &metadata) {
+                continue;
+            }
             if metadata.is_dir() {
-                pending.push(child.path());
+                pending.push(child_path);
             } else {
-                collect_entry_with_metadata(root, &child.path(), &metadata, entries)?;
+                collect_entry_with_metadata(root, &child_path, &metadata, entries)?;
             }
         }
     }
     Ok(())
+}
+
+fn is_generated_python_artifact(path: &Path, metadata: &Metadata) -> bool {
+    (metadata.is_dir() && path.file_name().is_some_and(|name| name == "__pycache__"))
+        || (metadata.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| matches!(extension.to_str(), Some("pyc" | "pyo" | "pyd"))))
 }
 
 fn collect_entry(root: &Path, path: &Path, entries: &mut Vec<InputEntry>) -> Result<(), Error> {
