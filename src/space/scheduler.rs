@@ -230,7 +230,7 @@ fn systemd_service(paths: &Paths) -> Result<String, String> {
 }
 
 fn systemd_timer() -> &'static str {
-    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnBootSec=5m\nOnUnitActiveSec=30m\nRandomizedDelaySec=10m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
+    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=5m\nOnUnitActiveSec=30m\nRandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n"
 }
 
 fn launch_agent(paths: &Paths) -> Result<String, String> {
@@ -569,6 +569,13 @@ mod tests {
             service.contains("ExecStart=\"/home/Ada Space/.shimpz/bin/shimpz\" start --scheduled")
         );
         assert!(!service.contains("sh -c"));
+        let timer = systemd_timer();
+        assert!(timer.contains("OnActiveSec=5m"));
+        assert!(timer.contains("OnUnitActiveSec=30m"));
+        assert!(timer.contains("RandomizedDelaySec=10m"));
+        assert!(timer.contains("WantedBy=timers.target"));
+        assert!(!timer.contains("OnBootSec="));
+        assert!(!timer.contains("Persistent="));
         let plist = launch_agent(&paths).unwrap();
         assert!(plist.contains("<string>/home/Ada Space/.shimpz/bin/shimpz</string>"));
         assert!(plist.contains("<string>--scheduled</string>"));
