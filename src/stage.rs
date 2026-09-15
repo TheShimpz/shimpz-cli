@@ -543,7 +543,7 @@ mod tests {
         }
         assert!(
             validate_dependency_sources(
-                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.4.1\", \"httpx>=0.28\"]\n"
+                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.4.2\", \"httpx>=0.28\"]\n"
             )
             .is_ok()
         );

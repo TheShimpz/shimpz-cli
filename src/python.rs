@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
-const SDK_REQUIREMENT: &str = "shimpz==0.4.1";
+const SDK_REQUIREMENT: &str = "shimpz==0.4.2";
 const PRIVATE_BRIDGE_FAILURE: &str = "Action execution failed; review the Action source and tests";
 
 pub(crate) struct Assistant {
