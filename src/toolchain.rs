@@ -26,7 +26,12 @@ fn strip_untrusted_env(command: &mut Command) {
         .env_remove("UV_FIND_LINKS")
         .env_remove("UV_PYTHON_INSTALL_MIRROR")
         .env_remove("UV_INSECURE_HOST")
-        .env_remove("UV_NATIVE_TLS");
+        .env_remove("UV_NATIVE_TLS")
+        .env_remove("UV_BUILD_CONSTRAINT")
+        .env_remove("UV_CONFIG_FILE")
+        .env_remove("UV_CONSTRAINT")
+        .env_remove("UV_NO_BUILD_ISOLATION")
+        .env_remove("UV_OVERRIDE");
 }
 
 fn managed_uv() -> Result<PathBuf, String> {
@@ -196,6 +201,11 @@ mod tests {
             "UV_PYTHON_INSTALL_MIRROR",
             "UV_INSECURE_HOST",
             "UV_NATIVE_TLS",
+            "UV_BUILD_CONSTRAINT",
+            "UV_CONFIG_FILE",
+            "UV_CONSTRAINT",
+            "UV_NO_BUILD_ISOLATION",
+            "UV_OVERRIDE",
         ] {
             assert!(removed.contains(OsStr::new(key)));
         }
