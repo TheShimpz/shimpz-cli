@@ -16,13 +16,16 @@ use crate::{output, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
-const LOCAL_STAGE_VALUE: &str = "assistant-v1";
+const LOCAL_STAGE_VALUE: &str = "assistant-v2";
 const ASSISTANT_LABEL: &str = "org.shimpz.assistant.id";
+const NAME_LABEL: &str = "org.shimpz.assistant.name";
+const SUMMARY_LABEL: &str = "org.shimpz.assistant.summary";
+const DECLARED_CREATORS_LABEL: &str = "org.shimpz.assistant.declared-creators";
 const SOURCE_LABEL: &str = "org.shimpz.source.digest";
 const VERSION_LABEL: &str = "org.shimpz.assistant.version";
 const BUILD_LABEL: &str = "org.shimpz.local.build.digest";
 const MAX_DOCKER_OUTPUT_BYTES: usize = 32 * 1024;
-const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}";
+const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}";
 
 const ACTION_RUNNER: &str = r#"#!/opt/shimpz/runtime/bin/python3.14
 from __future__ import annotations
@@ -312,6 +315,7 @@ fn validate_image(
     build_digest: &str,
     platform: &str,
 ) -> Result<(), String> {
+    let declared_creators = declared_creators(identity);
     let result = docker_output(
         docker,
         [
@@ -334,6 +338,9 @@ fn validate_image(
                 "[]",
                 LOCAL_STAGE_VALUE,
                 identity.id.as_str(),
+                identity.name.as_str(),
+                identity.summary.as_str(),
+                declared_creators.as_str(),
                 source_digest,
                 identity.version.as_str(),
                 build_digest,
@@ -344,24 +351,37 @@ fn validate_image(
     Ok(())
 }
 
-fn stage_labels<'a>(
-    identity: &'a PublicationIdentity,
-    source_digest: &'a str,
-    build_digest: &'a str,
-) -> BTreeMap<&'static str, &'a str> {
+fn stage_labels(
+    identity: &PublicationIdentity,
+    source_digest: &str,
+    build_digest: &str,
+) -> BTreeMap<&'static str, String> {
     BTreeMap::from([
-        (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE),
-        (ASSISTANT_LABEL, identity.id.as_str()),
-        (SOURCE_LABEL, source_digest),
-        (VERSION_LABEL, identity.version.as_str()),
-        (BUILD_LABEL, build_digest),
+        (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE.into()),
+        (ASSISTANT_LABEL, identity.id.clone()),
+        (NAME_LABEL, identity.name.clone()),
+        (SUMMARY_LABEL, identity.summary.clone()),
+        (DECLARED_CREATORS_LABEL, declared_creators(identity)),
+        (SOURCE_LABEL, source_digest.into()),
+        (VERSION_LABEL, identity.version.clone()),
+        (BUILD_LABEL, build_digest.into()),
     ])
+}
+
+fn declared_creators(identity: &PublicationIdentity) -> String {
+    identity
+        .creators
+        .iter()
+        .take(4)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build_digest(source: &[u8], requirements: &[u8], platform: &str) -> String {
     let mut digest = Sha256::new();
     for value in [
-        b"shimpz-local-stage-v1".as_slice(),
+        b"shimpz-local-stage-v2".as_slice(),
         platform.as_bytes(),
         DOCKERFILE.as_bytes(),
         ACTION_RUNNER.as_bytes(),
@@ -505,17 +525,22 @@ mod tests {
             id: "hello-world".into(),
             version: "1.2.3".into(),
             creators: vec!["@creator-one".into()],
+            name: "Hello world".into(),
+            summary: "A local Assistant snapshot.".into(),
         };
         let digest = format!("sha256:{}", "b".repeat(64));
         let build = format!("sha256:{}", "c".repeat(64));
         assert_eq!(
             stage_labels(&identity, &digest, &build),
             BTreeMap::from([
-                (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE),
-                (ASSISTANT_LABEL, "hello-world"),
-                (SOURCE_LABEL, digest.as_str()),
-                (VERSION_LABEL, "1.2.3"),
-                (BUILD_LABEL, build.as_str()),
+                (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE.into()),
+                (ASSISTANT_LABEL, "hello-world".into()),
+                (NAME_LABEL, "Hello world".into()),
+                (SUMMARY_LABEL, "A local Assistant snapshot.".into()),
+                (DECLARED_CREATORS_LABEL, "@creator-one".into()),
+                (SOURCE_LABEL, digest),
+                (VERSION_LABEL, "1.2.3".into()),
+                (BUILD_LABEL, build),
             ])
         );
     }

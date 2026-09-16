@@ -9,6 +9,8 @@ pub(crate) struct PublicationIdentity {
     pub(crate) id: String,
     pub(crate) version: String,
     pub(crate) creators: Vec<String>,
+    pub(crate) name: String,
+    pub(crate) summary: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,11 +28,20 @@ impl PublicationIdentity {
         if !valid_id(&identity.id)
             || !valid_version(&identity.version)
             || !valid_creators(&identity.creators)
+            || !valid_display_text(&identity.name, 80)
+            || !valid_display_text(&identity.summary, 160)
         {
             return Err("Assistant manifest identity is invalid".into());
         }
         Ok(identity)
     }
+}
+
+fn valid_display_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {
@@ -87,6 +98,7 @@ id = "hello-world"
 version = "1.2.3"
 creators = ["@creator-one", "@creator-two"]
 name = "Hello"
+summary = "A bounded Assistant summary."
 "#;
 
     #[test]
@@ -97,6 +109,8 @@ name = "Hello"
                 id: "hello-world".into(),
                 version: "1.2.3".into(),
                 creators: vec!["@creator-one".into(), "@creator-two".into()],
+                name: "Hello".into(),
+                summary: "A bounded Assistant summary.".into(),
             })
         );
     }
@@ -110,6 +124,7 @@ name = "Hello"
             VALID.replace("1.2.3", "1..3"),
             VALID.replace("@creator-two", "@creator-one"),
             VALID.replace("@creator-two", "@Creator"),
+            VALID.replace("Hello", ""),
         ] {
             assert!(PublicationIdentity::parse(source.as_bytes()).is_err());
         }

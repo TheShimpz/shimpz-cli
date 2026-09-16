@@ -694,6 +694,8 @@ mod tests {
             id: "hello-world".into(),
             version: "0.1.0".into(),
             creators: vec!["@creator-one".into()],
+            name: "Hello world".into(),
+            summary: "A bounded Assistant summary.".into(),
         }
     }
 
