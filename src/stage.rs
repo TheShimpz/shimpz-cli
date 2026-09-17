@@ -127,7 +127,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         output::warning(&message);
     }
     Ok(format!(
-        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nNext: open Local Admin and install this unpublished snapshot for a Team.",
+        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nNext: ask a Local Team for work that needs this Assistant. Chat installs a fresh binding automatically; existing bindings still require an explicit replacement in Admin.",
         identity.id, identity.version, image_id
     ))
 }
