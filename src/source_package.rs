@@ -53,6 +53,7 @@ pub(crate) struct SourcePackage {
     pub(crate) digest: String,
     pub(crate) manifest: Vec<u8>,
     pub(crate) pyproject: Vec<u8>,
+    pub(crate) action_files: Vec<String>,
     pub(crate) excluded_roots: Vec<String>,
 }
 
@@ -85,6 +86,10 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
     let pyproject =
         snapshot_required(&mut entries, "pyproject.toml").map_err(|error| error.to_string())?;
     snapshot_icon(&mut entries).map_err(|error| error.to_string())?;
+    let action_files = entries
+        .iter()
+        .filter_map(|entry| entry.path.strip_prefix("actions/").map(str::to_owned))
+        .collect();
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     Ok(SourcePackage {
@@ -92,6 +97,7 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         digest,
         manifest,
         pyproject,
+        action_files,
         excluded_roots,
     })
 }

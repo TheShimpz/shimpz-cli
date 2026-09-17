@@ -9,14 +9,14 @@ use std::process::{Command, Output, Stdio};
 use sha2::{Digest, Sha256};
 use toml::Value;
 
-use crate::manifest::PublicationIdentity;
+use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
 use crate::{output, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
-const LOCAL_STAGE_VALUE: &str = "assistant-v2";
+const LOCAL_STAGE_VALUE: &str = "assistant-v3";
 const ASSISTANT_LABEL: &str = "org.shimpz.assistant.id";
 const NAME_LABEL: &str = "org.shimpz.assistant.name";
 const SUMMARY_LABEL: &str = "org.shimpz.assistant.summary";
@@ -24,8 +24,15 @@ const DECLARED_CREATORS_LABEL: &str = "org.shimpz.assistant.declared-creators";
 const SOURCE_LABEL: &str = "org.shimpz.source.digest";
 const VERSION_LABEL: &str = "org.shimpz.assistant.version";
 const BUILD_LABEL: &str = "org.shimpz.local.build.digest";
+const ACTIONS_LABEL: &str = "org.shimpz.assistant.actions";
+const INTEGRATIONS_LABEL: &str = "org.shimpz.assistant.integrations";
 const MAX_DOCKER_OUTPUT_BYTES: usize = 32 * 1024;
-const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}";
+const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.actions\"}}\n{{index .Config.Labels \"org.shimpz.assistant.integrations\"}}";
+
+struct DiscoveryProjection {
+    actions: Vec<String>,
+    integrations: Vec<String>,
+}
 
 const ACTION_RUNNER: &str = r#"#!/opt/shimpz/runtime/bin/python3.14
 from __future__ import annotations
@@ -95,6 +102,10 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     output::progress("Collecting the exact Assistant source...");
     let package = source_package::build(project)?;
     let identity = PublicationIdentity::parse(&package.manifest)?;
+    let discovery = DiscoveryProjection {
+        actions: action_ids(&package.action_files)?,
+        integrations: manifest::integration_ids(&package.manifest)?,
+    };
     validate_dependency_sources(&package.pyproject)?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
     prepare_context(context.path(), &package)?;
@@ -110,6 +121,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         &package.digest,
         &build_digest,
         platform,
+        &discovery,
     )?;
     if let Some(message) = source_package::exclusion_warning(&package) {
         output::warning(&message);
@@ -196,6 +208,7 @@ fn stage_image(
     source_digest: &str,
     build_digest: &str,
     platform: &str,
+    discovery: &DiscoveryProjection,
 ) -> Result<String, String> {
     if let Some(image_id) = existing_image(docker, build_digest)? {
         output::progress("Reusing the exact Local Assistant snapshot...");
@@ -206,6 +219,7 @@ fn stage_image(
             source_digest,
             build_digest,
             platform,
+            discovery,
         )?;
         return Ok(image_id);
     }
@@ -217,6 +231,7 @@ fn stage_image(
         source_digest,
         build_digest,
         platform,
+        discovery,
     )?;
     validate_image(
         docker,
@@ -225,6 +240,7 @@ fn stage_image(
         source_digest,
         build_digest,
         platform,
+        discovery,
     )?;
     Ok(image_id)
 }
@@ -236,10 +252,11 @@ fn build_image(
     source_digest: &str,
     build_digest: &str,
     platform: &str,
+    discovery: &DiscoveryProjection,
 ) -> Result<String, String> {
     let image_file = tempfile::NamedTempFile::new()
         .map_err(|_| "Local snapshot image identity file cannot be created")?;
-    let labels = stage_labels(identity, source_digest, build_digest);
+    let labels = stage_labels(identity, source_digest, build_digest, discovery);
     let mut arguments = vec![
         OsString::from("buildx"),
         OsString::from("build"),
@@ -314,6 +331,7 @@ fn validate_image(
     source_digest: &str,
     build_digest: &str,
     platform: &str,
+    discovery: &DiscoveryProjection,
 ) -> Result<(), String> {
     let declared_creators = declared_creators(identity);
     let result = docker_output(
@@ -344,6 +362,8 @@ fn validate_image(
                 source_digest,
                 identity.version.as_str(),
                 build_digest,
+                discovery.actions.join(",").as_str(),
+                discovery.integrations.join(",").as_str(),
             ]
     {
         return Err("the staged image does not match its Local snapshot contract".into());
@@ -355,6 +375,7 @@ fn stage_labels(
     identity: &PublicationIdentity,
     source_digest: &str,
     build_digest: &str,
+    discovery: &DiscoveryProjection,
 ) -> BTreeMap<&'static str, String> {
     BTreeMap::from([
         (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE.into()),
@@ -365,7 +386,28 @@ fn stage_labels(
         (SOURCE_LABEL, source_digest.into()),
         (VERSION_LABEL, identity.version.clone()),
         (BUILD_LABEL, build_digest.into()),
+        (ACTIONS_LABEL, discovery.actions.join(",")),
+        (INTEGRATIONS_LABEL, discovery.integrations.join(",")),
     ])
+}
+
+fn action_ids(files: &[String]) -> Result<Vec<String>, String> {
+    let mut actions = files
+        .iter()
+        .filter_map(|file| file.strip_suffix(".py"))
+        .map(|stem| stem.replace('_', "-"))
+        .collect::<Vec<_>>();
+    actions.sort();
+    if actions.is_empty()
+        || actions.len() > 128
+        || actions
+            .iter()
+            .any(|action| !manifest::valid_action_id(action))
+        || actions.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err("Assistant Action identities are invalid".into());
+    }
+    Ok(actions)
 }
 
 fn declared_creators(identity: &PublicationIdentity) -> String {
@@ -381,7 +423,7 @@ fn declared_creators(identity: &PublicationIdentity) -> String {
 fn build_digest(source: &[u8], requirements: &[u8], platform: &str) -> String {
     let mut digest = Sha256::new();
     for value in [
-        b"shimpz-local-stage-v2".as_slice(),
+        b"shimpz-local-stage-v3".as_slice(),
         platform.as_bytes(),
         DOCKERFILE.as_bytes(),
         ACTION_RUNNER.as_bytes(),
@@ -531,7 +573,15 @@ mod tests {
         let digest = format!("sha256:{}", "b".repeat(64));
         let build = format!("sha256:{}", "c".repeat(64));
         assert_eq!(
-            stage_labels(&identity, &digest, &build),
+            stage_labels(
+                &identity,
+                &digest,
+                &build,
+                &DiscoveryProjection {
+                    actions: vec!["list-items".into(), "send-message".into()],
+                    integrations: vec!["whatsapp".into()],
+                }
+            ),
             BTreeMap::from([
                 (LOCAL_STAGE_LABEL, LOCAL_STAGE_VALUE.into()),
                 (ASSISTANT_LABEL, "hello-world".into()),
@@ -541,8 +591,20 @@ mod tests {
                 (SOURCE_LABEL, digest),
                 (VERSION_LABEL, "1.2.3".into()),
                 (BUILD_LABEL, build),
+                (ACTIONS_LABEL, "list-items,send-message".into()),
+                (INTEGRATIONS_LABEL, "whatsapp".into()),
             ])
         );
+    }
+
+    #[test]
+    fn derives_canonical_action_ids_for_discovery() {
+        assert_eq!(
+            action_ids(&["send_message.py".into(), "list-zones.py".into()]),
+            Ok(vec!["list-zones".into(), "send-message".into()])
+        );
+        assert!(action_ids(&["same_name.py".into(), "same-name.py".into()]).is_err());
+        assert!(action_ids(&[]).is_err());
     }
 
     #[test]
