@@ -15,9 +15,9 @@ use crate::space::{docker, host, paths::Paths};
 use crate::{output, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
-const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
-const LOCAL_STAGE_VALUE: &str = "assistant-v3";
-const ASSISTANT_LABEL: &str = "org.shimpz.assistant.id";
+pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
+pub(crate) const LOCAL_STAGE_VALUE: &str = "assistant-v3";
+pub(crate) const ASSISTANT_LABEL: &str = "org.shimpz.assistant.id";
 const NAME_LABEL: &str = "org.shimpz.assistant.name";
 const SUMMARY_LABEL: &str = "org.shimpz.assistant.summary";
 const DECLARED_CREATORS_LABEL: &str = "org.shimpz.assistant.declared-creators";
@@ -183,11 +183,16 @@ fn compile_requirements(context: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn connect_docker() -> Result<PathBuf, String> {
+    let docker = connect_docker_daemon()?;
+    require_docker_success(&docker, ["buildx", "version"], "Docker Buildx is required")?;
+    Ok(docker)
+}
+
+pub(crate) fn connect_docker_daemon() -> Result<PathBuf, String> {
     let docker = Tool::Docker.resolve()?;
     let profile = host::detect()?;
     let paths = Paths::discover()?;
     docker::validate_endpoint(&docker, profile, &paths)?;
-    require_docker_success(&docker, ["buildx", "version"], "Docker Buildx is required")?;
     require_docker_success(&docker, ["info"], "Docker is unavailable")?;
     Ok(docker)
 }
@@ -483,7 +488,7 @@ fn docker_failure(result: &Output, fallback: &str) -> String {
     )
 }
 
-fn valid_image_id(value: &str) -> bool {
+pub(crate) fn valid_image_id(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest

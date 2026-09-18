@@ -244,6 +244,26 @@ fn rejects_symlinks_inside_publishable_roots() {
     assert_eq!(error, "source package is invalid: special_file");
 }
 
+#[cfg(unix)]
+#[test]
+fn reads_only_a_small_regular_project_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TemporaryDirectory::new();
+    let manifest = directory.path.join("shimpz.toml");
+    fs::write(&manifest, "[shimpz]\nid = \"hello-world\"\n").expect("manifest");
+    assert_eq!(
+        source_package::read_manifest(&directory.path),
+        Ok(b"[shimpz]\nid = \"hello-world\"\n".to_vec())
+    );
+
+    fs::remove_file(&manifest).expect("remove manifest");
+    let target = directory.path.join("target.toml");
+    fs::write(&target, "[shimpz]\n").expect("target");
+    symlink(&target, &manifest).expect("manifest symlink");
+    assert!(source_package::read_manifest(&directory.path).is_err());
+}
+
 fn write_minimum(root: &Path) {
     fs::create_dir(root.join("actions")).expect("actions");
     fs::write(root.join("shimpz.toml"), "spec = 1\n").expect("manifest");

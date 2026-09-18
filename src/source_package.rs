@@ -10,6 +10,7 @@ use crate::ustar;
 
 const MAX_COLLECTED_FILES: usize = 10_000;
 const MAX_ICON_BYTES: u64 = 1_048_576;
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -100,6 +101,21 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         action_files,
         excluded_roots,
     })
+}
+
+pub(crate) fn read_manifest(root: &Path) -> Result<Vec<u8>, String> {
+    let path = root.join("shimpz.toml");
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|_| "Assistant manifest cannot be read safely".to_owned())?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_MANIFEST_BYTES
+        || metadata_has_multiple_links(&metadata)
+    {
+        return Err("Assistant manifest cannot be read safely".into());
+    }
+    read_unchanged_file(&path, metadata.len())
+        .map_err(|_| "Assistant manifest cannot be read safely".into())
 }
 
 fn snapshot_icon(entries: &mut [InputEntry]) -> Result<(), Error> {

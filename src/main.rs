@@ -17,6 +17,7 @@ mod source_package;
 mod space;
 mod stage;
 mod toolchain;
+mod unstage;
 mod upgrade;
 mod ustar;
 
@@ -70,6 +71,9 @@ fn run(command: &Command) -> ExitCode {
         }) => (invoke::run(project, action, input), Presentation::Data),
         Command::Assistant(AssistantCommand::Stage { project }) => {
             (stage::run(project), Presentation::Success)
+        }
+        Command::Assistant(AssistantCommand::Unstage { project }) => {
+            (unstage::run(project), Presentation::Success)
         }
         Command::Assistant(AssistantCommand::Publish {
             project,

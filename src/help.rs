@@ -9,6 +9,7 @@ pub(crate) enum Topic {
     AssistantCheck,
     AssistantRun,
     AssistantStage,
+    AssistantUnstage,
     AssistantPublish,
     AssistantInstall,
     Auth,
@@ -26,7 +27,7 @@ pub(crate) enum Topic {
 
 impl Topic {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::Root,
         Self::Assistant,
         Self::AssistantNew,
@@ -34,6 +35,7 @@ impl Topic {
         Self::AssistantCheck,
         Self::AssistantRun,
         Self::AssistantStage,
+        Self::AssistantUnstage,
         Self::AssistantPublish,
         Self::AssistantInstall,
         Self::Auth,
@@ -58,6 +60,7 @@ impl Topic {
             Self::AssistantCheck => ASSISTANT_CHECK,
             Self::AssistantRun => ASSISTANT_RUN,
             Self::AssistantStage => ASSISTANT_STAGE,
+            Self::AssistantUnstage => ASSISTANT_UNSTAGE,
             Self::AssistantPublish => ASSISTANT_PUBLISH,
             Self::AssistantInstall => ASSISTANT_INSTALL,
             Self::Auth => AUTH,
@@ -102,6 +105,8 @@ Assistant development:
                                          Run one Action locally.
   shimpz assistant stage [--project <path>]
                                          Stage an unpublished snapshot for Local Admin.
+  shimpz assistant unstage [--project <path>]
+                                         Permanently remove its Local snapshots.
   shimpz assistant publish --visibility <private|public> [--project <path>]
                                          Publish an immutable Assistant release.
   shimpz assistant install <source-digest> [--team <team-id>]
@@ -145,6 +150,7 @@ Operations:
   check [--project <path>]               Validate the project and its Actions.
   run <action-id> [options]              Run one Action locally.
   stage [--project <path>]               Stage an unpublished Local snapshot.
+  unstage [--project <path>]             Permanently remove its Local snapshots.
   publish --visibility <private|public> [--project <path>]
                                          Publish an immutable release.
   install <source-digest> [--team <team-id>]
@@ -225,6 +231,20 @@ Options:
   --project <path>                       Project directory. Defaults to the current directory.
 
 The command needs no Shimpz Account. Finish installation from authenticated Local Admin.
+";
+
+const ASSISTANT_UNSTAGE: &str = "\
+shimpz assistant unstage
+
+Permanently remove every Local snapshot staged for one Assistant project.
+
+Usage:
+  shimpz assistant unstage [--project <path>]
+
+Options:
+  --project <path>                       Project directory. Defaults to the current directory.
+
+Uninstall the Assistant from every Local Team first. Run 'shimpz assistant stage' again to use it after removal.
 ";
 
 const ASSISTANT_PUBLISH: &str = "\

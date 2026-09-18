@@ -85,6 +85,9 @@ pub(crate) enum AssistantCommand {
     Stage {
         project: PathBuf,
     },
+    Unstage {
+        project: PathBuf,
+    },
     Publish {
         project: PathBuf,
         visibility: PublicationVisibility,
@@ -286,6 +289,7 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
         "check" => parse_assistant_check(rest),
         "run" => parse_assistant_run(rest),
         "stage" => parse_assistant_stage(rest),
+        "unstage" => parse_assistant_unstage(rest),
         "publish" => parse_assistant_publish(rest),
         "install" => parse_assistant_install(rest),
         _ => Err("unknown assistant operation".into()),
@@ -412,6 +416,16 @@ fn parse_assistant_stage(arguments: &[String]) -> Result<Invocation, String> {
     let project = project_option(arguments, "stage")?;
     Ok(Invocation::Execute(Command::Assistant(
         AssistantCommand::Stage { project },
+    )))
+}
+
+fn parse_assistant_unstage(arguments: &[String]) -> Result<Invocation, String> {
+    if arguments == ["--help"] || arguments == ["-h"] {
+        return Ok(Invocation::Help(Topic::AssistantUnstage));
+    }
+    let project = project_option(arguments, "unstage")?;
+    Ok(Invocation::Execute(Command::Assistant(
+        AssistantCommand::Unstage { project },
     )))
 }
 
@@ -630,6 +644,30 @@ mod tests {
         assert_eq!(
             parse(strings(&["assistant", "stage", "--team", "team_1"])),
             Err("assistant stage accepts only --project <path>".into())
+        );
+    }
+
+    #[test]
+    fn parses_local_unstage_with_an_optional_project() {
+        assert_eq!(
+            parse(strings(&["assistant", "unstage"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Unstage {
+                    project: PathBuf::from(".")
+                }
+            )))
+        );
+        assert_eq!(
+            parse(strings(&["assistant", "unstage", "--project", "whatsapp"])),
+            Ok(Invocation::Execute(Command::Assistant(
+                AssistantCommand::Unstage {
+                    project: PathBuf::from("whatsapp")
+                }
+            )))
+        );
+        assert_eq!(
+            parse(strings(&["assistant", "unstage", "--team", "team_1"])),
+            Err("assistant unstage accepts only --project <path>".into())
         );
     }
 
@@ -1081,6 +1119,7 @@ mod tests {
             "shimpz assistant check",
             "shimpz assistant run",
             "shimpz assistant stage",
+            "shimpz assistant unstage",
             "shimpz assistant publish",
             "shimpz assistant install",
         ] {
@@ -1123,6 +1162,10 @@ mod tests {
             (&["assistant", "check", "--help"][..], Topic::AssistantCheck),
             (&["assistant", "run", "--help"][..], Topic::AssistantRun),
             (&["assistant", "stage", "--help"][..], Topic::AssistantStage),
+            (
+                &["assistant", "unstage", "--help"][..],
+                Topic::AssistantUnstage,
+            ),
             (
                 &["assistant", "publish", "--help"][..],
                 Topic::AssistantPublish,
