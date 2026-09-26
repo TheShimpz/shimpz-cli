@@ -946,16 +946,11 @@ impl Context {
                 .arg(&release.reference)
                 .arg("--candidate");
         }
-        let status = command
-            .stdin(Stdio::null())
-            .status()
-            .map_err(|error| format!("could not start the release-bound CLI: {error}"));
-        let completed = status.is_ok_and(|status| status.success());
-        if !completed {
+        if let Some(reason) = handoff_failure(command.stdin(Stdio::null()).status()) {
             restore_previous_cli(&self.paths.managed_cli, &previous)?;
-            return Err(
-                "the release-bound CLI did not complete; the previous CLI was restored".into(),
-            );
+            return Err(format!(
+                "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
+            ));
         }
         remove_regular_if_present(&previous)?;
         ensure_public_cli(&self.paths)?;
@@ -2183,6 +2178,18 @@ fn remove_backup(backup: Option<Backup>) -> Result<(), String> {
     Ok(())
 }
 
+/// Name why a release-bound CLI run did not succeed; its own diagnostic, if any, precedes this in the log.
+fn handoff_failure(status: std::io::Result<std::process::ExitStatus>) -> Option<String> {
+    match status {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(match status.code() {
+            Some(code) => format!("it exited with status {code}"),
+            None => "it was stopped by a signal".into(),
+        }),
+        Err(error) => Some(format!("it could not start: {error}")),
+    }
+}
+
 fn finish_failed_release_memory(paths: &Paths, preserve: bool) -> Result<(), String> {
     if preserve {
         Ok(())
@@ -2494,6 +2501,29 @@ mod tests {
                 assert!(!stage.contains(name), "{stage}");
             }
         }
+    }
+
+    #[test]
+    fn a_failed_handoff_names_its_exit_status_or_start_error() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(
+            handoff_failure(Ok(std::process::ExitStatus::from_raw(0))),
+            None
+        );
+        assert_eq!(
+            handoff_failure(Ok(std::process::ExitStatus::from_raw(1 << 8))).as_deref(),
+            Some("it exited with status 1")
+        );
+        assert_eq!(
+            handoff_failure(Ok(std::process::ExitStatus::from_raw(9))).as_deref(),
+            Some("it was stopped by a signal")
+        );
+        let busy = std::io::Error::from_raw_os_error(26);
+        assert!(
+            handoff_failure(Err(busy))
+                .is_some_and(|reason| reason.starts_with("it could not start: "))
+        );
     }
 
     #[test]
