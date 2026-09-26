@@ -532,24 +532,10 @@ impl<'a> Pool<'a> {
         {
             return Err("encrypted Local storage root ownership is invalid".into());
         }
-        for (name, uid, gid, mode) in VOLUME_SPECS {
-            let metadata = match self.paths.pool_mount.join(name).symlink_metadata() {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(format!(
-                        "encrypted Local storage lacks the current volume {name}; run shimpz start to add it"
-                    ));
-                }
-                Err(error) => return Err(io_error(error)),
-            };
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || metadata.uid() != uid
-                || metadata.gid() != gid
-                || metadata.permissions().mode() & 0o7777 != mode
-            {
-                return Err(format!("encrypted Local volume layout is invalid: {name}"));
-            }
+        if let Some(name) = missing_volumes(&self.paths.pool_mount, &VOLUME_SPECS)?.first() {
+            return Err(format!(
+                "encrypted Local storage lacks the current volume {name}; run shimpz start to add it"
+            ));
         }
         Ok(())
     }
@@ -642,17 +628,18 @@ impl<'a> Pool<'a> {
         Ok(())
     }
 
-    /// Add only volumes the current graph declares but an existing pool lacks; existing entries, including
-    /// symbolic links, are never followed or changed here and remain subject to layout validation.
+    /// Add only volumes the current graph declares but an existing pool lacks. Every existing entry is validated
+    /// first, so an invalid one aborts before any creation. The check and the privileged creation are separate
+    /// path operations, which the pool owner could race; that owner already holds Docker authority.
     fn create_missing_volumes(&self) -> Result<(), String> {
         self.validate_mount()?;
-        for (name, uid, gid, mode) in VOLUME_SPECS {
+        for name in missing_volumes(&self.paths.pool_mount, &VOLUME_SPECS)? {
+            let (_, uid, gid, mode) = VOLUME_SPECS
+                .iter()
+                .copied()
+                .find(|spec| spec.0 == name)
+                .ok_or_else(|| "encrypted Local volume specification is inconsistent".to_owned())?;
             let path = self.paths.pool_mount.join(name);
-            match path.symlink_metadata() {
-                Ok(_) => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(io_error(error)),
-            }
             Self::root(
                 Tool::Install,
                 [
@@ -1320,8 +1307,67 @@ fn cleanup_error(error: std::io::Error) -> String {
     message
 }
 
+/// Names of declared volumes absent from the pool, after proving every present entry is an exact, unlinked
+/// directory with its declared owner, group, and mode.
+fn missing_volumes(
+    root: &Path,
+    specs: &[(&'static str, u32, u32, u32)],
+) -> Result<Vec<&'static str>, String> {
+    let mut missing = Vec::new();
+    for &(name, uid, gid, mode) in specs {
+        let metadata = match root.join(name).symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(name);
+                continue;
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != uid
+            || metadata.gid() != gid
+            || metadata.permissions().mode() & 0o7777 != mode
+        {
+            return Err(format!("encrypted Local volume layout is invalid: {name}"));
+        }
+    }
+    Ok(missing)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_volumes_are_listed_only_after_every_present_entry_is_exact() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        let specs = [("present", uid, gid, 0o700), ("absent", uid, gid, 0o700)];
+        fs::create_dir(root.path().join("present")).unwrap();
+        fs::set_permissions(
+            root.path().join("present"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(missing_volumes(root.path(), &specs), Ok(vec!["absent"]));
+
+        fs::set_permissions(
+            root.path().join("present"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(missing_volumes(root.path(), &specs).is_err());
+
+        fs::remove_dir(root.path().join("present")).unwrap();
+        symlink(root.path(), root.path().join("present")).unwrap();
+        assert_eq!(
+            missing_volumes(root.path(), &specs),
+            Err("encrypted Local volume layout is invalid: present".into())
+        );
+    }
+
     use super::*;
 
     #[test]
