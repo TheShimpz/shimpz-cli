@@ -19,6 +19,7 @@ use super::docker::{Engine, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::paths::Paths;
+use super::poll;
 use super::resources::Inventory;
 use super::scheduler;
 use super::state::{self, Environment, Installed, Lock};
@@ -35,6 +36,10 @@ const ADMIN_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RESET_CAPABILITY_SECONDS: u64 = 120;
 const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
 const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
+const SCHEDULED_STOPPED: &str = "Shimpz Space is stopped.\nNext: shimpz start";
+const UPDATE_DEFERRED: &str =
+    "A Local update is waiting for active Shimpz work to finish; it will retry automatically.";
+const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_PROGRESS: [&str; 3] = [
     "Checking the Shimpz Space...",
     "Stopping the Shimpz Space...",
@@ -56,11 +61,30 @@ pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
 }
 
 pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
-    let context = Context::open(options.scheduled)?;
+    let paths = Paths::discover()?;
+    validate_install_home(&paths)?;
     let _lock = (!options.candidate)
-        .then(|| Lock::acquire(&context.paths))
+        .then(|| Lock::acquire(&paths))
         .transpose()?;
-    context.start(options)
+    if options.scheduled
+        && options.release.is_none()
+        && let Some(message) = scheduled_gate(&paths)?
+    {
+        return Ok(message);
+    }
+    Context::connect(paths, options.scheduled)?.start(options)
+}
+
+/// The cheap scheduled check before any Docker work: a stopped Space or an unchanged release ends the run.
+fn scheduled_gate(paths: &Paths) -> Result<Option<String>, String> {
+    if !paths.marker_is_current()? {
+        return Ok(None);
+    }
+    if state::stopped(paths)? {
+        return Ok(Some(SCHEDULED_STOPPED.into()));
+    }
+    let installed = state::read_installed(paths, host::detect()?)?;
+    Ok(poll::scheduled_gate(paths, &installed, poll::now(), poll::probe_stable)?.map(Into::into))
 }
 
 pub(crate) fn update() -> Result<String, String> {
@@ -202,6 +226,7 @@ enum AdminAttestation {
 enum ApplyOutcome {
     Ready { port: u16 },
     Locked,
+    Deferred,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,6 +261,10 @@ impl Context {
     fn open(scheduled: bool) -> Result<Self, String> {
         let paths = Paths::discover()?;
         validate_install_home(&paths)?;
+        Self::connect(paths, scheduled)
+    }
+
+    fn connect(paths: Paths, scheduled: bool) -> Result<Self, String> {
         let profile = host::detect()?;
         let engine = Engine::connect(profile, &paths)?;
         Ok(Self {
@@ -305,7 +334,7 @@ impl Context {
         Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let stopped = state::stopped(&self.paths)?;
         if options.scheduled && stopped {
-            return Ok("Shimpz Space is stopped.\nNext: shimpz start".into());
+            return Ok(SCHEDULED_STOPPED.into());
         }
         let mut release = self
             .engine
@@ -329,7 +358,7 @@ impl Context {
             && !preserve_failed_release
             && self.handoff_if_needed(&release, Some(&installed), options.scheduled)?
         {
-            return Ok("The release-bound CLI completed reconciliation.".into());
+            return self.handoff_outcome(&release);
         }
         if options.candidate && options.release.is_none() {
             return Err("a candidate start requires an exact release".into());
@@ -434,8 +463,12 @@ impl Context {
             },
             Err(error) => return Err(error),
         };
-        let ApplyOutcome::Ready { port } = outcome else {
-            return Ok("Encrypted Local storage is locked. No workloads were started.".into());
+        let port = match outcome {
+            ApplyOutcome::Ready { port } => port,
+            ApplyOutcome::Locked => {
+                return Ok("Encrypted Local storage is locked. No workloads were started.".into());
+            }
+            ApplyOutcome::Deferred => return Ok(UPDATE_DEFERRED.into()),
         };
         let ready = ready_outcome(release, port);
         scheduler_outcome(
@@ -459,6 +492,9 @@ impl Context {
             linux::Admission::Verified => {}
         }
         self.download_and_admit_candidate(release, installed)?;
+        if scheduled && self.defer_for_activity(release, installed)? {
+            return Ok(ApplyOutcome::Deferred);
+        }
         let port = state::selected_port(installed)?;
         let (docker_socket, docker_gid) = self
             .engine
@@ -808,6 +844,46 @@ impl Context {
         }
     }
 
+    /// Report a release-bound CLI run truthfully: it may have deferred the update or left it unapplied.
+    fn handoff_outcome(&self, release: &ResolvedRelease) -> Result<String, String> {
+        if state::read_installed(&self.paths, self.profile)?.release_ref == release.reference {
+            return Ok("The release-bound CLI completed reconciliation.".into());
+        }
+        let deferred = poll::release_digest(&release.reference)
+            .is_some_and(|digest| poll::deferred(&self.paths, digest, poll::now()));
+        Ok(if deferred {
+            UPDATE_DEFERRED.into()
+        } else {
+            "The release-bound CLI finished without applying the selected Local release.".into()
+        })
+    }
+
+    /// Immediately before a scheduled update replaces a different running release, give active Team work a
+    /// bounded chance to finish. A repair of the installed release never waits.
+    fn defer_for_activity(
+        &self,
+        release: &ResolvedRelease,
+        installed: Option<&Installed>,
+    ) -> Result<bool, String> {
+        if installed.is_none_or(|installed| installed.release_ref == release.reference) {
+            return Ok(false);
+        }
+        let Some(digest) = poll::release_digest(&release.reference) else {
+            return Ok(false);
+        };
+        poll::defer_for_activity(&self.paths, digest, poll::now(), || self.team_activity())
+    }
+
+    fn team_activity(&self) -> poll::TeamActivity {
+        let team = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())
+            .and_then(|inventory| inventory.team_container_id(&self.engine));
+        match team {
+            Ok(Some(team)) => self.engine.team_activity(&team, TEAM_ACTIVITY_TIMEOUT),
+            Ok(None) => poll::TeamActivity::Idle,
+            Err(_) => poll::TeamActivity::Unknown,
+        }
+    }
+
     fn handoff_if_needed(
         &self,
         release: &ResolvedRelease,
@@ -1138,11 +1214,12 @@ fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
     Ok(())
 }
 
-fn managed_runtime_files(paths: &Paths) -> [PathBuf; 15] {
+fn managed_runtime_files(paths: &Paths) -> [PathBuf; 17] {
     [
         paths.compose.clone(),
         paths.environment.clone(),
         paths.status.clone(),
+        paths.release_poll.clone(),
         paths.failed_release.clone(),
         paths.stopped.clone(),
         paths.compose.with_extension("previous"),
@@ -1150,6 +1227,7 @@ fn managed_runtime_files(paths: &Paths) -> [PathBuf; 15] {
         paths.compose.with_extension("tmp"),
         paths.environment.with_extension("tmp"),
         paths.status.with_extension("tmp"),
+        paths.release_poll.with_extension("tmp"),
         paths.failed_release.with_extension("tmp"),
         paths.stopped.with_extension("tmp"),
         paths.home.join("release.env.tmp"),

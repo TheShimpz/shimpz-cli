@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use super::command::Tool;
 use super::host::HostProfile;
 use super::paths::Paths;
+use super::poll::{self, TeamActivity};
 use super::release::{self, RELEASE_REPOSITORY, Release};
 
 const RELEASE_CHANNEL: &str = "stable";
@@ -178,6 +179,31 @@ impl Engine {
             Ok(())
         } else {
             Err("Docker did not preserve the pinned component digest".into())
+        }
+    }
+
+    /// Ask the running Team, through its own authenticated loopback client, whether work is active. Any Docker,
+    /// timeout, or protocol failure is `Unknown`.
+    pub(crate) fn team_activity(&self, container: &str, timeout: Duration) -> TeamActivity {
+        match execute_bounded_stdout(
+            Command::new(&self.docker)
+                .args([
+                    "exec",
+                    container,
+                    "/opt/venv/bin/python",
+                    "-m",
+                    "local.activity",
+                ])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null()),
+            timeout,
+        ) {
+            Ok(BoundedOutput::Completed {
+                status,
+                bytes,
+                truncated: false,
+            }) if status.success() => poll::parse_team_activity(&bytes),
+            _ => TeamActivity::Unknown,
         }
     }
 

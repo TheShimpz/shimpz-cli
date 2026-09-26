@@ -230,7 +230,7 @@ fn systemd_service(paths: &Paths) -> Result<String, String> {
 }
 
 fn systemd_timer() -> &'static str {
-    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=5m\nOnUnitActiveSec=30m\nRandomizedDelaySec=10m\n\n[Install]\nWantedBy=timers.target\n"
+    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=2m\nOnUnitActiveSec=2m\nRandomizedDelaySec=30s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n"
 }
 
 fn launch_agent(paths: &Paths) -> Result<String, String> {
@@ -241,7 +241,7 @@ fn launch_agent(paths: &Paths) -> Result<String, String> {
             .ok_or_else(|| "the managed CLI path is not UTF-8".to_owned())?,
     );
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.shimpz.update</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>1800</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.shimpz.update</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>120</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
     ))
 }
 
@@ -570,9 +570,10 @@ mod tests {
         );
         assert!(!service.contains("sh -c"));
         let timer = systemd_timer();
-        assert!(timer.contains("OnActiveSec=5m"));
-        assert!(timer.contains("OnUnitActiveSec=30m"));
-        assert!(timer.contains("RandomizedDelaySec=10m"));
+        assert!(timer.contains("OnActiveSec=2m"));
+        assert!(timer.contains("OnUnitActiveSec=2m"));
+        assert!(timer.contains("RandomizedDelaySec=30s"));
+        assert!(timer.contains("AccuracySec=1s"));
         assert!(timer.contains("WantedBy=timers.target"));
         assert!(!timer.contains("OnBootSec="));
         assert!(!timer.contains("Persistent="));

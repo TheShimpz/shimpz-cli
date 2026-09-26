@@ -47,6 +47,8 @@ pub(crate) mod lifecycle {
     }
 }
 pub(crate) mod paths;
+#[cfg(unix)]
+pub(crate) mod poll;
 pub(crate) mod release;
 pub(crate) mod resources;
 #[cfg(unix)]
