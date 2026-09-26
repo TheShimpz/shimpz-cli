@@ -22,9 +22,8 @@ const FULL_REPAIR_SECONDS: u64 = 30 * 60;
 const BACKOFF_BASE_SECONDS: u64 = 2 * 60;
 const BACKOFF_CAP_SECONDS: u64 = 30 * 60;
 const RETRY_AFTER_CAP_SECONDS: u64 = 60 * 60;
-/// Longest wait for active Team work, and the shorter wait when Team activity cannot be observed.
+/// Longest continuous wait for active Team work before a scheduled update applies anyway.
 const BUSY_DEFER_SECONDS: u64 = 5 * 60;
-const UNKNOWN_DEFER_SECONDS: u64 = 2 * 60;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_POLL_STATE_BYTES: u64 = 1_024;
 const MAX_STATUS_BYTES: u64 = 1_024;
@@ -232,9 +231,10 @@ pub(crate) fn scheduled_gate(
     Ok(message)
 }
 
-/// Decide, immediately before a scheduled update replaces the running release, whether active Team work defers
-/// it. Each digest waits at most `BUSY_DEFER_SECONDS` for busy work and `UNKNOWN_DEFER_SECONDS` when activity
-/// cannot be observed; a deferral retries at the next poll instead of backing off.
+/// Decide, before a scheduled update replaces the running graph, whether active Team work defers it. Busy work
+/// waits at most `BUSY_DEFER_SECONDS` per continuous deferral of one digest; a deferral retries at the next poll
+/// instead of backing off. Unobservable activity applies at once: an unavailable or older Team, which cannot report
+/// activity, must never hold back the update that repairs it.
 pub(crate) fn defer_for_activity(
     paths: &Paths,
     digest: &str,
@@ -248,9 +248,8 @@ pub(crate) fn defer_for_activity(
         now
     };
     let limit = match observe() {
-        TeamActivity::Idle => 0,
         TeamActivity::Busy => BUSY_DEFER_SECONDS,
-        TeamActivity::Unknown => UNKNOWN_DEFER_SECONDS,
+        TeamActivity::Idle | TeamActivity::Unknown => 0,
     };
     let defer = now - since < limit;
     if defer {
@@ -640,16 +639,14 @@ mod tests {
     }
 
     #[test]
-    fn idle_applies_immediately_and_unknown_waits_less() {
+    fn idle_or_unobservable_activity_applies_immediately_and_clears_a_deferral() {
         let (_home, paths) = gate_paths();
         assert!(!defer_for_activity(&paths, NEWER, 5_000, || TeamActivity::Idle).expect("apply"));
-        assert!(defer_for_activity(&paths, NEWER, 5_000, || TeamActivity::Unknown).expect("defer"));
+        assert!(defer_for_activity(&paths, NEWER, 5_000, || TeamActivity::Busy).expect("defer"));
         assert!(
-            !defer_for_activity(&paths, NEWER, 5_000 + UNKNOWN_DEFER_SECONDS, || {
-                TeamActivity::Unknown
-            })
-            .expect("apply")
+            !defer_for_activity(&paths, NEWER, 5_060, || TeamActivity::Unknown).expect("apply")
         );
+        assert!(!deferred(&paths, NEWER, 5_060));
         assert!(
             defer_for_activity(&paths, INSTALLED, 5_200, || TeamActivity::Busy).expect("defer")
         );
