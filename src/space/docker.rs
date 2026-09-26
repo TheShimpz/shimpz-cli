@@ -1230,6 +1230,53 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn team_activity_runs_the_team_client_and_maps_every_failure_to_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let command = temporary.path().join("docker");
+        let calls = temporary.path().join("calls");
+        let answer = temporary.path().join("answer");
+        let status = temporary.path().join("status");
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat '{}'\nexit $(cat '{}')\n",
+                calls.display(),
+                answer.display(),
+                status.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        let engine = Engine {
+            docker: command,
+            platform: "linux/amd64",
+            cpuset: "0".into(),
+        };
+        for (output, code, expected) in [
+            ("busy\n", "0", TeamActivity::Busy),
+            ("idle\n", "0", TeamActivity::Idle),
+            ("idle\n", "1", TeamActivity::Unknown),
+            ("maybe\n", "0", TeamActivity::Unknown),
+        ] {
+            fs::write(&answer, output).unwrap();
+            fs::write(&status, code).unwrap();
+            assert_eq!(
+                engine.team_activity("team-id", Duration::from_secs(5)),
+                expected,
+                "{output:?} {code}"
+            );
+        }
+        let arguments = fs::read_to_string(calls).unwrap();
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            ["exec team-id /opt/venv/bin/python -m local.activity"; 4]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn macos_controller_uses_the_desktop_vm_socket_identity() {
         use std::os::unix::fs::PermissionsExt;
 

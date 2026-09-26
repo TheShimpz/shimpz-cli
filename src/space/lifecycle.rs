@@ -871,17 +871,13 @@ impl Context {
         let Some(digest) = poll::release_digest(&release.reference) else {
             return Ok(false);
         };
-        poll::defer_for_activity(&self.paths, digest, poll::now(), || self.team_activity())
-    }
-
-    fn team_activity(&self) -> poll::TeamActivity {
-        let team = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())
-            .and_then(|inventory| inventory.team_container_id(&self.engine));
-        match team {
-            Ok(Some(team)) => self.engine.team_activity(&team, TEAM_ACTIVITY_TIMEOUT),
-            Ok(None) => poll::TeamActivity::Idle,
-            Err(_) => poll::TeamActivity::Unknown,
-        }
+        // Ownership is re-proved here and its failure aborts the apply; only the Team client itself may be unknown.
+        let team = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?
+            .team_container_id(&self.engine)?;
+        poll::defer_for_activity(&self.paths, digest, poll::now(), || match &team {
+            Some(team) => self.engine.team_activity(team, TEAM_ACTIVITY_TIMEOUT),
+            None => poll::TeamActivity::Idle,
+        })
     }
 
     fn handoff_if_needed(
