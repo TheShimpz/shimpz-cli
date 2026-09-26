@@ -306,6 +306,7 @@ impl<'a> Pool<'a> {
     }
 
     pub(crate) fn ensure(&self, fresh: bool, scheduled: bool) -> Result<Admission, String> {
+        admit_account_primary_group()?;
         admit_cryptsetup()?;
         if !self.paths.security.exists() {
             if !fresh {
@@ -1132,6 +1133,24 @@ fn validate_metadata_with_marker(paths: &Paths, marker: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// The mount root records the process primary group, so a switched group (for example `sg docker`) would install
+/// a Space that every later run under the account's own group rejects.
+fn admit_account_primary_group() -> Result<(), String> {
+    let account = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .map_err(|_| "the Local account identity is unavailable".to_owned())?
+        .ok_or_else(|| "the Local account identity is unavailable".to_owned())?;
+    primary_group_admission(nix::unistd::getgid().as_raw(), account.gid.as_raw())
+}
+
+fn primary_group_admission(process_gid: u32, account_gid: u32) -> Result<(), String> {
+    if process_gid == account_gid {
+        return Ok(());
+    }
+    Err("the Local CLI must run with the account's own primary group, not a switched group such as sg docker; \
+         sign out and back in, or restart, so the login session includes the Docker group, then retry"
+        .into())
+}
+
 fn admit_cryptsetup() -> Result<(), String> {
     let document = command::output(Tool::Luks, ["--version"])?;
     let version = cryptsetup_version(&document).ok_or_else(|| {
@@ -1265,6 +1284,15 @@ fn cleanup_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admits_only_the_account_primary_group() {
+        assert!(primary_group_admission(1000, 1000).is_ok());
+        let refused =
+            primary_group_admission(989, 1000).expect_err("a switched group must be refused");
+        assert!(refused.contains("sg docker"));
+        assert!(refused.contains("sign out and back in"));
+    }
 
     #[test]
     fn validates_only_exact_space_ids() {

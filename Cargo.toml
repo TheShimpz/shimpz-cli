@@ -33,7 +33,7 @@ zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-nix = { version = "0.30.1", default-features = false, features = ["signal"] }
+nix = { version = "0.30.1", default-features = false, features = ["signal", "user"] }
 rustix = { version = "1", features = ["fs", "process", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
