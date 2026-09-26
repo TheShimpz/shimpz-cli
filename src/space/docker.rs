@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use super::command::Tool;
 use super::host::HostProfile;
 use super::paths::Paths;
+#[cfg(unix)]
 use super::poll::{self, TeamActivity};
 use super::release::{self, RELEASE_REPOSITORY, Release};
 
@@ -182,6 +183,7 @@ impl Engine {
         }
     }
 
+    #[cfg(unix)]
     /// Ask the running Team, through its own authenticated loopback client, whether work is active. Any Docker,
     /// timeout, or protocol failure is `Unknown`.
     pub(crate) fn team_activity(&self, container: &str, timeout: Duration) -> TeamActivity {
