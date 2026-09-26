@@ -30,7 +30,7 @@ macro_rules! live_trace {
     };
 }
 
-const VOLUME_SPECS: [(&str, u32, u32, u32); 24] = [
+const VOLUME_SPECS: [(&str, u32, u32, u32); 26] = [
     ("config", 1000, 1000, 0o700),
     ("data", 1000, 1000, 0o700),
     ("controller_token", 10001, 10010, 0o2750),
@@ -49,6 +49,13 @@ const VOLUME_SPECS: [(&str, u32, u32, u32); 24] = [
     ("controller_assistant_integration_key", 10001, 10001, 0o700),
     ("controller_chat_continuation_state", 10001, 10001, 0o700),
     ("controller_chat_continuation_key", 10001, 10001, 0o700),
+    (
+        "controller_assistant_stored_input_state",
+        10001,
+        10001,
+        0o700,
+    ),
+    ("controller_assistant_stored_input_key", 10001, 10001, 0o700),
     ("supervisor_key", 0, 10021, 0o2770),
     ("release_status", 1000, 1000, 0o700),
     ("reset_capability", 1000, 1000, 0o700),
@@ -354,6 +361,7 @@ impl<'a> Pool<'a> {
             )?;
             self.own_mount_root()?;
         }
+        self.create_missing_volumes()?;
         self.mounted_valid()?;
         Ok(Admission::Verified)
     }
@@ -525,12 +533,15 @@ impl<'a> Pool<'a> {
             return Err("encrypted Local storage root ownership is invalid".into());
         }
         for (name, uid, gid, mode) in VOLUME_SPECS {
-            let metadata = self
-                .paths
-                .pool_mount
-                .join(name)
-                .symlink_metadata()
-                .map_err(io_error)?;
+            let metadata = match self.paths.pool_mount.join(name).symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(format!(
+                        "encrypted Local storage lacks the current volume {name}; run shimpz start to add it"
+                    ));
+                }
+                Err(error) => return Err(io_error(error)),
+            };
             if metadata.file_type().is_symlink()
                 || !metadata.is_dir()
                 || metadata.uid() != uid
@@ -627,6 +638,34 @@ impl<'a> Pool<'a> {
             return Err(format!(
                 "encrypted Local storage mount identity is invalid (device {device}, expected {expected_device}; filesystem {filesystem}; target {target}, expected {mount})"
             ));
+        }
+        Ok(())
+    }
+
+    /// Add only volumes the current graph declares but an existing pool lacks; existing entries, including
+    /// symbolic links, are never followed or changed here and remain subject to layout validation.
+    fn create_missing_volumes(&self) -> Result<(), String> {
+        self.validate_mount()?;
+        for (name, uid, gid, mode) in VOLUME_SPECS {
+            let path = self.paths.pool_mount.join(name);
+            match path.symlink_metadata() {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+            Self::root(
+                Tool::Install,
+                [
+                    OsString::from("-d"),
+                    OsString::from("-o"),
+                    OsString::from(uid.to_string()),
+                    OsString::from("-g"),
+                    OsString::from(gid.to_string()),
+                    OsString::from("-m"),
+                    OsString::from(format!("{mode:o}")),
+                    path.into_os_string(),
+                ],
+            )?;
         }
         Ok(())
     }

@@ -124,6 +124,16 @@ services:
         volume:
           nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
       - type: volume
+        source: controller_assistant_stored_input_state
+        target: /var/lib/shimpz-local/assistant-stored-inputs/state
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_assistant_stored_input_key
+        target: /var/lib/shimpz-local/assistant-stored-inputs/key
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
         source: assistant_egress_policy
         target: /var/lib/shimpz-local/assistant-egress
         volume:
