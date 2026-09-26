@@ -1626,6 +1626,23 @@ mod tests {
         preflight_reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();
         assert_eq!(pool.ensure(false, true).unwrap(), Admission::Locked);
         assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
+        let added = [
+            "controller_assistant_stored_input_state",
+            "controller_assistant_stored_input_key",
+        ];
+        for name in added {
+            fs::remove_dir(paths.pool_mount.join(name)).unwrap();
+        }
+        let refused = pool.ensure(false, true).unwrap_err();
+        assert!(refused.contains("run shimpz start"), "{refused}");
+        assert_eq!(pool.ensure(false, false).unwrap(), Admission::Verified);
+        for name in added {
+            let metadata = paths.pool_mount.join(name).symlink_metadata().unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!((metadata.uid(), metadata.gid()), (10001, 10001));
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+        }
+        assert_eq!(pool.ensure(false, true).unwrap(), Admission::Verified);
         reset(&paths, Some("space-0123456789abcdef01234567")).unwrap();
         reset(&paths, None).unwrap();
         assert!(!paths.security.exists());
