@@ -218,6 +218,12 @@ pub(crate) fn canonical_reference(assistant_id: &str) -> String {
     format!("{LOCAL_SNAPSHOT_REPOSITORY}/{assistant_id}:{LOCAL_SNAPSHOT_TAG}")
 }
 
+/// A never-pulled snapshot has no digest, or, on a containerd image store, only its own local digest.
+fn local_digests_valid(digests: &str, assistant_id: &str, image_id: &str) -> bool {
+    digests == "[]"
+        || digests == format!("[\"{LOCAL_SNAPSHOT_REPOSITORY}/{assistant_id}@{image_id}\"]")
+}
+
 fn stage_image(
     docker: &Path,
     context: &Path,
@@ -317,13 +323,14 @@ fn current_image(
     match fields.as_slice() {
         [
             image_id,
-            "[]",
+            digests,
             tags,
             LOCAL_STAGE_VALUE,
             owner,
             build_digest,
             nonce,
         ] if valid_image_id(image_id)
+            && local_digests_valid(digests, assistant_id, image_id)
             && *tags == expected_tags
             && *owner == assistant_id
             && valid_image_id(build_digest) =>
@@ -486,12 +493,14 @@ fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Re
     let fields = text.lines().collect::<Vec<_>>();
     let architecture = expected.platform.rsplit_once('/').map(|(_, value)| value);
     let tags = format!("[\"{}\"]", expected.reference);
+    let digests = fields.get(2).copied().unwrap_or_default();
     if !result.status.success()
+        || !local_digests_valid(digests, &identity.id, image_id)
         || fields
             != [
                 image_id,
                 architecture.unwrap_or_default(),
-                "[]",
+                digests,
                 tags.as_str(),
                 LOCAL_STAGE_VALUE,
                 identity.id.as_str(),
@@ -1072,6 +1081,45 @@ mod tests {
             "build failed",
         );
         assert!(error.contains("could not be read"), "{error}");
+    }
+
+    #[test]
+    fn accepts_only_a_never_pulled_snapshot_digest() {
+        let id = image('a');
+        assert!(local_digests_valid("[]", "proof-assistant", &id));
+        assert!(local_digests_valid(
+            &format!("[\"shimpz-local/proof-assistant@{id}\"]"),
+            "proof-assistant",
+            &id
+        ));
+        for digests in [
+            format!("[\"ghcr.io/theshimpz/shimpz-assistant@{id}\"]"),
+            format!("[\"shimpz-local/other-assistant@{id}\"]"),
+            format!("[\"shimpz-local/proof-assistant@{}\"]", image('b')),
+        ] {
+            assert!(
+                !local_digests_valid(&digests, "proof-assistant", &id),
+                "{digests}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_containerd_current_snapshot_is_reused_with_its_local_digest() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let current = image('a');
+        let build = image('b');
+        let local = format!("[\"shimpz-local/proof-assistant@{current}\"]");
+        let fields = contract_fields(&current, &build).replacen("[]", &local, 1);
+        let docker = fake_docker(
+            directory.path(),
+            &format!(
+                "case \"$4\" in *Architecture*) printf '{fields}\\n'; exit 0;; '{{{{.Id}}}}') printf '%s\\n' '{current}'; exit 0;; esac\n\
+                 printf '%s\\n' '{current}' '{local}' '[\"shimpz-local/proof-assistant:staged\"]' '{LOCAL_STAGE_VALUE}' 'proof-assistant' '{build}' 'earlier-nonce'; exit 0"
+            ),
+        );
+        assert_eq!(stage_proof(&docker, directory.path(), &build), Ok(current));
     }
 
     #[test]
