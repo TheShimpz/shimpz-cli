@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use toml::Value;
@@ -12,7 +14,7 @@ use toml::Value;
 use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
-use crate::{output, source_package, toolchain};
+use crate::{output, snapshot_lock, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
@@ -26,6 +28,11 @@ const VERSION_LABEL: &str = "org.shimpz.assistant.version";
 const BUILD_LABEL: &str = "org.shimpz.local.build.digest";
 const ACTIONS_LABEL: &str = "org.shimpz.assistant.actions";
 const INTEGRATIONS_LABEL: &str = "org.shimpz.assistant.integrations";
+const NONCE_LABEL: &str = "org.shimpz.local.stage.nonce";
+/// The one tag that makes a staged image its Assistant's current snapshot; untagged staged images are superseded.
+pub(crate) const LOCAL_SNAPSHOT_REPOSITORY: &str = "shimpz-local";
+pub(crate) const LOCAL_SNAPSHOT_TAG: &str = "staged";
+const CURRENT_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.local.stage.nonce\"}}";
 const MAX_DOCKER_OUTPUT_BYTES: usize = 32 * 1024;
 const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.actions\"}}\n{{index .Config.Labels \"org.shimpz.assistant.integrations\"}}";
 
@@ -102,6 +109,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     output::progress("Collecting the exact Assistant source...");
     let package = source_package::build(project)?;
     let identity = PublicationIdentity::parse(&package.manifest)?;
+    let _lock = snapshot_lock::acquire(&identity.id)?;
     let discovery = DiscoveryProjection {
         actions: action_ids(&package.action_files)?,
         integrations: manifest::integration_ids(&package.manifest)?,
@@ -127,7 +135,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         output::warning(&message);
     }
     Ok(format!(
-        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nNext: ask a Local Team for work that needs this Assistant. Chat installs a fresh binding automatically; existing bindings still require an explicit replacement in Admin.",
+        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nEarlier snapshots of this Assistant are removed by the Local Space once no Team uses them.\nNext: ask a Local Team for work that needs this Assistant. Chat installs a fresh binding automatically; existing bindings still require an explicit replacement in Admin.",
         identity.id, identity.version, image_id
     ))
 }
@@ -206,6 +214,10 @@ fn daemon_platform(docker: &Path) -> Result<&'static str, String> {
     }
 }
 
+pub(crate) fn canonical_reference(assistant_id: &str) -> String {
+    format!("{LOCAL_SNAPSHOT_REPOSITORY}/{assistant_id}:{LOCAL_SNAPSHOT_TAG}")
+}
+
 fn stage_image(
     docker: &Path,
     context: &Path,
@@ -215,53 +227,200 @@ fn stage_image(
     platform: &str,
     discovery: &DiscoveryProjection,
 ) -> Result<String, String> {
-    if let Some(image_id) = existing_image(docker, build_digest)? {
-        output::progress("Reusing the exact Local Assistant snapshot...");
-        validate_image(
-            docker,
-            &image_id,
-            identity,
-            source_digest,
-            build_digest,
-            platform,
-            discovery,
-        )?;
-        return Ok(image_id);
+    let reference = canonical_reference(&identity.id);
+    let current = current_image(docker, &reference, &identity.id)?;
+    let expected = ExpectedImage {
+        reference: &reference,
+        identity,
+        source_digest,
+        build_digest,
+        platform,
+        discovery,
+    };
+    if let Some(current) = current
+        .as_ref()
+        .filter(|current| current.build_digest == build_digest)
+    {
+        output::progress("Reusing the current Local Assistant snapshot...");
+        validate_image(docker, &current.image_id, &expected)?;
+        require_current(docker, &reference, &current.image_id)?;
+        return Ok(current.image_id.clone());
     }
     output::progress("Building the Local Assistant snapshot...");
-    let image_id = build_image(
+    // The build loads the image already tagged, so a new snapshot never exists untagged and the Local Space
+    // can never collect it; the previous current snapshot loses the tag in the same step.
+    // A failure anywhere after the build may already have moved the tag, so every one reconciles it; the nonce
+    // proves which tagged image this attempt produced.
+    let nonce = stage_nonce();
+    build_image(docker, context, &expected, &nonce)
+        .and_then(|image_id| {
+            validate_image(docker, &image_id, &expected)?;
+            require_current(docker, &reference, &image_id)?;
+            Ok(image_id)
+        })
+        .map_err(|error| {
+            reconcile_current(
+                docker,
+                &reference,
+                &identity.id,
+                current.as_ref(),
+                &nonce,
+                &error,
+            )
+        })
+}
+
+struct ExpectedImage<'a> {
+    reference: &'a str,
+    identity: &'a PublicationIdentity,
+    source_digest: &'a str,
+    build_digest: &'a str,
+    platform: &'a str,
+    discovery: &'a DiscoveryProjection,
+}
+
+struct CurrentImage {
+    image_id: String,
+    build_digest: String,
+    nonce: String,
+}
+
+/// Resolve the Assistant's tag, refusing to overwrite a tag that points outside this Assistant's snapshots.
+fn current_image(
+    docker: &Path,
+    reference: &str,
+    assistant_id: &str,
+) -> Result<Option<CurrentImage>, String> {
+    let result = docker_output(
         docker,
-        context,
-        identity,
-        source_digest,
-        build_digest,
-        platform,
-        discovery,
+        [
+            "image",
+            "inspect",
+            "--format",
+            CURRENT_INSPECT_TEMPLATE,
+            reference,
+        ],
     )?;
-    validate_image(
+    if !result.status.success() {
+        let detail = String::from_utf8_lossy(&result.stderr);
+        if detail.contains("No such image") || detail.contains("No such object") {
+            return Ok(None);
+        }
+        return Err(docker_failure(
+            &result,
+            "Docker could not resolve the current Local snapshot",
+        ));
+    }
+    let text = output_text(&result)?;
+    let fields = text.lines().collect::<Vec<_>>();
+    let expected_tags = format!("[\"{reference}\"]");
+    match fields.as_slice() {
+        [
+            image_id,
+            "[]",
+            tags,
+            LOCAL_STAGE_VALUE,
+            owner,
+            build_digest,
+            nonce,
+        ] if valid_image_id(image_id)
+            && *tags == expected_tags
+            && *owner == assistant_id
+            && valid_image_id(build_digest) =>
+        {
+            Ok(Some(CurrentImage {
+                image_id: (*image_id).to_owned(),
+                build_digest: (*build_digest).to_owned(),
+                nonce: (*nonce).to_owned(),
+            }))
+        }
+        _ => Err(format!(
+            "the tag {reference} points to an image outside this Assistant's Local snapshots; remove that tag, then stage again"
+        )),
+    }
+}
+
+fn require_current(docker: &Path, reference: &str, image_id: &str) -> Result<(), String> {
+    let result = docker_output(
         docker,
-        &image_id,
-        identity,
-        source_digest,
-        build_digest,
-        platform,
-        discovery,
+        ["image", "inspect", "--format", "{{.Id}}", reference],
     )?;
-    Ok(image_id)
+    if result.status.success() && output_text(&result)?.trim() == image_id {
+        Ok(())
+    } else {
+        Err("the staged image did not become this Assistant's current Local snapshot".into())
+    }
+}
+
+/// After a failed stage, undo only this attempt's own tag move: re-tag the previous snapshot, or remove the image
+/// this attempt tagged. A tag that another actor moved, removed, or that cannot be read is left untouched.
+fn reconcile_current(
+    docker: &Path,
+    reference: &str,
+    assistant_id: &str,
+    previous: Option<&CurrentImage>,
+    nonce: &str,
+    error: &str,
+) -> String {
+    let Ok(tagged) = current_image(docker, reference, assistant_id) else {
+        return format!(
+            "{error}; {reference} could not be read, so check it before rerunning 'shimpz assistant stage'"
+        );
+    };
+    let own = tagged.as_ref().filter(|tagged| tagged.nonce == nonce);
+    match (previous, tagged.as_ref(), own) {
+        (Some(previous), Some(tagged), _) if tagged.image_id == previous.image_id => {
+            format!("{error}; the previous Local snapshot remains current")
+        }
+        (Some(previous), _, Some(_)) => {
+            if docker_succeeds(docker, ["tag", previous.image_id.as_str(), reference]) {
+                format!("{error}; the previous Local snapshot remains current")
+            } else {
+                format!(
+                    "{error}; the previous Local snapshot could not be made current again, so rerun 'shimpz assistant stage'"
+                )
+            }
+        }
+        (None, _, Some(own)) => {
+            if docker_succeeds(docker, ["image", "rm", "--no-prune", own.image_id.as_str()]) {
+                format!("{error}; the invalid snapshot was removed")
+            } else {
+                format!(
+                    "{error}; the invalid snapshot could not be removed, so run 'shimpz assistant unstage' before staging again"
+                )
+            }
+        }
+        (None, None, None) => error.to_owned(),
+        _ => {
+            format!("{error}; {reference} was changed by another staging, so it was left as it is")
+        }
+    }
+}
+
+fn docker_succeeds<I, S>(docker: &Path, arguments: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    matches!(docker_output(docker, arguments), Ok(result) if result.status.success())
 }
 
 fn build_image(
     docker: &Path,
     context: &Path,
-    identity: &PublicationIdentity,
-    source_digest: &str,
-    build_digest: &str,
-    platform: &str,
-    discovery: &DiscoveryProjection,
+    expected: &ExpectedImage,
+    nonce: &str,
 ) -> Result<String, String> {
     let image_file = tempfile::NamedTempFile::new()
         .map_err(|_| "Local snapshot image identity file cannot be created")?;
-    let labels = stage_labels(identity, source_digest, build_digest, discovery);
+    let mut labels = stage_labels(
+        expected.identity,
+        expected.source_digest,
+        expected.build_digest,
+        expected.discovery,
+    );
+    // A unique label gives every non-reused stage a new image, never one the Local Space already treats as superseded.
+    labels.insert(NONCE_LABEL, nonce.to_owned());
     let mut arguments = vec![
         OsString::from("buildx"),
         OsString::from("build"),
@@ -270,7 +429,9 @@ fn build_image(
         OsString::from("--quiet"),
         OsString::from("--sbom=false"),
         OsString::from("--platform"),
-        OsString::from(platform),
+        OsString::from(expected.platform),
+        OsString::from("--tag"),
+        OsString::from(expected.reference),
         OsString::from("--iidfile"),
         image_file.path().as_os_str().to_owned(),
     ];
@@ -294,50 +455,22 @@ fn build_image(
     Ok(image_id)
 }
 
-fn existing_image(docker: &Path, build_digest: &str) -> Result<Option<String>, String> {
-    let filter = format!("label={BUILD_LABEL}={build_digest}");
-    let result = docker_output(
-        docker,
-        [
-            "image",
-            "ls",
-            "--all",
-            "--no-trunc",
-            "--quiet",
-            "--filter",
-            filter.as_str(),
-        ],
-    )?;
-    if !result.status.success() {
-        return Err("Docker could not enumerate cached Local snapshots".into());
-    }
-    let image_ids = output_text(&result)?
-        .lines()
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let [image_id] = image_ids.as_slice() else {
-        return if image_ids.is_empty() {
-            Ok(None)
-        } else {
-            Err("Docker returned ambiguous cached Local snapshots".into())
-        };
-    };
-    let image_id = (*image_id).to_owned();
-    if !valid_image_id(&image_id) {
-        return Err("Docker returned an invalid cached Local snapshot identity".into());
-    }
-    Ok(Some(image_id))
+fn stage_nonce() -> String {
+    let mut digest = Sha256::new();
+    digest.update(RandomState::new().hash_one(process::id()).to_be_bytes());
+    digest.update(process::id().to_be_bytes());
+    digest.update(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_be_bytes(),
+    );
+    format!("{:x}", digest.finalize())[..32].to_owned()
 }
 
-fn validate_image(
-    docker: &Path,
-    image_id: &str,
-    identity: &PublicationIdentity,
-    source_digest: &str,
-    build_digest: &str,
-    platform: &str,
-    discovery: &DiscoveryProjection,
-) -> Result<(), String> {
+fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
+    let identity = expected.identity;
     let declared_creators = declared_creators(identity);
     let result = docker_output(
         docker,
@@ -351,24 +484,25 @@ fn validate_image(
     )?;
     let text = output_text(&result)?;
     let fields = text.lines().collect::<Vec<_>>();
-    let architecture = platform.rsplit_once('/').map(|(_, value)| value);
+    let architecture = expected.platform.rsplit_once('/').map(|(_, value)| value);
+    let tags = format!("[\"{}\"]", expected.reference);
     if !result.status.success()
         || fields
             != [
                 image_id,
                 architecture.unwrap_or_default(),
                 "[]",
-                "[]",
+                tags.as_str(),
                 LOCAL_STAGE_VALUE,
                 identity.id.as_str(),
                 identity.name.as_str(),
                 identity.summary.as_str(),
                 declared_creators.as_str(),
-                source_digest,
+                expected.source_digest,
                 identity.version.as_str(),
-                build_digest,
-                discovery.actions.join(",").as_str(),
-                discovery.integrations.join(",").as_str(),
+                expected.build_digest,
+                expected.discovery.actions.join(",").as_str(),
+                expected.discovery.integrations.join(",").as_str(),
             ]
     {
         return Err("the staged image does not match its Local snapshot contract".into());
@@ -555,6 +689,19 @@ fn unsafe_dependencies() -> String {
     "Local snapshots accept only index-resolved Python dependencies".into()
 }
 
+/// Wait until a freshly written fake executable can run: a parallel test's fork can briefly hold it open for writing.
+#[cfg(all(test, unix))]
+pub(crate) fn await_executable(path: &Path) {
+    for _ in 0..200 {
+        match Command::new(path).output() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +786,300 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[cfg(unix)]
+    fn fake_docker(directory: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = directory.join("docker-proof");
+        fs::write(&executable, format!("#!/bin/sh\n{body}\nexit 2\n")).expect("fake Docker");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("executable fake Docker");
+        await_executable(&executable);
+        executable
+    }
+
+    fn proof_identity() -> PublicationIdentity {
+        PublicationIdentity {
+            id: "proof-assistant".into(),
+            version: "1.0.0".into(),
+            creators: vec!["@creator".into()],
+            name: "Proof".into(),
+            summary: "Proves staging.".into(),
+        }
+    }
+
+    fn image(character: char) -> String {
+        format!("sha256:{}", character.to_string().repeat(64))
+    }
+
+    /// The fields `validate_image` expects for `image_id` when it carries the Assistant's tag.
+    fn contract_fields(image_id: &str, build: &str) -> String {
+        [
+            image_id,
+            "amd64",
+            "[]",
+            "[\"shimpz-local/proof-assistant:staged\"]",
+            LOCAL_STAGE_VALUE,
+            "proof-assistant",
+            "Proof",
+            "Proves staging.",
+            "@creator",
+            &image('d'),
+            "1.0.0",
+            build,
+            "ping",
+            "",
+        ]
+        .join("\\n")
+    }
+
+    fn stage_proof(docker: &Path, context: &Path, build: &str) -> Result<String, String> {
+        let identity = proof_identity();
+        stage_image(
+            docker,
+            context,
+            &identity,
+            &image('d'),
+            build,
+            "linux/amd64",
+            &DiscoveryProjection {
+                actions: vec!["ping".into()],
+                integrations: Vec::new(),
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_only_this_assistants_current_tag() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let reference = canonical_reference("proof-assistant");
+        assert_eq!(reference, "shimpz-local/proof-assistant:staged");
+        let absent = fake_docker(
+            directory.path(),
+            "printf 'Error response from daemon: No such image: x\\n' >&2; exit 1",
+        );
+        assert!(
+            current_image(&absent, &reference, "proof-assistant")
+                .expect("absent")
+                .is_none()
+        );
+
+        for (tags, owner, digests) in [
+            (
+                "[\\\"shimpz-local/proof-assistant:staged\\\"]",
+                "other-assistant",
+                "[]",
+            ),
+            (
+                "[\\\"shimpz-local/proof-assistant:staged\\\",\\\"extra:tag\\\"]",
+                "proof-assistant",
+                "[]",
+            ),
+            (
+                "[\\\"shimpz-local/proof-assistant:staged\\\"]",
+                "proof-assistant",
+                "[\\\"registry/x@sha256:1\\\"]",
+            ),
+        ] {
+            let foreign = fake_docker(
+                directory.path(),
+                &format!(
+                    "printf '%s\\n' '{}' '{digests}' '{tags}' '{LOCAL_STAGE_VALUE}' '{owner}' '{}' 'nonce'; exit 0",
+                    image('a'),
+                    image('b')
+                ),
+            );
+            let error = current_image(&foreign, &reference, "proof-assistant")
+                .err()
+                .expect("foreign tag");
+            assert!(
+                error.contains("outside this Assistant's Local snapshots"),
+                "{error}"
+            );
+        }
+
+        let docker_error = fake_docker(directory.path(), "printf 'daemon offline\\n' >&2; exit 1");
+        assert!(current_image(&docker_error, &reference, "proof-assistant").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_identical_current_snapshot_is_reused_without_building_or_retagging() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let calls = directory.path().join("calls");
+        let current = image('a');
+        let build = image('b');
+        let docker = fake_docker(
+            directory.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{calls}'\n\
+                 case \"$4\" in *Architecture*) printf '{fields}\\n'; exit 0;; '{{{{.Id}}}}') printf '%s\\n' '{current}'; exit 0;; esac\n\
+                 printf '%s\\n' '{current}' '[]' '[\"shimpz-local/proof-assistant:staged\"]' '{LOCAL_STAGE_VALUE}' 'proof-assistant' '{build}' 'earlier-nonce'; exit 0",
+                calls = calls.display(),
+                fields = contract_fields(&current, &build),
+            ),
+        );
+        assert_eq!(stage_proof(&docker, directory.path(), &build), Ok(current));
+        let calls = fs::read_to_string(calls).expect("calls");
+        assert!(!calls.contains("buildx"));
+        assert!(!calls.lines().any(|call| call.starts_with("tag ")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_snapshot_is_built_already_tagged_and_becomes_current() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let calls = directory.path().join("calls");
+        let previous = image('a');
+        let built = image('c');
+        let build_digest = image('b');
+        let docker = fake_docker(
+            directory.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{calls}'\n\
+                 if [ \"$1\" = buildx ]; then while [ \"$#\" -gt 0 ]; do [ \"$1\" = --iidfile ] && printf '%s' '{built}' > \"$2\"; shift; done; exit 0; fi\n\
+                 case \"$4\" in *Architecture*) printf '{fields}\\n'; exit 0;; '{{{{.Id}}}}') printf '%s\\n' '{built}'; exit 0;; esac\n\
+                 printf '%s\\n' '{previous}' '[]' '[\"shimpz-local/proof-assistant:staged\"]' '{LOCAL_STAGE_VALUE}' 'proof-assistant' '{old}' 'earlier-nonce'; exit 0",
+                calls = calls.display(),
+                fields = contract_fields(&built, &build_digest),
+                old = image('e'),
+            ),
+        );
+        assert_eq!(
+            stage_proof(&docker, directory.path(), &build_digest),
+            Ok(built)
+        );
+        let calls = fs::read_to_string(calls).expect("calls");
+        let build_call = calls
+            .lines()
+            .find(|call| call.starts_with("buildx build"))
+            .expect("build");
+        assert!(build_call.contains("--tag shimpz-local/proof-assistant:staged"));
+        assert!(build_call.contains("--label org.shimpz.local.stage.nonce="));
+        assert!(!calls.lines().any(|call| call.starts_with("tag ")));
+    }
+
+    /// A fake daemon whose canonical tag moves to the built image on load, like `buildx build --load --tag`,
+    /// unless `intruder` makes another stage's image take the tag while this build fails without loading.
+    #[cfg(unix)]
+    fn moving_tag_docker(
+        directory: &Path,
+        previous: Option<&str>,
+        build_exit: u8,
+        mutation_exit: u8,
+        intruder: bool,
+    ) -> (PathBuf, PathBuf) {
+        let calls = directory.join("calls");
+        let moved = directory.join("moved");
+        let nonce = directory.join("nonce");
+        for file in [&calls, &moved, &nonce] {
+            let _ = fs::remove_file(file);
+        }
+        let built = image('c');
+        let owned = |id: &str, stage_nonce: &str| {
+            format!(
+                "printf '%s\\n' '{id}' '[]' '[\"shimpz-local/proof-assistant:staged\"]' '{LOCAL_STAGE_VALUE}' 'proof-assistant' '{}' {stage_nonce}; exit 0",
+                image('e')
+            )
+        };
+        let before = previous.map_or_else(
+            || "printf 'No such image\\n' >&2; exit 1".to_owned(),
+            |id| owned(id, "'earlier-nonce'"),
+        );
+        let load = if intruder {
+            format!("printf '%s' '{}' > '{}'", image('f'), moved.display())
+        } else {
+            format!("printf '%s' '{built}' > '{}'", moved.display())
+        };
+        let script = format!(
+            "printf '%s\\n' \"$*\" >> '{calls}'\n\
+             if [ \"$1\" = buildx ]; then {load}; while [ \"$#\" -gt 0 ]; do case \"$1\" in org.shimpz.local.stage.nonce=*) printf '%s' \"${{1#*=}}\" > '{nonce}';; --iidfile) printf '%s' '{built}' > \"$2\";; esac; shift; done; exit {build_exit}; fi\n\
+             if [ \"$1\" = tag ] || [ \"$2\" = rm ]; then [ {mutation_exit} = 0 ] && rm -f '{moved}'; exit {mutation_exit}; fi\n\
+             case \"$4\" in *Architecture*) printf 'wrong\\n'; exit 0;; esac\n\
+             if [ -f '{moved}' ] && [ \"$(cat '{moved}')\" = '{built}' ]; then {ours}; fi\n\
+             if [ -f '{moved}' ]; then {theirs}; fi\n\
+             {before}",
+            calls = calls.display(),
+            moved = moved.display(),
+            nonce = nonce.display(),
+            ours = owned(&built, &format!("\"$(cat '{}')\"", nonce.display())),
+            theirs = owned(&image('f'), "'another-stage'"),
+        );
+        (fake_docker(directory, &script), calls)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_stage_reconciles_only_its_own_tag_move() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let previous = image('a');
+        let built = image('c');
+        for (build_exit, mutation_exit, has_previous, expected) in [
+            (0, 0, true, "the previous Local snapshot remains current"),
+            (0, 1, true, "could not be made current again"),
+            (1, 0, true, "the previous Local snapshot remains current"),
+            (0, 0, false, "the invalid snapshot was removed"),
+            (1, 0, false, "the invalid snapshot was removed"),
+            (0, 1, false, "run 'shimpz assistant unstage'"),
+        ] {
+            let (docker, calls) = moving_tag_docker(
+                directory.path(),
+                has_previous.then_some(previous.as_str()),
+                build_exit,
+                mutation_exit,
+                false,
+            );
+            let error = stage_proof(&docker, directory.path(), &image('b')).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            let calls = fs::read_to_string(&calls).expect("calls");
+            if has_previous {
+                assert!(calls.contains(&format!(
+                    "tag {previous} shimpz-local/proof-assistant:staged"
+                )));
+            } else {
+                assert!(calls.contains(&format!("image rm --no-prune {built}")));
+            }
+        }
+
+        for has_previous in [true, false] {
+            let (docker, calls) = moving_tag_docker(
+                directory.path(),
+                has_previous.then_some(previous.as_str()),
+                1,
+                0,
+                true,
+            );
+            let error = stage_proof(&docker, directory.path(), &image('b')).unwrap_err();
+            assert!(error.contains("changed by another staging"), "{error}");
+            let calls = fs::read_to_string(&calls).expect("calls");
+            assert!(
+                !calls
+                    .lines()
+                    .any(|call| call.starts_with("tag ") || call.starts_with("image rm"))
+            );
+        }
+
+        let unreadable = fake_docker(directory.path(), "printf 'daemon offline\\n' >&2; exit 1");
+        let identity = proof_identity();
+        let error = reconcile_current(
+            &unreadable,
+            &canonical_reference(&identity.id),
+            &identity.id,
+            None,
+            "nonce",
+            "build failed",
+        );
+        assert!(error.contains("could not be read"), "{error}");
+    }
+
+    #[test]
+    fn every_stage_carries_a_distinct_nonce() {
+        let first = stage_nonce();
+        assert_eq!(first.len(), 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, stage_nonce());
     }
 
     #[test]

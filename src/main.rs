@@ -13,6 +13,7 @@ mod new_assistant;
 mod output;
 mod publish;
 mod python;
+mod snapshot_lock;
 mod source_package;
 mod space;
 mod stage;

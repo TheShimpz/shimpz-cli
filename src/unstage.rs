@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use crate::manifest::PublicationIdentity;
-use crate::{output, source_package, stage};
+use crate::{output, snapshot_lock, source_package, stage};
 
 const MAX_BATCH: usize = 50;
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -16,6 +16,7 @@ const INSPECT_TEMPLATE: &str = "{{.Id}}\n{{index .Config.Labels \"org.shimpz.loc
 pub(crate) fn run(project: &Path) -> Result<String, String> {
     let manifest = source_package::read_manifest(project)?;
     let identity = PublicationIdentity::parse(&manifest)?;
+    let _lock = snapshot_lock::acquire(&identity.id)?;
     let docker = stage::connect_docker_daemon()?;
     let removed = remove_all(&docker, &identity.id)?;
     Ok(removal_success(&identity.id, removed))
@@ -112,8 +113,11 @@ fn remove_images(docker: &Path, assistant_id: &str, images: &[String]) -> Result
     let mut remaining = Vec::new();
     let mut first_failure = None;
     for image_id in images {
+        // Removal by exact id untags and deletes the current snapshot in one step, so a refusal keeps its tag.
         match docker_output(docker, ["image", "rm", "--no-prune", image_id.as_str()]) {
             Ok(result) if result.status.success() => {}
+            // The Local Space may have collected a superseded snapshot meanwhile; absence is the desired state.
+            Ok(_) if image_absent(docker, image_id)? => {}
             Ok(result) => {
                 remaining.push(image_id.as_str());
                 first_failure.get_or_insert_with(|| docker_failure_detail(&result));
@@ -134,6 +138,18 @@ fn remove_images(docker: &Path, assistant_id: &str, images: &[String]) -> Result
         ));
     }
     Ok(images.len())
+}
+
+fn image_absent(docker: &Path, image_id: &str) -> Result<bool, String> {
+    let result = docker_output(
+        docker,
+        ["image", "inspect", "--format", "{{.Id}}", image_id],
+    )?;
+    if result.status.success() {
+        return Ok(false);
+    }
+    let detail = String::from_utf8_lossy(&result.stderr);
+    Ok(detail.contains("No such image") || detail.contains("No such object"))
 }
 
 fn removal_success(assistant_id: &str, removed: usize) -> String {
@@ -249,6 +265,7 @@ mod tests {
         fs::write(&executable, script).expect("fake Docker");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
             .expect("executable fake Docker");
+        crate::stage::await_executable(&executable);
 
         let images = staged_images(&executable, "proof-assistant").expect("inventory");
         assert_eq!(images, vec![first, second]);
@@ -267,6 +284,48 @@ mod tests {
                 .iter()
                 .all(|call| call.contains("image rm --no-prune sha256:"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_collected_during_removal_counts_as_removed() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::remove_images;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let executable = directory.path().join("docker-proof");
+        let collected = image('a');
+        let refused = image('b');
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$2\" = \"rm\" ]; then printf 'conflict\\n' >&2; exit 1; fi\n\
+             if [ \"$2\" = \"inspect\" ] && [ \"$5\" = '{collected}' ]; then printf 'Error: No such image: %s\\n' \"$5\" >&2; exit 1; fi\n\
+             if [ \"$2\" = \"inspect\" ]; then printf '%s\\n' \"$5\"; exit 0; fi\n\
+             exit 2\n"
+        );
+        fs::write(&executable, script).expect("fake Docker");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("executable fake Docker");
+        crate::stage::await_executable(&executable);
+
+        assert_eq!(
+            remove_images(
+                &executable,
+                "proof-assistant",
+                std::slice::from_ref(&collected)
+            ),
+            Ok(1)
+        );
+        let failure = remove_images(
+            &executable,
+            "proof-assistant",
+            &[collected, refused.clone()],
+        )
+        .unwrap_err();
+        assert!(failure.contains("1 of 2"));
+        assert!(failure.contains(&refused));
     }
 
     #[cfg(unix)]
@@ -302,6 +361,7 @@ mod tests {
         fs::write(&executable, script).expect("fake Docker");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
             .expect("executable fake Docker");
+        crate::stage::await_executable(&executable);
 
         assert_eq!(
             remove_all(&executable, "proof-assistant"),
@@ -344,6 +404,7 @@ mod tests {
         fs::write(&executable, script).expect("fake Docker");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
             .expect("executable fake Docker");
+        crate::stage::await_executable(&executable);
 
         let failure = remove_all(&executable, "proof-assistant").unwrap_err();
 
