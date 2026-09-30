@@ -502,51 +502,87 @@ impl Context {
         let previous = installed
             .map(|_| backup_current(&self.paths, self.profile))
             .transpose()?;
+        let candidate = Candidate {
+            release,
+            installed,
+            space_id,
+            port,
+            docker_gid,
+            docker_socket: &docker_socket,
+        };
+        let previous = self.start_or_roll_back(&candidate, previous)?;
+        remove_backup(previous)?;
+        finish_failed_release_memory(&self.paths, preserve_failed_release)?;
+        Ok(ApplyOutcome::Ready { port })
+    }
+
+    /// Start the candidate; once its files replace the live ones, every failure before its status is committed
+    /// rolls back, so no failure leaves the candidate configuration in place with the previous backup orphaned.
+    /// On success the backup is returned for removal.
+    fn start_or_roll_back(
+        &self,
+        candidate: &Candidate<'_>,
+        previous: Option<Backup>,
+    ) -> Result<Option<Backup>, String> {
+        let Err(cause) = self.replace_and_start(candidate) else {
+            return Ok(previous);
+        };
+        let outcome = match self.rollback(candidate.release, candidate.space_id, previous) {
+            Ok(outcome) | Err(outcome) => outcome,
+        };
+        Err(match cause {
+            Some(cause) => format!("{cause}; {outcome}"),
+            None => outcome,
+        })
+    }
+
+    /// Replace the live configuration with the candidate, start it, and commit its status. An `Err` carries the
+    /// cause to report before the rollback outcome, or `None` when the rollback outcome alone describes it.
+    fn replace_and_start(&self, candidate: &Candidate<'_>) -> Result<(), Option<String>> {
+        let release = candidate.release;
         state::write_environment(
             &self.paths,
             &Environment {
                 release,
                 profile: self.profile,
-                space_id,
-                port,
-                docker_gid,
-                docker_socket: &docker_socket,
+                space_id: candidate.space_id,
+                port: candidate.port,
+                docker_gid: candidate.docker_gid,
+                docker_socket: candidate.docker_socket,
                 cpuset: &self.engine.cpuset,
                 secure_root: &self.paths.pool_mount,
             },
-        )?;
-        state::write_private(&self.paths.compose, &graph::render(self.profile.storage()))?;
-        state::clear_stopped(&self.paths)?;
+        )
+        .map_err(Some)?;
+        state::write_private(&self.paths.compose, &graph::render(self.profile.storage()))
+            .map_err(Some)?;
+        state::clear_stopped(&self.paths).map_err(Some)?;
         output::progress("Starting the Shimpz Space...");
-        let started = self.engine.compose(
-            &self.paths,
-            [
-                "up",
-                "-d",
-                "--wait",
-                "--wait-timeout",
-                "120",
-                "--no-build",
-                "--pull",
-                "never",
-                "--remove-orphans",
-            ],
-        )?;
+        let started = self
+            .engine
+            .compose(
+                &self.paths,
+                [
+                    "up",
+                    "-d",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "--remove-orphans",
+                ],
+            )
+            .map_err(Some)?;
         if !started.success() {
-            return match self.rollback(release, space_id, previous) {
-                Ok(outcome) | Err(outcome) => Err(outcome),
-            };
+            return Err(None);
         }
-        if let Err(storage_error) = self.validate_started_storage(space_id) {
-            let rollback = self.rollback(release, space_id, previous);
-            return match rollback {
-                Ok(outcome) | Err(outcome) => Err(format!("{storage_error}; {outcome}")),
-            };
-        }
+        self.validate_started_storage(candidate.space_id)
+            .map_err(Some)?;
         output::progress("Verifying Supervisor authentication compatibility...");
-        let was_upgrade = previous.is_some();
-        let authentication_error = match admin_authentication_state(port) {
-            Ok(AdminAuthenticationState::RecoveryRequired) if was_upgrade => Some(
+        let authentication_error = match admin_authentication_state(candidate.port) {
+            Ok(AdminAuthenticationState::RecoveryRequired) if candidate.installed.is_some() => Some(
                 "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install"
                     .to_owned(),
             ),
@@ -560,26 +596,18 @@ impl Context {
             ) => None,
             Err(error) => Some(error),
         };
-        if let Some(authentication_error) = authentication_error {
-            let rollback = self.rollback(release, space_id, previous);
-            return match rollback {
-                Ok(outcome) | Err(outcome) => Err(format!("{authentication_error}; {outcome}")),
-            };
+        if authentication_error.is_some() {
+            return Err(authentication_error);
         }
-        let status =
-            state::write_status(&self.paths, release, release_outcome(release, installed))?;
-        if self
-            .engine
+        let status = state::write_status(
+            &self.paths,
+            release,
+            release_outcome(release, candidate.installed),
+        )
+        .map_err(Some)?;
+        self.engine
             .project_release_status(&release.metadata.admin, status.as_bytes())
-            .is_err()
-        {
-            return match self.rollback(release, space_id, previous) {
-                Ok(outcome) | Err(outcome) => Err(outcome),
-            };
-        }
-        remove_backup(previous)?;
-        finish_failed_release_memory(&self.paths, preserve_failed_release)?;
-        Ok(ApplyOutcome::Ready { port })
+            .map_err(|_| None)
     }
 
     fn download_and_admit_candidate(
@@ -1389,6 +1417,16 @@ fn hard_reset_preflight(error: &str) -> String {
     format!(
         "{error}; nothing changed; resolve the reported Local ownership or host prerequisite, then re-run shimpz reset --hard"
     )
+}
+
+/// The release a lifecycle run is replacing the live configuration with.
+struct Candidate<'a> {
+    release: &'a ResolvedRelease,
+    installed: Option<&'a Installed>,
+    space_id: &'a str,
+    port: u16,
+    docker_gid: u32,
+    docker_socket: &'a Path,
 }
 
 #[derive(Debug)]
@@ -2361,6 +2399,41 @@ mod tests {
             "{outcome}"
         );
         assert!(!outcome.contains("restored"), "{outcome}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_compose_invocation_failure_after_replacement_restores_the_previous_release() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, backup) = installed_space(home.path(), home.path().join("missing-docker"));
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        let candidate_release = release(2, 'b');
+        let candidate = Candidate {
+            release: &candidate_release,
+            installed: Some(&installed),
+            space_id: &installed.space_id,
+            port: installed.port,
+            docker_gid: 0,
+            docker_socket: Path::new("/var/run/docker.sock.raw"),
+        };
+
+        assert!(
+            context
+                .start_or_roll_back(&candidate, Some(backup))
+                .is_err()
+        );
+
+        let restored = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        assert_eq!(restored.ordinal, 1);
+        assert_eq!(restored.release_ref, release(1, 'a').reference);
+        assert!(!context.paths.compose.with_extension("previous").exists());
+        assert!(
+            !context
+                .paths
+                .environment
+                .with_extension("previous")
+                .exists()
+        );
     }
 
     #[test]
