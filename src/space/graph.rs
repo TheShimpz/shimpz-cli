@@ -4,7 +4,7 @@ const TEMPLATE: &str = include_str!("../../contracts/local-space/compose.yaml");
 const VOLUME_TOKEN: &str = "{{SHIMPZ_VOLUME_DEFINITIONS}}";
 const VOLUME_NOCOPY_TOKEN: &str = "{{SHIMPZ_VOLUME_NOCOPY}}";
 
-pub(crate) const VOLUME_NAMES: [&str; 26] = [
+pub(crate) const VOLUME_NAMES: [&str; 28] = [
     "config",
     "data",
     "controller_token",
@@ -20,6 +20,8 @@ pub(crate) const VOLUME_NAMES: [&str; 26] = [
     "controller_chat_continuation_key",
     "controller_assistant_stored_input_state",
     "controller_assistant_stored_input_key",
+    "controller_routine_state",
+    "controller_routine_key",
     "supervisor_key",
     "release_status",
     "reset_capability",
@@ -109,8 +111,8 @@ mod tests {
         );
         assert!(!managed.contains("      o: bind"));
         assert!(!managed.contains("SHIMPZ_SECURE_VOLUME_ROOT"));
-        assert_eq!(linux.matches("        nocopy: true").count(), 32);
-        assert_eq!(managed.matches("        nocopy: false").count(), 32);
+        assert_eq!(linux.matches("        nocopy: true").count(), 34);
+        assert_eq!(managed.matches("        nocopy: false").count(), 34);
         assert!(!linux.contains("        nocopy: false"));
         assert!(!managed.contains("        nocopy: true"));
     }
@@ -142,7 +144,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(mount_count, 32);
+            assert_eq!(mount_count, 34);
             assert_eq!(socket_count, 1);
             assert_eq!(sources, VOLUME_NAMES.into_iter().collect::<BTreeSet<_>>());
         }

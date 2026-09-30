@@ -133,6 +133,17 @@ services:
         target: /var/lib/shimpz-local/assistant-stored-inputs/key
         volume:
           nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      # Team Routines (ADR-0086): each Team's Routine state and the key of its encrypted frozen continuations.
+      - type: volume
+        source: controller_routine_state
+        target: /var/lib/shimpz-local/routines/state
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_routine_key
+        target: /var/lib/shimpz-local/routines/key
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
       - type: volume
         source: assistant_egress_policy
         target: /var/lib/shimpz-local/assistant-egress
