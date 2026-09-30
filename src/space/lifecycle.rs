@@ -985,20 +985,33 @@ impl Context {
                 .arg("--candidate");
         }
         if let Some(reason) = handoff_failure(command.stdin(Stdio::null()).status()) {
-            if release_committed(&self.paths, self.profile, release) {
-                // The child committed this release before failing, for example while enabling its scheduler, so
-                // the Space now runs the release this CLI is bound to; the previous CLI must not be paired with it.
-                let failure = format!(
-                    "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
-                );
-                return Err(
-                    match remove_regular_if_present(&previous)
-                        .and_then(|()| ensure_public_cli(&self.paths))
-                    {
-                        Ok(()) => failure,
-                        Err(error) => format!("{failure}; {error}"),
-                    },
-                );
+            match commit_evidence(&self.paths, self.profile, release) {
+                CommitEvidence::Committed => {
+                    // The child committed this release before failing, for example while enabling its scheduler,
+                    // so the Space now runs the release this CLI is bound to; the previous CLI must not be paired
+                    // with it.
+                    let failure = format!(
+                        "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
+                    );
+                    return Err(
+                        match remove_regular_if_present(&previous)
+                            .and_then(|()| ensure_public_cli(&self.paths))
+                        {
+                            Ok(()) => failure,
+                            Err(error) => format!("{failure}; {error}"),
+                        },
+                    );
+                }
+                CommitEvidence::Unknown(cause) => {
+                    // Neither CLI can be proved to match the Space, so neither is discarded.
+                    return Err(format!(
+                        "the release-bound CLI did not complete ({reason}), and whether it committed the release could not be determined: {cause}; both CLIs were kept: {} (release-bound) and {} (previous). Next: run {} install; it reconciles the Space, offers recovery when its state is corrupt, and removes the previous CLI",
+                        self.paths.managed_cli.display(),
+                        previous.display(),
+                        self.paths.managed_cli.display()
+                    ));
+                }
+                CommitEvidence::NotCommitted => {}
             }
             restore_previous_cli(&self.paths.managed_cli, &previous)?;
             return Err(format!(
@@ -1669,16 +1682,49 @@ fn validate_private_cli(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `release` is the committed installed release: its environment is live and the status records its
-/// successful reconciliation. The environment alone is written before health is proved; the success status is the
-/// commit's last write, and a rollback replaces or removes it.
-fn release_committed(paths: &Paths, profile: HostProfile, release: &ResolvedRelease) -> bool {
-    let Ok(installed) = state::read_installed(paths, profile) else {
-        return false;
+#[derive(Debug, Eq, PartialEq)]
+enum CommitEvidence {
+    Committed,
+    NotCommitted,
+    Unknown(String),
+}
+
+/// What the durable Local state proves about whether `release` committed. It committed only when its environment is
+/// live and the status records its successful reconciliation: the environment is written before health is proved,
+/// and the success status is the commit's last write, which a rollback replaces or removes. A missing environment,
+/// an environment of another release, or a missing or other valid status proves it did not; anything unreadable or
+/// malformed proves nothing.
+fn commit_evidence(
+    paths: &Paths,
+    profile: HostProfile,
+    release: &ResolvedRelease,
+) -> CommitEvidence {
+    match paths.environment.symlink_metadata() {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CommitEvidence::NotCommitted;
+        }
+        Err(error) => {
+            return CommitEvidence::Unknown(format!(
+                "the installed Local environment could not be inspected: {error}"
+            ));
+        }
+    }
+    let installed = match state::read_installed(paths, profile) {
+        Ok(installed) => installed,
+        Err(error) => return CommitEvidence::Unknown(error),
     };
-    installed.release_ref == release.reference
-        && installed.ordinal == release.metadata.ordinal
-        && poll::reconciled(paths, &installed)
+    if installed.release_ref != release.reference {
+        return CommitEvidence::NotCommitted;
+    }
+    if installed.ordinal != release.metadata.ordinal {
+        return CommitEvidence::Unknown("the installed Local release ordinal is ambiguous".into());
+    }
+    match poll::status_record(paths, &release.reference, release.metadata.ordinal) {
+        poll::StatusRecord::Reconciled => CommitEvidence::Committed,
+        poll::StatusRecord::Other => CommitEvidence::NotCommitted,
+        poll::StatusRecord::Unknown(cause) => CommitEvidence::Unknown(cause.into()),
+    }
 }
 
 /// Make the verified release-bound CLI the managed executable. The caller holds the lifecycle lock and has admitted
@@ -3659,32 +3705,115 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn only_a_reconciled_installed_release_is_committed() {
+    fn commit_evidence_separates_proved_commits_rollbacks_and_unknown_state() {
         let home = tempfile::tempdir().unwrap();
         let (context, _backup) = installed_space(home.path(), PathBuf::from("/bin/false"));
         let paths = &context.paths;
         let installed = release(1, 'a');
-        // The environment is live, but the status has not recorded its reconciliation.
-        assert!(!release_committed(paths, HostProfile::MacOs, &installed));
-        state::write_status(paths, &installed, "current").unwrap();
-        // A backup that outlived the commit, for example after a failed cleanup, does not undo it.
-        assert!(release_committed(paths, HostProfile::MacOs, &installed));
-        assert!(!release_committed(
-            paths,
-            HostProfile::MacOs,
-            &release(2, 'b')
-        ));
-        // A commit recorded before a backward clock change still proves the commit.
-        let recorded = serde_json::json!({
-            "release": installed.reference,
-            "ordinal": 1,
-            "checked_at": u64::MAX,
-            "outcome": "updated",
-        });
-        state::write_private(&paths.status, &recorded.to_string()).unwrap();
-        assert!(release_committed(paths, HostProfile::MacOs, &installed));
+        let evidence =
+            |release: &ResolvedRelease| commit_evidence(paths, HostProfile::MacOs, release);
+        let record = |value: serde_json::Value| {
+            state::write_private(&paths.status, &value.to_string()).unwrap();
+        };
+        let unknown = |evidence: CommitEvidence| matches!(evidence, CommitEvidence::Unknown(_));
+
+        // Positive non-commit: no success record, a rollback record, another release, or no environment.
+        assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
         state::write_status(paths, &installed, "rollback-needed").unwrap();
-        assert!(!release_committed(paths, HostProfile::MacOs, &installed));
+        assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
+        state::write_status(paths, &release(2, 'b'), "updated").unwrap();
+        assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
+        assert_eq!(evidence(&release(2, 'b')), CommitEvidence::NotCommitted);
+
+        // A success record of the live release proves the commit, even after a backward clock change.
+        state::write_status(paths, &installed, "current").unwrap();
+        assert_eq!(evidence(&installed), CommitEvidence::Committed);
+        record(serde_json::json!({
+            "release": installed.reference, "ordinal": 1, "checked_at": u64::MAX, "outcome": "updated",
+        }));
+        assert_eq!(evidence(&installed), CommitEvidence::Committed);
+
+        // Unreadable, refused, or malformed records prove nothing.
+        fs::set_permissions(&paths.status, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(unknown(evidence(&installed)));
+        fs::remove_file(&paths.status).unwrap();
+        state::write_private(&paths.status, "{not json").unwrap();
+        assert!(unknown(evidence(&installed)));
+        record(serde_json::json!({
+            "release": installed.reference, "ordinal": 1, "checked_at": 1, "outcome": "updated", "extra": true,
+        }));
+        assert!(unknown(evidence(&installed)));
+        record(serde_json::json!({
+            "release": installed.reference, "ordinal": 1, "checked_at": 1, "outcome": "committed",
+        }));
+        assert!(unknown(evidence(&installed)));
+        record(serde_json::json!({
+            "release": "invalid", "ordinal": 1, "checked_at": 1, "outcome": "updated",
+        }));
+        assert!(unknown(evidence(&installed)));
+        record(serde_json::json!({
+            "release": release(2, 'b').reference, "ordinal": 0, "checked_at": 1, "outcome": "updated",
+        }));
+        assert!(unknown(evidence(&installed)));
+        record(serde_json::json!({
+            "release": installed.reference, "ordinal": 2, "checked_at": 1, "outcome": "updated",
+        }));
+        assert!(unknown(evidence(&installed)));
+        fs::remove_file(&paths.status).unwrap();
+        let elsewhere = home.path().join("status-elsewhere");
+        fs::write(&elsewhere, "{}").unwrap();
+        symlink(&elsewhere, &paths.status).unwrap();
+        assert!(unknown(evidence(&installed)));
+        fs::remove_file(&paths.status).unwrap();
+
+        state::write_status(paths, &installed, "current").unwrap();
+        fs::write(&paths.environment, "SHIMPZ_LOCAL_RELEASE_IMAGE\n").unwrap();
+        assert!(unknown(evidence(&installed)));
+        fs::remove_file(&paths.environment).unwrap();
+        assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_with_unknown_commit_evidence_keeps_both_clis() {
+        let home = tempfile::tempdir().unwrap();
+        let status = home.path().join(".shimpz/release-status.json");
+        let child_status = format!(
+            "cp '{}' '{}'\nprintf '%s' '{}' > '{}'\nchmod 400 '{}'\necho 'automatic Local updates were not enabled' >&2\nexit 1\n",
+            home.path().join("fixture/release-2.env").display(),
+            home.path().join(".shimpz/.env").display(),
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "updated",
+            }),
+            status.display(),
+            status.display(),
+        );
+        let (context, target, _) = handoff_space(home.path(), &child_status);
+
+        let error = context
+            .handoff_admitted_release(&target, false)
+            .unwrap_err();
+
+        assert!(
+            error.contains("whether it committed the release could not be determined: the Local release status is not a private record; both CLIs were kept"),
+            "{error}"
+        );
+        assert!(
+            error.contains(" install; it reconciles the Space, offers recovery"),
+            "{error}"
+        );
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_macos_arm64_sha256
+        );
+        assert_eq!(
+            fs::read_to_string(context.paths.managed_cli.with_extension("previous")).unwrap(),
+            "previous CLI"
+        );
+        assert!(!context.paths.public_cli.exists());
     }
 
     #[cfg(unix)]

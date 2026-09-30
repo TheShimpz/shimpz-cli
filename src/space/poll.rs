@@ -161,24 +161,86 @@ fn write_state(paths: &Paths, value: &PollState) -> Result<(), String> {
 /// The time of the last successful full reconciliation of exactly the installed release, or `None` when the
 /// evidence is missing, foreign, malformed, a rollback, or from the future.
 fn last_repair(paths: &Paths, installed: &Installed, now: u64) -> Option<u64> {
-    reconciled_at(paths, installed).filter(|checked_at| *checked_at <= now)
-}
-
-/// Whether the status records a successful full reconciliation of exactly the installed release. A committed
-/// apply writes this record last, so it proves the commit regardless of later clock changes.
-pub(crate) fn reconciled(paths: &Paths, installed: &Installed) -> bool {
-    reconciled_at(paths, installed).is_some()
-}
-
-fn reconciled_at(paths: &Paths, installed: &Installed) -> Option<u64> {
     let document = read_private_record(&paths.status, MAX_STATUS_BYTES)?;
-    let value: Value = serde_json::from_str(&document).ok()?;
+    let status = parse_status(&document)?;
+    (status.reconciles(&installed.release_ref, installed.ordinal) && status.checked_at <= now)
+        .then_some(status.checked_at)
+}
+
+struct Status {
+    release: String,
+    ordinal: u64,
+    checked_at: u64,
+    outcome: String,
+}
+
+impl Status {
+    fn reconciles(&self, release_ref: &str, ordinal: u64) -> bool {
+        self.release == release_ref
+            && self.ordinal == ordinal
+            && matches!(self.outcome.as_str(), "current" | "updated")
+    }
+}
+
+fn parse_status(document: &str) -> Option<Status> {
+    let value: Value = serde_json::from_str(document).ok()?;
     let object = value.as_object()?;
-    let valid = object.len() == 4
-        && object.get("release")?.as_str()? == installed.release_ref
-        && object.get("ordinal")?.as_u64()? == installed.ordinal
-        && matches!(object.get("outcome")?.as_str()?, "current" | "updated");
-    valid.then_some(object.get("checked_at")?.as_u64()?)
+    let outcome = object.get("outcome")?.as_str()?;
+    if object.len() != 4 || !matches!(outcome, "current" | "updated" | "rollback-needed") {
+        return None;
+    }
+    let release = object.get("release")?.as_str()?;
+    let ordinal = object.get("ordinal")?.as_u64()?;
+    if !super::release::valid_release_ref(release) || ordinal == 0 {
+        return None;
+    }
+    Some(Status {
+        release: release.to_owned(),
+        ordinal,
+        checked_at: object.get("checked_at")?.as_u64()?,
+        outcome: outcome.to_owned(),
+    })
+}
+
+/// What the Local release status proves about one exact release.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum StatusRecord {
+    /// A successful full reconciliation of exactly that release; a committed apply writes this record last.
+    Reconciled,
+    /// No record, or a valid record of another release or of a rollback: that release never committed after it.
+    Other,
+    /// The record exists but cannot be trusted, so it proves nothing either way.
+    Unknown(&'static str),
+}
+
+/// Classify the status record for exactly `release_ref` at `ordinal`, independent of the clock.
+pub(crate) fn status_record(paths: &Paths, release_ref: &str, ordinal: u64) -> StatusRecord {
+    let metadata = match fs::symlink_metadata(&paths.status) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return StatusRecord::Other,
+        Err(_) => {
+            return StatusRecord::Unknown("the Local release status could not be inspected");
+        }
+    };
+    let private = metadata.is_file()
+        && metadata.nlink() == 1
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && metadata.len() <= MAX_STATUS_BYTES;
+    if !private {
+        return StatusRecord::Unknown("the Local release status is not a private record");
+    }
+    let Ok(document) = fs::read_to_string(&paths.status) else {
+        return StatusRecord::Unknown("the Local release status could not be read");
+    };
+    match parse_status(&document) {
+        Some(status) if status.reconciles(release_ref, ordinal) => StatusRecord::Reconciled,
+        Some(status) if status.release == release_ref && status.ordinal != ordinal => {
+            StatusRecord::Unknown("the Local release status contradicts the release ordinal")
+        }
+        Some(_) => StatusRecord::Other,
+        None => StatusRecord::Unknown("the Local release status is malformed"),
+    }
 }
 
 /// Scheduled gate before any Docker work. Returns a message when the run may end here, or `None` when the full
