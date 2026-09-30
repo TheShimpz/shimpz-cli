@@ -140,24 +140,17 @@ impl Inventory {
     }
 
     pub(crate) fn container_names(&self, engine: &Engine) -> Result<Vec<String>, String> {
-        let mut names = BTreeSet::new();
-        for identifier in self
-            .project_containers
-            .iter()
-            .chain(self.dynamic_containers.iter())
-        {
-            let name = one_line(
-                &engine.run_output([
-                    "inspect",
-                    "--type=container",
-                    "--format",
-                    "{{.Name}}",
-                    identifier,
-                ])?,
-                "container name",
-            )?;
-            names.insert(name.trim_start_matches('/').to_owned());
-        }
+        let names: BTreeSet<_> = inspect_records(
+            engine,
+            &["inspect", "--type=container"],
+            Identity::Id,
+            "{{.Name}}",
+            &self.container_ids(),
+            "container name",
+        )?
+        .into_iter()
+        .map(|name| name.trim_start_matches('/').to_owned())
+        .collect();
         Ok(names.into_iter().collect())
     }
 
@@ -172,22 +165,20 @@ impl Inventory {
     }
 
     pub(crate) fn team_container_id(&self, engine: &Engine) -> Result<Option<String>, String> {
-        for identifier in &self.project_containers {
-            let name = one_line(
-                &engine.run_output([
-                    "inspect",
-                    "--type=container",
-                    "--format",
-                    "{{.Name}}",
-                    identifier,
-                ])?,
-                "container name",
-            )?;
-            if name == "/shimpz-team" {
-                return Ok(Some(identifier.clone()));
-            }
-        }
-        Ok(None)
+        let names = inspect_records(
+            engine,
+            &["inspect", "--type=container"],
+            Identity::Id,
+            "{{.Name}}",
+            &self.project_containers,
+            "container name",
+        )?;
+        Ok(self
+            .project_containers
+            .iter()
+            .zip(names)
+            .find(|(_, name)| name == "/shimpz-team")
+            .map(|(identifier, _)| identifier.clone()))
     }
 
     pub(crate) fn assistant_containers(&self) -> Vec<&str> {
@@ -292,19 +283,73 @@ fn read_space_id(paths: &Paths) -> Result<Option<String>, String> {
     Ok(Some(values[0].into()))
 }
 
+/// Docker inspects many objects per call; a bounded chunk keeps each command line small.
+const INSPECT_CHUNK: usize = 64;
+
+/// How an inspected record proves it answers the identifier that was asked for.
+#[derive(Clone, Copy)]
+enum Identity {
+    /// A container or network: the full 64-character id the listed short id prefixes.
+    Id,
+    /// A volume: its exact name.
+    Name,
+}
+
+/// Inspect `identifiers` in bounded batches instead of one Docker process each. Every record starts with the
+/// object's identity; the answer must hold exactly one record per requested identifier, in request order, each
+/// matching its request, or the whole inspection fails closed.
+fn inspect_records(
+    engine: &Engine,
+    command: &[&str],
+    identity: Identity,
+    format: &str,
+    identifiers: &[String],
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let malformed = || format!("{label} is malformed");
+    let format = match identity {
+        Identity::Id => format!("{{{{.Id}}}}|{format}"),
+        Identity::Name => format!("{{{{.Name}}}}|{format}"),
+    };
+    let mut records = Vec::with_capacity(identifiers.len());
+    for chunk in identifiers.chunks(INSPECT_CHUNK) {
+        let mut arguments = command.to_vec();
+        arguments.extend(["--format", format.as_str()]);
+        arguments.extend(chunk.iter().map(String::as_str));
+        let output = engine.run_output(arguments)?;
+        let lines: Vec<_> = output.lines().collect();
+        if lines.len() != chunk.len() {
+            return Err(malformed());
+        }
+        for (requested, line) in chunk.iter().zip(lines) {
+            let (answered, record) = line.split_once('|').ok_or_else(malformed)?;
+            let matches = match identity {
+                Identity::Id => {
+                    !requested.is_empty()
+                        && answered.len() == 64
+                        && answered.starts_with(requested.as_str())
+                }
+                Identity::Name => answered == requested,
+            };
+            if !matches || record.is_empty() {
+                return Err(malformed());
+            }
+            records.push(record.to_owned());
+        }
+    }
+    Ok(records)
+}
+
 fn validate_project_containers(engine: &Engine, identifiers: &[String]) -> Result<(), String> {
     let mut services = BTreeSet::new();
-    for identifier in identifiers {
-        let record = one_line(
-            &engine.run_output([
-                "inspect",
-                "--type=container",
-                "--format",
-                "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.Config.Image}}",
-                identifier,
-            ])?,
-            "Compose container",
-        )?;
+    for record in inspect_records(
+        engine,
+        &["inspect", "--type=container"],
+        Identity::Id,
+        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.Config.Image}}",
+        identifiers,
+        "Compose container",
+    )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 3 {
             return Err("a Compose container record is malformed".into());
@@ -326,17 +371,14 @@ fn validate_project_volumes(
     storage: StorageProfile,
     identifiers: &[String],
 ) -> Result<(), String> {
-    for identifier in identifiers {
-        let record = one_line(
-            &engine.run_output([
-                "volume",
-                "inspect",
-                "--format",
-                "{{.Name}}|{{index .Labels \"com.docker.compose.volume\"}}|{{.Driver}}|{{with .Options}}{{index . \"type\"}}{{end}}|{{with .Options}}{{index . \"o\"}}{{end}}|{{with .Options}}{{index . \"device\"}}{{end}}",
-                identifier,
-            ])?,
-            "Compose volume",
-        )?;
+    for record in inspect_records(
+        engine,
+        &["volume", "inspect"],
+        Identity::Name,
+        "{{.Name}}|{{index .Labels \"com.docker.compose.volume\"}}|{{.Driver}}|{{with .Options}}{{index . \"type\"}}{{end}}|{{with .Options}}{{index . \"o\"}}{{end}}|{{with .Options}}{{index . \"device\"}}{{end}}",
+        identifiers,
+        "Compose volume",
+    )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 6
             || !VOLUME_NAMES.contains(&fields[1])
@@ -363,17 +405,14 @@ fn validate_project_volumes(
 }
 
 fn validate_project_networks(engine: &Engine, identifiers: &[String]) -> Result<(), String> {
-    for identifier in identifiers {
-        let record = one_line(
-            &engine.run_output([
-                "network",
-                "inspect",
-                "--format",
-                "{{.Name}}|{{index .Labels \"com.docker.compose.network\"}}",
-                identifier,
-            ])?,
-            "Compose network",
-        )?;
+    for record in inspect_records(
+        engine,
+        &["network", "inspect"],
+        Identity::Id,
+        "{{.Name}}|{{index .Labels \"com.docker.compose.network\"}}",
+        identifiers,
+        "Compose network",
+    )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 2
             || !NETWORKS.contains(&fields[1])
@@ -391,17 +430,14 @@ fn validate_dynamic_containers(
     identifiers: &[String],
 ) -> Result<(), String> {
     let mut unique = BTreeSet::new();
-    for identifier in identifiers {
-        let record = one_line(
-            &engine.run_output([
-                "inspect",
-                "--type=container",
-                "--format",
-                "{{.Name}}|{{index .Config.Labels \"com.shimpz.local.managed\"}}|{{index .Config.Labels \"com.shimpz.local.profile\"}}|{{index .Config.Labels \"com.shimpz.local.space-id\"}}|{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{index .Config.Labels \"com.shimpz.local.team-id\"}}|{{index .Config.Labels \"com.shimpz.local.assistant-id\"}}",
-                identifier,
-            ])?,
-            "managed container",
-        )?;
+    for record in inspect_records(
+        engine,
+        &["inspect", "--type=container"],
+        Identity::Id,
+        "{{.Name}}|{{index .Config.Labels \"com.shimpz.local.managed\"}}|{{index .Config.Labels \"com.shimpz.local.profile\"}}|{{index .Config.Labels \"com.shimpz.local.space-id\"}}|{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{index .Config.Labels \"com.shimpz.local.team-id\"}}|{{index .Config.Labels \"com.shimpz.local.assistant-id\"}}",
+        identifiers,
+        "managed container",
+    )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 7 || fields[1] != "1" || fields[2] != PROFILE || fields[3] != space_id {
             return Err("a managed container has invalid ownership labels".into());
@@ -429,17 +465,14 @@ fn validate_dynamic_networks(
     space_id: &str,
     identifiers: &[String],
 ) -> Result<(), String> {
-    for identifier in identifiers {
-        let record = one_line(
-            &engine.run_output([
-                "network",
-                "inspect",
-                "--format",
-                "{{.Name}}|{{index .Labels \"com.shimpz.local.managed\"}}|{{index .Labels \"com.shimpz.local.profile\"}}|{{index .Labels \"com.shimpz.local.space-id\"}}|{{index .Labels \"com.shimpz.local.kind\"}}|{{index .Labels \"com.shimpz.local.team-id\"}}",
-                identifier,
-            ])?,
-            "managed network",
-        )?;
+    for record in inspect_records(
+        engine,
+        &["network", "inspect"],
+        Identity::Id,
+        "{{.Name}}|{{index .Labels \"com.shimpz.local.managed\"}}|{{index .Labels \"com.shimpz.local.profile\"}}|{{index .Labels \"com.shimpz.local.space-id\"}}|{{index .Labels \"com.shimpz.local.kind\"}}|{{index .Labels \"com.shimpz.local.team-id\"}}",
+        identifiers,
+        "managed network",
+    )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 6
             || !fields[0].starts_with("shimpz-local-")
@@ -522,15 +555,6 @@ fn same_ids(left: &[String], right: &[String]) -> bool {
     left.iter().collect::<BTreeSet<_>>() == right.iter().collect::<BTreeSet<_>>()
 }
 
-fn one_line(value: &str, label: &str) -> Result<String, String> {
-    let mut lines = value.lines();
-    let line = lines.next().filter(|line| !line.is_empty());
-    if line.is_none() || lines.next().is_some() {
-        return Err(format!("{label} is malformed"));
-    }
-    Ok(line.expect("checked").to_owned())
-}
-
 fn require_removed<const N: usize>(
     engine: &Engine,
     arguments: [&str; N],
@@ -549,6 +573,112 @@ fn require_removed<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake `docker` that logs each call and answers every identifier after `--format` from a `map` file whose
+    /// lines start with that identifier's full identity.
+    #[cfg(unix)]
+    fn fake_docker(map: &str) -> (tempfile::TempDir, Engine) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::write(root.join("map"), map).unwrap();
+        let command = root.join("docker");
+        std::fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf 'call\\n' >> '{calls}'\nseen=0\nfor argument in \"$@\"; do\n  \
+                 if [ \"$seen\" = 2 ]; then grep -m1 \"^$argument\" '{map}' || true; fi\n  \
+                 if [ \"$seen\" = 1 ]; then seen=2; fi\n  \
+                 if [ \"$argument\" = --format ]; then seen=1; fi\ndone\n",
+                calls = root.join("calls").display(),
+                map = root.join("map").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (temporary, Engine::with_docker(command))
+    }
+
+    #[cfg(unix)]
+    fn calls(temporary: &tempfile::TempDir) -> usize {
+        std::fs::read_to_string(temporary.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspects_resources_in_bounded_batches_instead_of_one_process_each() {
+        // 70 networks used to cost 70 Docker processes; bounded batches of 64 cost 2.
+        let identifiers: Vec<String> = (0..70).map(|index| format!("n{index:03}")).collect();
+        let map = identifiers
+            .iter()
+            .map(|id| format!("{id:0<64}|shimpz-space_egress|egress\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let (temporary, engine) = fake_docker(&map);
+        validate_project_networks(&engine, &identifiers).unwrap();
+        assert_eq!(calls(&temporary), 2);
+
+        let inventory = Inventory {
+            project_containers: identifiers[..3].to_vec(),
+            dynamic_containers: identifiers[1..4].to_vec(),
+            ..Inventory::default()
+        };
+        let names = identifiers[..4]
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let name = if index == 2 { "/shimpz-team" } else { "/other" };
+                format!("{id:0<64}|{name}\n")
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        let (temporary, engine) = fake_docker(&names);
+        assert_eq!(
+            inventory.container_names(&engine).unwrap(),
+            ["other", "shimpz-team"]
+        );
+        assert_eq!(
+            inventory.team_container_id(&engine).unwrap().as_deref(),
+            Some("n002")
+        );
+        assert_eq!(calls(&temporary), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_fails_closed_unless_each_record_answers_its_own_request() {
+        let requested = vec!["n001".to_owned(), "n002".to_owned()];
+        let one = format!("{:0<64}|shimpz-space_egress|egress\n", "n001");
+        // A missing record, a short identity, or a record for another object each refuse the inspection.
+        for map in [
+            one.clone(),
+            format!("{one}{:0<64}|shimpz-space_egress|egress\n", "n009"),
+        ] {
+            let (_temporary, engine) = fake_docker(&map);
+            assert!(validate_project_networks(&engine, &requested).is_err());
+        }
+        let short = "n001|shimpz-space_egress|egress\n";
+        let (_temporary, engine) = fake_docker(short);
+        assert!(validate_project_networks(&engine, &requested[..1]).is_err());
+        let volume =
+            "shimpz-space_team_storage2|shimpz-space_team_storage2|team_storage|local||||\n";
+        let (_temporary, engine) = fake_docker(volume);
+        assert!(
+            inspect_records(
+                &engine,
+                &["volume", "inspect"],
+                Identity::Name,
+                "{{.Name}}",
+                &["shimpz-space_team_storage".to_owned()],
+                "Compose volume",
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn validates_closed_dynamic_identifiers() {

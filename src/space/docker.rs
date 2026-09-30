@@ -516,6 +516,15 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_docker(docker: PathBuf) -> Self {
+        Self {
+            docker,
+            platform: "linux/amd64",
+            cpuset: "0".into(),
+        }
+    }
+
     pub(crate) fn run_output<I, S>(&self, arguments: I) -> Result<String, String>
     where
         I: IntoIterator<Item = S>,
