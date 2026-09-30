@@ -161,16 +161,24 @@ fn write_state(paths: &Paths, value: &PollState) -> Result<(), String> {
 /// The time of the last successful full reconciliation of exactly the installed release, or `None` when the
 /// evidence is missing, foreign, malformed, a rollback, or from the future.
 fn last_repair(paths: &Paths, installed: &Installed, now: u64) -> Option<u64> {
+    reconciled_at(paths, installed).filter(|checked_at| *checked_at <= now)
+}
+
+/// Whether the status records a successful full reconciliation of exactly the installed release. A committed
+/// apply writes this record last, so it proves the commit regardless of later clock changes.
+pub(crate) fn reconciled(paths: &Paths, installed: &Installed) -> bool {
+    reconciled_at(paths, installed).is_some()
+}
+
+fn reconciled_at(paths: &Paths, installed: &Installed) -> Option<u64> {
     let document = read_private_record(&paths.status, MAX_STATUS_BYTES)?;
     let value: Value = serde_json::from_str(&document).ok()?;
     let object = value.as_object()?;
-    let checked_at = object.get("checked_at")?.as_u64()?;
     let valid = object.len() == 4
         && object.get("release")?.as_str()? == installed.release_ref
         && object.get("ordinal")?.as_u64()? == installed.ordinal
-        && matches!(object.get("outcome")?.as_str()?, "current" | "updated")
-        && checked_at <= now;
-    valid.then_some(checked_at)
+        && matches!(object.get("outcome")?.as_str()?, "current" | "updated");
+    valid.then_some(object.get("checked_at")?.as_u64()?)
 }
 
 /// Scheduled gate before any Docker work. Returns a message when the run may end here, or `None` when the full

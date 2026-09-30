@@ -261,6 +261,12 @@ pub(crate) fn write_status(
     release: &ResolvedRelease,
     outcome: &str,
 ) -> Result<String, String> {
+    let document = status_document(release, outcome)?;
+    write_private(&paths.status, &document)?;
+    Ok(document)
+}
+
+pub(crate) fn status_document(release: &ResolvedRelease, outcome: &str) -> Result<String, String> {
     if !matches!(outcome, "current" | "updated" | "rollback-needed") {
         return Err("the Local release status outcome is invalid".into());
     }
@@ -274,7 +280,6 @@ pub(crate) fn write_status(
     if document.len() > 1_024 {
         return Err("the Local release status is too large".into());
     }
-    write_private(&paths.status, &document)?;
     Ok(document)
 }
 

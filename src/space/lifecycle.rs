@@ -611,15 +611,13 @@ impl Context {
         if authentication_error.is_some() {
             return Err(authentication_error);
         }
-        let status = state::write_status(
-            &self.paths,
-            release,
-            release_outcome(release, candidate.installed),
-        )
-        .map_err(Some)?;
+        let status = state::status_document(release, release_outcome(release, candidate.installed))
+            .map_err(Some)?;
         self.engine
             .project_release_status(&release.metadata.admin, status.as_bytes())
-            .map_err(|_| None)
+            .map_err(|_| None)?;
+        // The local success record is the commit's last write: it and the live environment prove the commit.
+        state::write_private(&self.paths.status, &status).map_err(Some)
     }
 
     fn download_and_admit_candidate(
@@ -987,6 +985,21 @@ impl Context {
                 .arg("--candidate");
         }
         if let Some(reason) = handoff_failure(command.stdin(Stdio::null()).status()) {
+            if release_committed(&self.paths, self.profile, release) {
+                // The child committed this release before failing, for example while enabling its scheduler, so
+                // the Space now runs the release this CLI is bound to; the previous CLI must not be paired with it.
+                let failure = format!(
+                    "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
+                );
+                return Err(
+                    match remove_regular_if_present(&previous)
+                        .and_then(|()| ensure_public_cli(&self.paths))
+                    {
+                        Ok(()) => failure,
+                        Err(error) => format!("{failure}; {error}"),
+                    },
+                );
+            }
             restore_previous_cli(&self.paths.managed_cli, &previous)?;
             return Err(format!(
                 "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
@@ -1051,7 +1064,9 @@ impl Context {
                 "--remove-orphans",
             ],
         )?;
-        let status = state::write_status(&self.paths, release, "rollback-needed")?;
+        // Persist and project independently: a failed local write must not leave Admin reporting the abandoned release.
+        let status = state::status_document(release, "rollback-needed")?;
+        let persisted = state::write_private(&self.paths.status, &status);
         if restored.success()
             && self
                 .engine
@@ -1068,10 +1083,14 @@ impl Context {
         } else {
             "the update and its rollback both failed"
         };
+        let primary = match persisted {
+            Ok(()) => primary.to_owned(),
+            Err(error) => format!("{primary}; the rollback status could not be recorded: {error}"),
+        };
         if memory_error.is_some() {
             return Err(format!("{primary}; {}", self.disable_automatic_updates()));
         }
-        Err(primary.into())
+        Err(primary)
     }
 
     fn disable_automatic_updates(&self) -> String {
@@ -1648,6 +1667,18 @@ fn validate_private_cli(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether `release` is the committed installed release: its environment is live and the status records its
+/// successful reconciliation. The environment alone is written before health is proved; the success status is the
+/// commit's last write, and a rollback replaces or removes it.
+fn release_committed(paths: &Paths, profile: HostProfile, release: &ResolvedRelease) -> bool {
+    let Ok(installed) = state::read_installed(paths, profile) else {
+        return false;
+    };
+    installed.release_ref == release.reference
+        && installed.ordinal == release.metadata.ordinal
+        && poll::reconciled(paths, &installed)
 }
 
 /// Make the verified release-bound CLI the managed executable. The caller holds the lifecycle lock and has admitted
@@ -3479,5 +3510,216 @@ mod tests {
         assert!(!paths.managed_cli.with_extension("candidate").exists());
         assert!(activate_cli(&paths, &paths.managed_cli, HEX).is_err());
         assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
+    }
+
+    /// A committed release-1 Space whose handoff to release 2 runs a fake release-bound child CLI. The child runs
+    /// `child_body` after recording its arguments; the fake Docker extracts that child as the release CLI.
+    #[cfg(unix)]
+    fn handoff_space(home: &Path, child_body: &str) -> (Context, ResolvedRelease, PathBuf) {
+        let root = home.join("fixture");
+        fs::create_dir(&root).unwrap();
+        let docker = root.join("docker");
+        let (context, backup) = installed_space(home, docker.clone());
+        remove_backup(Some(backup)).unwrap();
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        state::write_status(&context.paths, &release(1, 'a'), "current").unwrap();
+        let mut target = release(2, 'b');
+        // The committed release-2 environment the child installs when its apply reaches the commit.
+        fs::copy(&context.paths.environment, root.join("release-1.env")).unwrap();
+        state::write_environment(
+            &context.paths,
+            &Environment {
+                release: &target,
+                profile: HostProfile::MacOs,
+                space_id: &installed.space_id,
+                port: installed.port,
+                docker_gid: 0,
+                docker_socket: Path::new("/var/run/docker.sock.raw"),
+                cpuset: "0",
+                secure_root: &context.paths.pool_mount,
+            },
+        )
+        .unwrap();
+        fs::copy(&context.paths.environment, root.join("release-2.env")).unwrap();
+        fs::copy(root.join("release-1.env"), &context.paths.environment).unwrap();
+        let child = root.join("release-cli");
+        fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n{child_body}",
+                root.join("child-arguments").display()
+            ),
+        )
+        .unwrap();
+        target.metadata.cli_macos_arm64_sha256 = hash_file(&child).unwrap();
+        fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  create) printf '%s\\n' {} ;;\n  cp) cp '{}' \"$3\" ;;\n  *) exit 0 ;;\nesac\n",
+                "c".repeat(64),
+                child.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&docker);
+        fs::create_dir_all(context.paths.managed_cli.parent().unwrap()).unwrap();
+        private_file(&context.paths.managed_cli, "previous CLI", 0o700);
+        (context, target, root)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_failing_after_its_release_commit_keeps_the_release_bound_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let child_status = format!(
+            "cp '{}' '{}'\nprintf '%s' '{}' > '{}'\necho 'automatic Local updates were not enabled' >&2\nexit 1\n",
+            home.path().join("fixture/release-2.env").display(),
+            home.path().join(".shimpz/.env").display(),
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "updated",
+            }),
+            home.path().join(".shimpz/release-status.json").display(),
+        );
+        let (context, target, root) = handoff_space(home.path(), &child_status);
+
+        let error = context
+            .handoff_admitted_release(&target, false)
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("the release-bound CLI committed the release but did not complete (it exited with status 1)"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("child-arguments")).unwrap(),
+            format!("install --release {} --candidate\n", target.reference)
+        );
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_macos_arm64_sha256
+        );
+        assert!(
+            !context
+                .paths
+                .managed_cli
+                .with_extension("previous")
+                .exists()
+        );
+        assert!(
+            !context
+                .paths
+                .managed_cli
+                .with_extension("candidate")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_link(&context.paths.public_cli).unwrap(),
+            context.paths.managed_cli
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_that_rolled_back_restores_the_previous_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let child_status = format!(
+            "printf '%s' '{}' > '{}'\necho 'the previous healthy release was restored' >&2\nexit 1\n",
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "rollback-needed",
+            }),
+            home.path().join(".shimpz/release-status.json").display(),
+        );
+        let (context, target, _) = handoff_space(home.path(), &child_status);
+
+        let error = context
+            .handoff_admitted_release(&target, false)
+            .unwrap_err();
+
+        assert!(error.ends_with("the previous CLI was restored"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&context.paths.managed_cli).unwrap(),
+            "previous CLI"
+        );
+        assert!(
+            !context
+                .paths
+                .managed_cli
+                .with_extension("previous")
+                .exists()
+        );
+        assert!(!context.paths.public_cli.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_reconciled_installed_release_is_committed() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, _backup) = installed_space(home.path(), PathBuf::from("/bin/false"));
+        let paths = &context.paths;
+        let installed = release(1, 'a');
+        // The environment is live, but the status has not recorded its reconciliation.
+        assert!(!release_committed(paths, HostProfile::MacOs, &installed));
+        state::write_status(paths, &installed, "current").unwrap();
+        // A backup that outlived the commit, for example after a failed cleanup, does not undo it.
+        assert!(release_committed(paths, HostProfile::MacOs, &installed));
+        assert!(!release_committed(
+            paths,
+            HostProfile::MacOs,
+            &release(2, 'b')
+        ));
+        // A commit recorded before a backward clock change still proves the commit.
+        let recorded = serde_json::json!({
+            "release": installed.reference,
+            "ordinal": 1,
+            "checked_at": u64::MAX,
+            "outcome": "updated",
+        });
+        state::write_private(&paths.status, &recorded.to_string()).unwrap();
+        assert!(release_committed(paths, HostProfile::MacOs, &installed));
+        state::write_status(paths, &installed, "rollback-needed").unwrap();
+        assert!(!release_committed(paths, HostProfile::MacOs, &installed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_projects_its_status_even_when_it_cannot_record_it_locally() {
+        let home = tempfile::tempdir().unwrap();
+        let docker = home.path().join("docker");
+        let projected = home.path().join("projected");
+        fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
+                projected.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&docker);
+        let (context, backup) = installed_space(home.path(), docker);
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        // The local status staging path cannot be replaced, so recording the rollback status fails.
+        fs::create_dir(context.paths.status.with_extension("tmp")).unwrap();
+
+        let outcome = context
+            .rollback(&release(2, 'b'), &installed.space_id, Some(backup))
+            .unwrap_err();
+
+        assert!(
+            outcome.starts_with("the update failed; the previous healthy release was restored; the rollback status could not be recorded: "),
+            "{outcome}"
+        );
+        let document: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&projected).unwrap()).unwrap();
+        assert_eq!(document["release"], release(2, 'b').reference);
+        assert_eq!(document["outcome"], "rollback-needed");
+        assert!(!context.paths.status.exists());
     }
 }
