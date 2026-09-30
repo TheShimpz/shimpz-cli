@@ -1022,17 +1022,16 @@ impl Context {
                 "the previous release was restored, but Admin could not receive the rollback status",
             );
         }
-        if memory_error.is_some() {
-            return Err(format!(
-                "the previous release was restored, but {}",
-                self.disable_automatic_updates()
-            ));
-        }
-        if restored.success() {
-            Err("the update failed; the previous healthy release was restored".into())
+        // The restoration's own outcome leads; failed-release memory and scheduler diagnostics only follow it.
+        let primary = if restored.success() {
+            "the update failed; the previous healthy release was restored"
         } else {
-            Err("the update and its rollback both failed".into())
+            "the update and its rollback both failed"
+        };
+        if memory_error.is_some() {
+            return Err(format!("{primary}; {}", self.disable_automatic_updates()));
         }
+        Err(primary.into())
     }
 
     fn disable_automatic_updates(&self) -> String {
@@ -2311,6 +2310,57 @@ mod tests {
             fs::read_to_string(backup.environment).unwrap(),
             "current environment"
         );
+    }
+
+    /// A macOS Space whose live release is `ordinal` 1, backed up for an update, run by the given `docker`.
+    #[cfg(unix)]
+    fn installed_space(home: &Path, docker: PathBuf) -> (Context, Backup) {
+        let paths = Paths::under(home).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let space_id = state::random_space_id().unwrap();
+        state::write_environment(
+            &paths,
+            &Environment {
+                release: &release(1, 'a'),
+                profile: HostProfile::MacOs,
+                space_id: &space_id,
+                port: 7777,
+                docker_gid: 0,
+                docker_socket: Path::new("/var/run/docker.sock.raw"),
+                cpuset: "0",
+                secure_root: &paths.pool_mount,
+            },
+        )
+        .unwrap();
+        let backup = backup_current(&paths, HostProfile::MacOs).unwrap();
+        let context = Context {
+            paths,
+            profile: HostProfile::MacOs,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+        };
+        (context, backup)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_restoration_is_never_reported_as_restored() {
+        let home = tempfile::tempdir().unwrap();
+        // Every Compose call, including the restoration, exits unsuccessfully.
+        let (context, backup) = installed_space(home.path(), PathBuf::from("/bin/false"));
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        // The failed-release memory cannot be written, so the scheduler diagnostic follows the outcome.
+        fs::create_dir(&context.paths.failed_release).unwrap();
+
+        let outcome = context
+            .rollback(&release(2, 'b'), &installed.space_id, Some(backup))
+            .unwrap_err();
+
+        assert!(
+            outcome.starts_with("the update and its rollback both failed; "),
+            "{outcome}"
+        );
+        assert!(!outcome.contains("restored"), "{outcome}");
     }
 
     #[test]
