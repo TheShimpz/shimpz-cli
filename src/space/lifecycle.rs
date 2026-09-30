@@ -57,7 +57,7 @@ pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
     let _lock = (!options.candidate)
         .then(|| Lock::acquire(&context.paths))
         .transpose()?;
-    context.install(options.release.as_deref())
+    context.install(options.release.as_deref(), options.candidate)
 }
 
 pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
@@ -174,7 +174,7 @@ fn stop_absent(paths: &Paths) -> Result<String, String> {
     let engine = Engine::connect(profile, paths)?;
     let inventory = Inventory::inspect(&engine, paths, profile.storage())?;
     let residue = unmarked_runtime_entries(paths)?;
-    validate_unmarked_bin(paths)?;
+    validate_managed_bin(paths)?;
     if inventory.empty() && residue.is_empty() {
         Ok("Shimpz Space is not installed. No change was needed.\nNext: shimpz install".into())
     } else {
@@ -275,7 +275,7 @@ impl Context {
         })
     }
 
-    fn install(&self, exact_release: Option<&str>) -> Result<String, String> {
+    fn install(&self, exact_release: Option<&str>, candidate: bool) -> Result<String, String> {
         let marker = self.paths.marker_is_current()?;
         if !marker {
             adopt_unmarked_home(&self.paths)?;
@@ -305,7 +305,19 @@ impl Context {
             .engine
             .resolve_release(exact_release, &self.paths.home)?;
         validate_forward_release(&release, installed.as_ref())?;
-        if exact_release.is_none() && self.handoff_if_needed(&release, installed.as_ref(), false)? {
+        if exact_release.is_some() && !candidate {
+            // The acquisition bootstrap runs its verified CLI from outside the Space; that CLI becomes the managed
+            // executable only here, under the lifecycle lock and after admission. Apply then retains it.
+            let running =
+                std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?;
+            activate_cli(
+                &self.paths,
+                &running,
+                expected_cli_hash(&release, self.profile),
+            )?;
+        } else if exact_release.is_none()
+            && self.handoff_if_needed(&release, installed.as_ref(), false)?
+        {
             return Ok("The release-bound CLI completed the installation.".into());
         }
         if let Some(recommendation) = self
@@ -1543,7 +1555,7 @@ fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
             unowned.render()
         ));
     }
-    validate_unmarked_bin(paths)
+    validate_managed_bin(paths)
 }
 
 fn unmarked_runtime_entries(paths: &Paths) -> Result<PathReport, String> {
@@ -1564,16 +1576,20 @@ fn unmarked_runtime_entries(paths: &Paths) -> Result<PathReport, String> {
     Ok(entries)
 }
 
-fn validate_unmarked_bin(paths: &Paths) -> Result<(), String> {
+fn validate_managed_bin(paths: &Paths) -> Result<(), String> {
     let bin = paths
         .managed_cli
         .parent()
         .expect("managed CLI has a parent");
-    if !bin.exists() {
-        return Ok(());
-    }
-    let metadata = bin.symlink_metadata().map_err(io_error)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    let metadata = match bin.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+    {
         return Err(format!(
             "the managed CLI directory is invalid: {}",
             bin.display()
@@ -1632,6 +1648,68 @@ fn validate_private_cli(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Make the verified release-bound CLI the managed executable. The caller holds the lifecycle lock and has admitted
+/// the exact release; nothing restores the previous executable, because apply retains the release-bound CLI.
+fn activate_cli(paths: &Paths, running: &Path, expected: &str) -> Result<(), String> {
+    let bin = paths
+        .managed_cli
+        .parent()
+        .expect("managed CLI has a parent");
+    match bin.symlink_metadata() {
+        Ok(_) => validate_managed_bin(paths)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(bin).map_err(io_error)?;
+        }
+        Err(error) => return Err(io_error(error)),
+    }
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    let candidate = paths.managed_cli.with_extension("candidate");
+    if same_file(running, &paths.managed_cli)? {
+        // Replacing the running managed executable would unlink the image that apply verifies; keep its inode.
+        if hash_file(&paths.managed_cli)? != expected {
+            return Err("the running CLI is not bound to the selected Local release".into());
+        }
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700))
+            .map_err(io_error)?;
+        remove_regular_if_present(&candidate)?;
+    } else {
+        remove_regular_if_present(&candidate)?;
+        let staged = stage_cli(running, &candidate, expected)
+            .and_then(|()| fs::rename(&candidate, &paths.managed_cli).map_err(io_error));
+        if let Err(error) = staged {
+            return Err(match remove_regular_if_present(&candidate) {
+                Ok(()) => error,
+                Err(cleanup) => format!("{error}; the staged CLI could not be removed: {cleanup}"),
+            });
+        }
+    }
+    remove_regular_if_present(&paths.managed_cli.with_extension("previous")).map_err(|error| {
+        format!(
+            "the release-bound CLI was installed, but a stale previous CLI could not be removed: {error}; run the installer again"
+        )
+    })
+}
+
+/// Copy the release-bound CLI to its private staging path and verify the copied bytes, not only their source.
+fn stage_cli(source: &Path, candidate: &Path, expected: &str) -> Result<(), String> {
+    fs::copy(source, candidate).map_err(io_error)?;
+    fs::set_permissions(candidate, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    if hash_file(candidate)? != expected {
+        return Err("the running CLI is not bound to the selected Local release".into());
+    }
+    Ok(())
+}
+
+fn same_file(left: &Path, right: &Path) -> Result<bool, String> {
+    let right = match right.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(error)),
+    };
+    let left = fs::metadata(left).map_err(io_error)?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 fn restore_previous_cli(managed: &Path, previous: &Path) -> Result<(), String> {
@@ -3261,5 +3339,145 @@ mod tests {
         fs::write(&other, "other").unwrap();
         assert!(reconcile_previous_cli(&paths.managed_cli, &other).is_err());
         assert!(previous.exists());
+    }
+
+    /// A private Space home with a managed CLI directory, plus a verified release-bound CLI outside it.
+    fn activation_fixture(home: &Path) -> (Paths, PathBuf, String) {
+        let paths = Paths::under(home).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let source = home.join("bootstrap-shimpz");
+        fs::write(&source, "release-bound CLI").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected = hash_file(&source).unwrap();
+        (paths, source, expected)
+    }
+
+    fn private_file(path: &Path, content: &str, mode: u32) {
+        fs::write(path, content).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn activation_installs_the_verified_cli_and_clears_stale_handoff_artifacts() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir(bin).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+        private_file(
+            &paths.managed_cli.with_extension("previous"),
+            "stale",
+            0o700,
+        );
+        private_file(
+            &paths.managed_cli.with_extension("candidate"),
+            "stale",
+            0o700,
+        );
+
+        activate_cli(&paths, &source, &expected).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&paths.managed_cli).unwrap(),
+            "release-bound CLI"
+        );
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert_eq!(mode(bin), 0o700);
+        assert!(!paths.managed_cli.with_extension("previous").exists());
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+    }
+
+    #[test]
+    fn activation_creates_the_private_managed_directory_for_a_fresh_space() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+
+        activate_cli(&paths, &source, &expected).unwrap();
+
+        assert_eq!(mode(paths.managed_cli.parent().unwrap()), 0o700);
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert_eq!(hash_file(&paths.managed_cli).unwrap(), expected);
+    }
+
+    #[test]
+    fn activation_of_an_unbound_cli_leaves_the_managed_cli_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, _) = activation_fixture(home.path());
+        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+
+        let error = activate_cli(&paths, &source, HEX).unwrap_err();
+
+        assert_eq!(
+            error,
+            "the running CLI is not bound to the selected Local release"
+        );
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+    }
+
+    #[test]
+    fn activation_refuses_a_redirected_managed_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let outside = home.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let bin = paths.managed_cli.parent().unwrap();
+        symlink(&outside, bin).unwrap();
+        assert!(activate_cli(&paths, &source, &expected).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+        fs::remove_file(bin).unwrap();
+        symlink(home.path().join("missing"), bin).unwrap();
+        assert!(activate_cli(&paths, &source, &expected).is_err());
+        assert!(!home.path().join("missing").exists());
+    }
+
+    #[test]
+    fn activation_refuses_foreign_entries_before_changing_the_managed_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir(bin).unwrap();
+        fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+        private_file(&bin.join("foreign"), "foreign", 0o600);
+
+        assert!(
+            activate_cli(&paths, &source, &expected)
+                .unwrap_err()
+                .starts_with("refusing to use unowned managed CLI entries")
+        );
+        assert_eq!(mode(bin), 0o755);
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
+    }
+
+    #[test]
+    fn activation_by_the_running_managed_cli_keeps_its_executable_image() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, _, expected) = activation_fixture(home.path());
+        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
+        private_file(&paths.managed_cli, "release-bound CLI", 0o600);
+        private_file(&paths.managed_cli.with_extension("previous"), "old", 0o700);
+        private_file(
+            &paths.managed_cli.with_extension("candidate"),
+            "stale",
+            0o700,
+        );
+        let inode = fs::metadata(&paths.managed_cli).unwrap().ino();
+
+        activate_cli(&paths, &paths.managed_cli, &expected).unwrap();
+
+        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert!(!paths.managed_cli.with_extension("previous").exists());
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+        assert!(activate_cli(&paths, &paths.managed_cli, HEX).is_err());
+        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
     }
 }
