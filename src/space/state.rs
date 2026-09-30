@@ -12,6 +12,7 @@ use super::host::HostProfile;
 use super::paths::{MARKER, Paths};
 
 const STOPPED: &str = "shimpz-space-stopped-v1\n";
+const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
 
 #[derive(Debug)]
 pub(crate) struct Installed {
@@ -73,7 +74,69 @@ impl Drop for Lock {
 pub(crate) fn read_installed(paths: &Paths, profile: HostProfile) -> Result<Installed, String> {
     let document = fs::read_to_string(&paths.environment)
         .map_err(|error| format!("could not read the installed Local environment: {error}"))?;
-    let values = parse_environment(&document)?;
+    parse_installed(&document, paths, profile)
+}
+
+/// Read the installed environment only as an admitted private record; `Ok(None)` when it is absent.
+pub(crate) fn read_private_installed(
+    paths: &Paths,
+    profile: HostProfile,
+) -> Result<Option<Installed>, String> {
+    read_private_record(
+        &paths.environment,
+        MAX_ENVIRONMENT_BYTES,
+        "the installed Local environment",
+    )?
+    .map(|document| parse_installed(&document, paths, profile))
+    .transpose()
+}
+
+/// Read a record only when it is an owned, private, single-link regular file of at most `limit` bytes, or return
+/// `Ok(None)` when it is absent. It is opened without following a symlink or blocking on a special file, and admitted
+/// through the open handle, so the checked file is the one read.
+pub(crate) fn read_private_record(
+    path: &Path,
+    limit: u64,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let refused = || format!("{name} is not a private record");
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),
+        Err(error) => return Err(format!("{name} could not be opened: {error}")),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("{name} could not be inspected: {error}"))?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() > limit
+    {
+        return Err(refused());
+    }
+    let mut document = String::new();
+    file.take(limit + 1)
+        .read_to_string(&mut document)
+        .map_err(|error| format!("{name} could not be read: {error}"))?;
+    if document.len() as u64 > limit {
+        return Err(refused());
+    }
+    Ok(Some(document))
+}
+
+fn parse_installed(
+    document: &str,
+    paths: &Paths,
+    profile: HostProfile,
+) -> Result<Installed, String> {
+    let values = parse_environment(document)?;
     validate_environment(&values, paths, profile)?;
     let space_id = values["SHIMPZ_SPACE_ID"];
     let release_ref = values["SHIMPZ_LOCAL_RELEASE_IMAGE"];
@@ -93,7 +156,7 @@ pub(crate) fn read_installed(paths: &Paths, profile: HostProfile) -> Result<Inst
 }
 
 fn parse_environment(document: &str) -> Result<BTreeMap<&str, &str>, String> {
-    if document.len() > 8_192 || document.contains('\r') {
+    if document.len() as u64 > MAX_ENVIRONMENT_BYTES || document.contains('\r') {
         return Err("the installed Local environment is malformed".into());
     }
     let mut values = BTreeMap::new();

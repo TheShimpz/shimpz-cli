@@ -1699,20 +1699,10 @@ fn commit_evidence(
     profile: HostProfile,
     release: &ResolvedRelease,
 ) -> CommitEvidence {
-    match paths.environment.symlink_metadata() {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return CommitEvidence::NotCommitted;
-        }
-        Err(error) => {
-            return CommitEvidence::Unknown(format!(
-                "the installed Local environment could not be inspected: {error}"
-            ));
-        }
-    }
-    let installed = match state::read_installed(paths, profile) {
-        Ok(installed) => installed,
-        Err(error) => return CommitEvidence::Unknown(error),
+    let installed = match state::read_private_installed(paths, profile) {
+        Ok(Some(installed)) => installed,
+        Ok(None) => return CommitEvidence::NotCommitted,
+        Err(cause) => return CommitEvidence::Unknown(cause),
     };
     if installed.release_ref != release.reference {
         return CommitEvidence::NotCommitted;
@@ -1723,7 +1713,7 @@ fn commit_evidence(
     match poll::status_record(paths, &release.reference, release.metadata.ordinal) {
         poll::StatusRecord::Reconciled => CommitEvidence::Committed,
         poll::StatusRecord::Other => CommitEvidence::NotCommitted,
-        poll::StatusRecord::Unknown(cause) => CommitEvidence::Unknown(cause.into()),
+        poll::StatusRecord::Unknown(cause) => CommitEvidence::Unknown(cause),
     }
 }
 
@@ -3767,10 +3757,91 @@ mod tests {
         fs::remove_file(&paths.status).unwrap();
 
         state::write_status(paths, &installed, "current").unwrap();
-        fs::write(&paths.environment, "SHIMPZ_LOCAL_RELEASE_IMAGE\n").unwrap();
+        assert_eq!(evidence(&installed), CommitEvidence::Committed);
+        let environment = fs::read_to_string(&paths.environment).unwrap();
+        let refused = |evidence: CommitEvidence| {
+            evidence
+                == CommitEvidence::Unknown(
+                    "the installed Local environment is not a private record".into(),
+                )
+        };
+        // A redirected, shared, hard-linked, oversized, or special environment is refused, never followed.
+        let elsewhere = home.path().join("environment-elsewhere");
+        fs::rename(&paths.environment, &elsewhere).unwrap();
+        symlink(&elsewhere, &paths.environment).unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::remove_file(&paths.environment).unwrap();
+        fs::rename(&elsewhere, &paths.environment).unwrap();
+        fs::set_permissions(&paths.environment, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::set_permissions(&paths.environment, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::hard_link(&paths.environment, home.path().join("environment-link")).unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::remove_file(home.path().join("environment-link")).unwrap();
+        assert_eq!(evidence(&installed), CommitEvidence::Committed);
+        state::write_private(
+            &paths.environment,
+            &format!("{environment}{}", "#".repeat(8_192)),
+        )
+        .unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::remove_file(&paths.environment).unwrap();
+        fs::create_dir(&paths.environment).unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::remove_dir(&paths.environment).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &paths.environment,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(refused(evidence(&installed)));
+        fs::remove_file(&paths.environment).unwrap();
+
+        state::write_private(&paths.environment, "SHIMPZ_LOCAL_RELEASE_IMAGE\n").unwrap();
         assert!(unknown(evidence(&installed)));
         fs::remove_file(&paths.environment).unwrap();
         assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_with_a_redirected_environment_keeps_both_clis() {
+        let home = tempfile::tempdir().unwrap();
+        let environment = home.path().join(".shimpz/.env");
+        let child_status = format!(
+            "rm '{environment}'\nln -s '{}' '{environment}'\nprintf '%s' '{}' > '{}'\nexit 1\n",
+            home.path().join("fixture/release-2.env").display(),
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "updated",
+            }),
+            home.path().join(".shimpz/release-status.json").display(),
+            environment = environment.display(),
+        );
+        let (context, target, _) = handoff_space(home.path(), &child_status);
+
+        let error = context
+            .handoff_admitted_release(&target, false)
+            .unwrap_err();
+
+        assert!(
+            error.contains("could not be determined: the installed Local environment is not a private record; both CLIs were kept"),
+            "{error}"
+        );
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_macos_arm64_sha256
+        );
+        assert_eq!(
+            fs::read_to_string(context.paths.managed_cli.with_extension("previous")).unwrap(),
+            "previous CLI"
+        );
+        assert!(fs::symlink_metadata(&context.paths.public_cli).is_err());
     }
 
     #[cfg(unix)]

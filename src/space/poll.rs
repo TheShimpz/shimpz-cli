@@ -6,8 +6,6 @@
 //! path. The digest is only a hint: nothing is applied from it. Just before a scheduled update replaces the running
 //! release, a bounded Team activity observation may defer it for a few minutes.
 
-use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -96,13 +94,9 @@ pub(crate) fn release_digest(release_ref: &str) -> Option<&str> {
 
 /// Read one bounded private record owned by this user; anything else is treated as absent evidence.
 fn read_private_record(path: &std::path::Path, limit: u64) -> Option<String> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    let owned = metadata.is_file()
-        && metadata.nlink() == 1
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && metadata.permissions().mode() & 0o777 == 0o600
-        && metadata.len() <= limit;
-    owned.then(|| fs::read_to_string(path).ok()).flatten()
+    state::read_private_record(path, limit, "the Local record")
+        .ok()
+        .flatten()
 }
 
 /// Invalid, foreign, or impossible state resets to the default, which lets the probe and repair proceed.
@@ -210,36 +204,27 @@ pub(crate) enum StatusRecord {
     /// No record, or a valid record of another release or of a rollback: that release never committed after it.
     Other,
     /// The record exists but cannot be trusted, so it proves nothing either way.
-    Unknown(&'static str),
+    Unknown(String),
 }
 
 /// Classify the status record for exactly `release_ref` at `ordinal`, independent of the clock.
 pub(crate) fn status_record(paths: &Paths, release_ref: &str, ordinal: u64) -> StatusRecord {
-    let metadata = match fs::symlink_metadata(&paths.status) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return StatusRecord::Other,
-        Err(_) => {
-            return StatusRecord::Unknown("the Local release status could not be inspected");
-        }
-    };
-    let private = metadata.is_file()
-        && metadata.nlink() == 1
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && metadata.permissions().mode() & 0o777 == 0o600
-        && metadata.len() <= MAX_STATUS_BYTES;
-    if !private {
-        return StatusRecord::Unknown("the Local release status is not a private record");
-    }
-    let Ok(document) = fs::read_to_string(&paths.status) else {
-        return StatusRecord::Unknown("the Local release status could not be read");
+    let document = match state::read_private_record(
+        &paths.status,
+        MAX_STATUS_BYTES,
+        "the Local release status",
+    ) {
+        Ok(Some(document)) => document,
+        Ok(None) => return StatusRecord::Other,
+        Err(cause) => return StatusRecord::Unknown(cause),
     };
     match parse_status(&document) {
         Some(status) if status.reconciles(release_ref, ordinal) => StatusRecord::Reconciled,
         Some(status) if status.release == release_ref && status.ordinal != ordinal => {
-            StatusRecord::Unknown("the Local release status contradicts the release ordinal")
+            StatusRecord::Unknown("the Local release status contradicts the release ordinal".into())
         }
         Some(_) => StatusRecord::Other,
-        None => StatusRecord::Unknown("the Local release status is malformed"),
+        None => StatusRecord::Unknown("the Local release status is malformed".into()),
     }
 }
 
@@ -464,6 +449,8 @@ fn imf_fixdate(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     const INSTALLED: &str =
         "sha256:9ef8a1563853dc6e403552a32ad7a82506acb233c11bc439ba678c6bb94171fe";
