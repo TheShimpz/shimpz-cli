@@ -175,7 +175,8 @@ impl Team {
     fn valid(&self) -> bool {
         valid_team_id(&self.id)
             && !self.name.is_empty()
-            && self.name.len() <= 80
+            // Developers bounds Team names by Unicode code points, as JSON Schema maxLength does.
+            && self.name.chars().count() <= 80
             && self.name.chars().all(|character| !character.is_control())
     }
 }
@@ -296,6 +297,21 @@ mod tests {
             }),
             Ok("team_1".into())
         );
+    }
+
+    #[test]
+    fn team_names_are_bounded_by_unicode_code_points() {
+        let list = |name: String| TeamList {
+            version: 1,
+            teams: vec![Team {
+                id: "team_1".into(),
+                name,
+            }],
+        };
+        for character in ['界', '😀'] {
+            assert_eq!(list(character.to_string().repeat(80)).validate(), Ok(()));
+            assert!(list(character.to_string().repeat(81)).validate().is_err());
+        }
     }
 
     #[test]
