@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Tool {
@@ -184,6 +184,20 @@ where
         return Err(format!("host command failed: {}", program.display()));
     }
     String::from_utf8(result.stdout).map_err(|_| "host command output was not UTF-8".into())
+}
+
+/// Runs one fixed tool with stdin closed and stdout and stderr captured, whatever its exit status.
+pub(crate) fn captured<I, S>(tool: Tool, arguments: I) -> Result<Output, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let program = tool.resolve()?;
+    Command::new(&program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))
 }
 
 pub(crate) fn status<I, S>(tool: Tool, arguments: I) -> Result<ExitStatus, String>

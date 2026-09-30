@@ -14,6 +14,10 @@ use super::paths::Paths;
 
 const MARKER: &str = "shimpz-local-update-v2";
 const MAX_SCHEDULER_BYTES: u64 = 16 * 1024;
+const SYSTEMD_TIMER: &str = "shimpz-update.timer";
+const LAUNCHD_LABEL: &str = "com.shimpz.update";
+/// `launchctl print` exit status when the domain has no service with the requested label.
+const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntryState {
@@ -37,6 +41,19 @@ struct EntryFacts {
     uid: u32,
     mode: u32,
     len: u64,
+}
+
+/// Exit status and captured standard output of one scheduler host command.
+#[derive(Debug)]
+struct Probe {
+    code: Option<i32>,
+    stdout: String,
+}
+
+impl Probe {
+    fn succeeded(&self) -> bool {
+        self.code == Some(0)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -135,13 +152,29 @@ pub(crate) fn preflight_remove(profile: HostProfile, paths: &Paths) -> Result<()
 }
 
 pub(crate) fn remove(profile: HostProfile, paths: &Paths) -> Result<RemovalOutcome, String> {
+    let booted = systemd_booted();
+    remove_with(
+        profile,
+        paths,
+        || require_unloaded(profile, paths, booted, run_probe),
+        || reload_systemd(booted),
+    )
+}
+
+/// Deletes owned scheduler entries only after `unload` proves the job is no longer loaded.
+fn remove_with(
+    profile: HostProfile,
+    paths: &Paths,
+    unload: impl FnOnce() -> Result<(), String>,
+    reload: impl FnOnce() -> Result<(), String>,
+) -> Result<RemovalOutcome, String> {
     let entries = inspect_entries(profile, paths)?;
     let removable: Vec<_> = entries
         .iter()
         .filter(|entry| matches!(entry.state, EntryState::Current | EntryState::OwnedCorrupt))
         .collect();
     if !removable.is_empty() {
-        unload(profile, paths);
+        unload()?;
     }
     for entry in &removable {
         remove_exact_entry(&entry.path)?;
@@ -159,17 +192,116 @@ pub(crate) fn remove(profile: HostProfile, paths: &Paths) -> Result<RemovalOutco
             outcome.preserved.push(display_path(&path));
         }
     }
-    if !removable.is_empty()
-        && matches!(profile, HostProfile::Linux | HostProfile::Wsl)
-        && Tool::Systemctl.resolve().is_ok()
-    {
+    if !removable.is_empty() && matches!(profile, HostProfile::Linux | HostProfile::Wsl) {
+        reload()?;
+    }
+    Ok(outcome)
+}
+
+fn reload_systemd(booted: bool) -> Result<(), String> {
+    if booted && Tool::Systemctl.resolve().is_ok() {
         require_tool(
             Tool::Systemctl,
             ["--user", "daemon-reload"],
             "systemd did not reload after scheduler removal",
-        )?;
+        )
+    } else {
+        Ok(())
     }
-    Ok(outcome)
+}
+
+/// Unloads the owned job, or proves it is not loaded, before its scheduler files may be deleted.
+fn require_unloaded<R>(
+    profile: HostProfile,
+    paths: &Paths,
+    systemd_booted: bool,
+    mut run: R,
+) -> Result<(), String>
+where
+    R: FnMut(Tool, &[&str]) -> Result<Probe, String>,
+{
+    match profile {
+        // Without a systemd-booted host no systemd user manager exists, so no timer can be loaded.
+        HostProfile::Linux | HostProfile::Wsl if !systemd_booted => Ok(()),
+        HostProfile::Linux | HostProfile::Wsl => {
+            let next = format!(
+                "run systemctl --user disable --now {SYSTEMD_TIMER}, then rerun the same shimpz command"
+            );
+            let mut systemctl = |arguments: &[&str]| {
+                run(Tool::Systemctl, arguments).map_err(|error| unload_failure(&error, &next))
+            };
+            if systemctl(&["--user", "disable", "--now", SYSTEMD_TIMER])?.succeeded() {
+                return Ok(());
+            }
+            let state = systemctl(&[
+                "--user",
+                "show",
+                SYSTEMD_TIMER,
+                "--property=ActiveState,UnitFileState",
+            ])?;
+            if state.succeeded() && systemd_timer_is_unloaded(&state.stdout) {
+                Ok(())
+            } else {
+                Err(unload_failure(
+                    "the automatic Local update timer could not be proven stopped and disabled",
+                    &next,
+                ))
+            }
+        }
+        HostProfile::MacOs => {
+            let domain = format!("gui/{}", rustix::process::getuid().as_raw());
+            let service = format!("{domain}/{LAUNCHD_LABEL}");
+            let next =
+                format!("run launchctl bootout {service}, then rerun the same shimpz command");
+            let mut launchctl = |arguments: &[&str]| {
+                run(Tool::Launchctl, arguments).map_err(|error| unload_failure(&error, &next))
+            };
+            let plist = paths.launch_agent.to_string_lossy();
+            if launchctl(&["bootout", &domain, &plist])?.succeeded() {
+                return Ok(());
+            }
+            if launchctl(&["print", &service])?.code == Some(LAUNCHD_SERVICE_NOT_FOUND) {
+                Ok(())
+            } else {
+                Err(unload_failure(
+                    "the automatic Local update LaunchAgent could not be proven unloaded",
+                    &next,
+                ))
+            }
+        }
+    }
+}
+
+fn systemd_timer_is_unloaded(show: &str) -> bool {
+    let (mut active, mut unit_file) = (None, None);
+    for line in show.lines() {
+        if let Some(value) = line.strip_prefix("ActiveState=") {
+            active = Some(value);
+        } else if let Some(value) = line.strip_prefix("UnitFileState=") {
+            unit_file = Some(value);
+        }
+    }
+    matches!(active, Some("inactive" | "failed")) && matches!(unit_file, Some("" | "disabled"))
+}
+
+fn unload_failure(detail: &str, next: &str) -> String {
+    format!("{detail}; the scheduler files were kept. Next: {next}")
+}
+
+fn run_probe(tool: Tool, arguments: &[&str]) -> Result<Probe, String> {
+    let output = command::captured(tool, arguments)?;
+    Ok(Probe {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+    })
+}
+
+/// Mirrors `sd_booted()`: only a systemd-booted host can run a systemd user manager.
+fn systemd_booted() -> bool {
+    match fs::symlink_metadata("/run/systemd/system") {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 fn install_systemd(paths: &Paths) -> Result<(), String> {
@@ -182,7 +314,7 @@ fn install_systemd(paths: &Paths) -> Result<(), String> {
     )?;
     require_tool(
         Tool::Systemctl,
-        ["--user", "enable", "--now", "shimpz-update.timer"],
+        ["--user", "enable", "--now", SYSTEMD_TIMER],
         "the automatic Local update timer could not be enabled",
     )
 }
@@ -201,12 +333,13 @@ fn install_launch_agent(paths: &Paths) -> Result<(), String> {
     )
 }
 
+/// Best-effort unload before replacing an authorized foreign entry during installation.
 fn unload(profile: HostProfile, paths: &Paths) {
     match profile {
         HostProfile::Linux | HostProfile::Wsl => {
             let _ = command::status(
                 Tool::Systemctl,
-                ["--user", "disable", "--now", "shimpz-update.timer"],
+                ["--user", "disable", "--now", SYSTEMD_TIMER],
             );
         }
         HostProfile::MacOs => {
@@ -241,7 +374,7 @@ fn launch_agent(paths: &Paths) -> Result<String, String> {
             .ok_or_else(|| "the managed CLI path is not UTF-8".to_owned())?,
     );
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.shimpz.update</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>120</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LAUNCHD_LABEL}</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>120</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
     ))
 }
 
@@ -714,7 +847,7 @@ mod tests {
         create_private_directory(paths.launch_agent.parent().unwrap());
         write_private_file(&paths.launch_agent, &launch_agent(&paths).unwrap());
         assert_eq!(
-            remove(HostProfile::MacOs, &paths).unwrap(),
+            remove_with(HostProfile::MacOs, &paths, || Ok(()), || Ok(())).unwrap(),
             RemovalOutcome::default()
         );
         assert!(fs::symlink_metadata(&paths.launch_agent).is_err());
@@ -724,19 +857,224 @@ mod tests {
             &format!("<!-- {MARKER} -->\ncorrupt\n"),
         );
         assert_eq!(
-            remove(HostProfile::MacOs, &paths).unwrap(),
+            remove_with(HostProfile::MacOs, &paths, || Ok(()), || Ok(())).unwrap(),
             RemovalOutcome::default()
         );
         assert!(fs::symlink_metadata(&paths.launch_agent).is_err());
 
         write_private_file(&paths.launch_agent, "foreign\n");
-        let outcome = remove(HostProfile::MacOs, &paths).unwrap();
+        let outcome = remove_with(
+            HostProfile::MacOs,
+            &paths,
+            || panic!("a foreign entry was unloaded"),
+            || Ok(()),
+        )
+        .unwrap();
         assert_eq!(outcome.preserved, [display_path(&paths.launch_agent)]);
         assert!(outcome.execution_unverified);
         assert_eq!(
             fs::read_to_string(&paths.launch_agent).unwrap(),
             "foreign\n"
         );
+    }
+
+    fn probe(code: i32, stdout: &str) -> Probe {
+        Probe {
+            code: Some(code),
+            stdout: stdout.into(),
+        }
+    }
+
+    /// Runs `require_unloaded` against an exact scripted host and returns its result and commands.
+    fn scripted_unload(
+        profile: HostProfile,
+        paths: &Paths,
+        systemd_booted: bool,
+        script: Vec<Result<Probe, String>>,
+    ) -> (Result<(), String>, Vec<String>) {
+        let mut script = script.into_iter();
+        let mut calls = Vec::new();
+        let result = require_unloaded(profile, paths, systemd_booted, |tool, arguments| {
+            calls.push(format!("{tool:?} {}", arguments.join(" ")));
+            script.next().expect("an unscripted scheduler command ran")
+        });
+        assert!(script.next().is_none(), "a scripted command did not run");
+        (result, calls)
+    }
+
+    #[test]
+    fn a_failed_unload_keeps_every_owned_entry_and_skips_the_reload() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        create_private_directory(paths.launch_agent.parent().unwrap());
+        write_private_file(&paths.launch_agent, &launch_agent(&paths).unwrap());
+        let error = remove_with(
+            HostProfile::MacOs,
+            &paths,
+            || {
+                scripted_unload(
+                    HostProfile::MacOs,
+                    &paths,
+                    false,
+                    vec![Ok(probe(5, "")), Ok(probe(0, "state = running\n"))],
+                )
+                .0
+            },
+            || panic!("reloaded after a failed unload"),
+        )
+        .unwrap_err();
+        assert!(error.contains("could not be proven unloaded"), "{error}");
+        assert!(error.contains("scheduler files were kept"), "{error}");
+        assert!(error.contains("launchctl bootout gui/"), "{error}");
+        assert_eq!(
+            fs::read_to_string(&paths.launch_agent).unwrap(),
+            launch_agent(&paths).unwrap()
+        );
+
+        create_private_directory(paths.systemd_service.parent().unwrap());
+        write_private_file(&paths.systemd_service, &systemd_service(&paths).unwrap());
+        write_private_file(&paths.systemd_timer, systemd_timer());
+        let temporary = temporary_path(&paths.systemd_timer).unwrap();
+        write_private_file(&temporary, "partial\n");
+        let error = remove_with(
+            HostProfile::Linux,
+            &paths,
+            || Err("injected unload failure".into()),
+            || panic!("reloaded after a failed unload"),
+        )
+        .unwrap_err();
+        assert_eq!(error, "injected unload failure");
+        assert!(paths.systemd_service.is_file());
+        assert!(paths.systemd_timer.is_file());
+        assert!(temporary.is_file());
+    }
+
+    #[test]
+    fn an_unloaded_or_absent_job_allows_owned_entry_removal() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        create_private_directory(paths.launch_agent.parent().unwrap());
+        for script in [
+            vec![Ok(probe(0, ""))],
+            vec![Ok(probe(5, "")), Ok(probe(LAUNCHD_SERVICE_NOT_FOUND, ""))],
+        ] {
+            write_private_file(&paths.launch_agent, &launch_agent(&paths).unwrap());
+            let outcome = remove_with(
+                HostProfile::MacOs,
+                &paths,
+                || scripted_unload(HostProfile::MacOs, &paths, false, script).0,
+                || panic!("launchd removal reloaded systemd"),
+            )
+            .unwrap();
+            assert_eq!(outcome, RemovalOutcome::default());
+            assert!(fs::symlink_metadata(&paths.launch_agent).is_err());
+        }
+    }
+
+    #[test]
+    fn launchd_unload_requires_bootout_or_proof_that_the_service_is_absent() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        let domain = format!("gui/{}", rustix::process::getuid().as_raw());
+        let (result, calls) =
+            scripted_unload(HostProfile::MacOs, &paths, true, vec![Ok(probe(0, ""))]);
+        result.unwrap();
+        assert_eq!(
+            calls,
+            [format!(
+                "Launchctl bootout {domain} {}",
+                paths.launch_agent.display()
+            )]
+        );
+
+        let (result, calls) = scripted_unload(
+            HostProfile::MacOs,
+            &paths,
+            true,
+            vec![Ok(probe(3, "")), Ok(probe(LAUNCHD_SERVICE_NOT_FOUND, ""))],
+        );
+        result.unwrap();
+        assert_eq!(
+            calls[1],
+            format!("Launchctl print {domain}/{LAUNCHD_LABEL}")
+        );
+
+        for print in [Ok(probe(0, "state = running\n")), Ok(probe(1, ""))] {
+            let (result, _) = scripted_unload(
+                HostProfile::MacOs,
+                &paths,
+                true,
+                vec![Ok(probe(5, "")), print],
+            );
+            assert!(result.unwrap_err().contains("could not be proven unloaded"));
+        }
+        let (result, _) = scripted_unload(
+            HostProfile::MacOs,
+            &paths,
+            true,
+            vec![Err("required host tool is unavailable: Launchctl".into())],
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("required host tool is unavailable"),
+            "{error}"
+        );
+        assert!(error.contains("scheduler files were kept"), "{error}");
+    }
+
+    #[test]
+    fn systemd_unload_requires_disable_or_proof_that_the_timer_is_unloaded() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        let (result, calls) = scripted_unload(HostProfile::Linux, &paths, false, Vec::new());
+        result.unwrap();
+        assert!(calls.is_empty());
+
+        let (result, calls) =
+            scripted_unload(HostProfile::Wsl, &paths, true, vec![Ok(probe(0, ""))]);
+        result.unwrap();
+        assert_eq!(
+            calls,
+            ["Systemctl --user disable --now shimpz-update.timer"]
+        );
+
+        for absent in [
+            "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n",
+            "ActiveState=inactive\nUnitFileState=disabled\n",
+            "ActiveState=failed\nUnitFileState=disabled\n",
+        ] {
+            let (result, calls) = scripted_unload(
+                HostProfile::Linux,
+                &paths,
+                true,
+                vec![Ok(probe(1, "")), Ok(probe(0, absent))],
+            );
+            result.unwrap();
+            assert_eq!(
+                calls[1],
+                "Systemctl --user show shimpz-update.timer --property=ActiveState,UnitFileState"
+            );
+        }
+        for loaded in [
+            Ok(probe(0, "ActiveState=active\nUnitFileState=enabled\n")),
+            Ok(probe(0, "ActiveState=inactive\nUnitFileState=enabled\n")),
+            Ok(probe(0, "ActiveState=activating\nUnitFileState=disabled\n")),
+            Ok(probe(0, "UnitFileState=disabled\n")),
+            Ok(probe(1, "ActiveState=inactive\nUnitFileState=disabled\n")),
+        ] {
+            let (result, _) = scripted_unload(
+                HostProfile::Linux,
+                &paths,
+                true,
+                vec![Ok(probe(1, "")), loaded],
+            );
+            let error = result.unwrap_err();
+            assert!(error.contains("could not be proven stopped"), "{error}");
+            assert!(
+                error.contains("systemctl --user disable --now shimpz-update.timer"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
