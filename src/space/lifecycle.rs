@@ -3789,14 +3789,14 @@ mod tests {
         fs::create_dir(&paths.environment).unwrap();
         assert!(refused(evidence(&installed)));
         fs::remove_dir(&paths.environment).unwrap();
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &paths.environment,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
-            0,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .args(["-m", "600"])
+                .arg(&paths.environment)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(refused(evidence(&installed)));
         fs::remove_file(&paths.environment).unwrap();
 
