@@ -252,8 +252,16 @@ Follow the contract.
             use std::io::{Read, Write};
 
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request);
+            // Read the whole request head before answering: under load it can arrive in several reads, and closing
+            // the connection with request bytes unread resets it before the client sees the response.
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
             write!(
                 stream,
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

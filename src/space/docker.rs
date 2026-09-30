@@ -1260,6 +1260,8 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&command);
+        let _ = fs::remove_file(&calls);
         let engine = Engine {
             docker: command,
             platform: "linux/amd64",
@@ -1303,6 +1305,8 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&command);
+        let _ = fs::remove_file(&calls);
         let engine = Engine {
             docker: command,
             platform: "linux/arm64",
@@ -1356,6 +1360,7 @@ mod tests {
         let command = temporary.path().join("docker");
         fs::write(&command, "#!/bin/sh\nprintf 'not-a-group\\n'\n").unwrap();
         fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&command);
         let engine = Engine {
             docker: command,
             platform: "linux/arm64",

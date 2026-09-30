@@ -597,6 +597,10 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A parallel test's fork can briefly hold the fresh script open for writing (ETXTBSY); wait until it runs,
+        // then forget that probe call so each test counts only its own.
+        crate::stage::await_executable(&command);
+        let _ = std::fs::remove_file(root.join("calls"));
         (temporary, Engine::with_docker(command))
     }
 
