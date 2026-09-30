@@ -33,7 +33,7 @@ fn select_team(response: &TeamList) -> Result<String, String> {
         teams => {
             let choices = teams
                 .iter()
-                .map(|team| format!("  {}  {}", team.id, team.name))
+                .map(|team| format!("  {}  {}", team.id, terminal_text(&team.name)))
                 .collect::<Vec<_>>()
                 .join("\n");
             Err(format!(
@@ -41,6 +41,29 @@ fn select_team(response: &TeamList) -> Result<String, String> {
             ))
         }
     }
+}
+
+/// Escapes every character that could act as a terminal or bidirectional control, so a Team name only displays.
+fn terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '\u{061c}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'..='\u{206f}'
+                        | '\u{feff}'
+                )
+            {
+                character.escape_unicode().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
 }
 
 struct Api {
@@ -175,9 +198,13 @@ impl Team {
     fn valid(&self) -> bool {
         valid_team_id(&self.id)
             && !self.name.is_empty()
-            // Developers bounds Team names by Unicode code points, as JSON Schema maxLength does.
+            // The assistant-install schema admits 1 to 80 code points without C0 controls or DEL; anything else it
+            // admits is escaped when rendered, never allowed to invalidate the whole Team list.
             && self.name.chars().count() <= 80
-            && self.name.chars().all(|character| !character.is_control())
+            && self
+                .name
+                .chars()
+                .all(|character| character >= ' ' && character != '\u{7f}')
     }
 }
 
@@ -312,6 +339,38 @@ mod tests {
             assert_eq!(list(character.to_string().repeat(80)).validate(), Ok(()));
             assert!(list(character.to_string().repeat(81)).validate().is_err());
         }
+    }
+
+    #[test]
+    fn team_names_admit_what_the_schema_admits_and_render_escaped() {
+        let team = |id: &str, name: &str| Team {
+            id: id.into(),
+            name: name.into(),
+        };
+        for refused in ["", "tab\tname", "escape\u{1b}[2J", "delete\u{7f}"] {
+            let list = TeamList {
+                version: 1,
+                teams: vec![team("team_1", refused)],
+            };
+            assert!(list.validate().is_err(), "{refused:?}");
+        }
+
+        let error = select_team(&TeamList {
+            version: 1,
+            teams: vec![
+                team("team_1", "Sales\u{9b}2J\u{85}"),
+                team("team_2", "\u{202e}gnitekraM\u{200b}"),
+            ],
+        })
+        .unwrap_err();
+        assert!(error.contains("team_1  Sales\\u{9b}2J\\u{85}"));
+        assert!(error.contains("team_2  \\u{202e}gnitekraM\\u{200b}"));
+        assert!(
+            !error
+                .chars()
+                .any(|character| character.is_control() && character != '\n')
+        );
+        assert!(!error.contains(['\u{202e}', '\u{200b}']));
     }
 
     #[test]
