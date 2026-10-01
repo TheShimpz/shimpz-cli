@@ -28,7 +28,7 @@ impl Assistant {
 
     pub(crate) fn contract(&self) -> Result<String, String> {
         bridge(
-            &self.requirements,
+            Some(&self.requirements),
             ["contract".as_ref(), self.root.as_os_str()],
             None,
         )
@@ -36,11 +36,17 @@ impl Assistant {
 
     pub(crate) fn invoke(&self, action_id: &str, input: &[u8]) -> Result<String, String> {
         bridge(
-            &self.requirements,
+            Some(&self.requirements),
             ["invoke".as_ref(), self.root.as_os_str(), action_id.as_ref()],
             Some(input),
         )
     }
+}
+
+/// Extract the project's static English message catalog without importing Creator code or its dependencies.
+pub(crate) fn catalog(project: &Path) -> Result<String, String> {
+    let root = project_root(project)?;
+    bridge(None, ["catalog".as_ref(), root.as_os_str()], None)
 }
 
 fn project_root(project: &Path) -> Result<PathBuf, String> {
@@ -50,7 +56,7 @@ fn project_root(project: &Path) -> Result<PathBuf, String> {
 }
 
 fn bridge<const SIZE: usize>(
-    requirements: &Requirements,
+    requirements: Option<&Requirements>,
     arguments: [&OsStr; SIZE],
     input: Option<&[u8]>,
 ) -> Result<String, String> {
@@ -80,16 +86,17 @@ fn bridge<const SIZE: usize>(
             command.env(key, value);
         }
     }
+    command.args([
+        "run",
+        "--default-index",
+        "https://pypi.org/simple",
+        "--isolated",
+        "--no-project",
+    ]);
+    if let Some(requirements) = requirements {
+        command.arg("--with-requirements").arg(&requirements.path);
+    }
     command
-        .args([
-            "run",
-            "--default-index",
-            "https://pypi.org/simple",
-            "--isolated",
-            "--no-project",
-            "--with-requirements",
-        ])
-        .arg(&requirements.path)
         .args(["--with", SDK_REQUIREMENT])
         .args([
             "--managed-python",

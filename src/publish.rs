@@ -285,7 +285,8 @@ fn read_publication(
     Ok(publication)
 }
 
-fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
+/// Describe a refused Developers request from its safe error envelope and any bounded rate-limit interval.
+pub(crate) fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
     let retry_after = match validate_retry_after(
         response.status().as_u16(),
         response
@@ -296,25 +297,30 @@ fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String
         Ok(value) => value,
         Err(message) => return message,
     };
+    let message = api_error(response).map_or_else(|| fallback.into(), |error| error.message);
+    retry_after.map_or(message.clone(), |seconds| {
+        format!("{message}; retry after {seconds} seconds")
+    })
+}
+
+/// Read Developers' closed JSON error envelope, if the response carries a valid one.
+pub(crate) fn api_error(response: &mut Response<Body>) -> Option<ApiError> {
     if response
         .headers()
         .get("Content-Type")
         .and_then(|value| value.to_str().ok())
         != Some("application/json")
     {
-        return fallback.into();
+        return None;
     }
-    let message = response
+    response
         .body_mut()
         .with_config()
         .limit(MAX_RESPONSE_BYTES)
         .read_json::<ErrorEnvelope>()
         .ok()
-        .filter(|envelope| envelope.error.valid())
-        .map_or_else(|| fallback.into(), |envelope| envelope.error.message);
-    retry_after.map_or(message.clone(), |seconds| {
-        format!("{message}; retry after {seconds} seconds")
-    })
+        .map(|envelope| envelope.error)
+        .filter(ApiError::valid)
 }
 
 fn validate_retry_after(status: u16, value: Option<&str>) -> Result<Option<u64>, String> {
@@ -590,9 +596,9 @@ struct ErrorEnvelope {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApiError {
-    code: String,
-    message: String,
+pub(crate) struct ApiError {
+    pub(crate) code: String,
+    pub(crate) message: String,
     request_id: String,
 }
 
@@ -655,7 +661,7 @@ fn valid_trust_reference(value: &str) -> bool {
         .is_some_and(valid_digest)
 }
 
-fn unavailable() -> String {
+pub(crate) fn unavailable() -> String {
     "Developers is unavailable; try again shortly".into()
 }
 

@@ -8,6 +8,7 @@ pub(crate) enum Topic {
     AssistantDevelop,
     AssistantCheck,
     AssistantRun,
+    AssistantPrepare,
     AssistantStage,
     AssistantUnstage,
     AssistantPublish,
@@ -27,13 +28,14 @@ pub(crate) enum Topic {
 
 impl Topic {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Root,
         Self::Assistant,
         Self::AssistantNew,
         Self::AssistantDevelop,
         Self::AssistantCheck,
         Self::AssistantRun,
+        Self::AssistantPrepare,
         Self::AssistantStage,
         Self::AssistantUnstage,
         Self::AssistantPublish,
@@ -59,6 +61,7 @@ impl Topic {
             Self::AssistantDevelop => ASSISTANT_DEVELOP,
             Self::AssistantCheck => ASSISTANT_CHECK,
             Self::AssistantRun => ASSISTANT_RUN,
+            Self::AssistantPrepare => ASSISTANT_PREPARE,
             Self::AssistantStage => ASSISTANT_STAGE,
             Self::AssistantUnstage => ASSISTANT_UNSTAGE,
             Self::AssistantPublish => ASSISTANT_PUBLISH,
@@ -103,6 +106,8 @@ Assistant development:
                                          Validate the project and its Actions.
   shimpz assistant run <action-id> [--input <json> | --input-file <path>] [--project <path>]
                                          Run one Action locally.
+  shimpz assistant prepare [--project <path>]
+                                         Prepare the language pack a Local snapshot needs.
   shimpz assistant stage [--project <path>]
                                          Stage an unpublished snapshot for Local Admin.
   shimpz assistant unstage [--project <path>]
@@ -149,6 +154,7 @@ Operations:
                                          Develop it with a supported coding agent.
   check [--project <path>]               Validate the project and its Actions.
   run <action-id> [options]              Run one Action locally.
+  prepare [--project <path>]             Prepare its language pack for staging.
   stage [--project <path>]               Stage an unpublished Local snapshot.
   unstage [--project <path>]             Permanently remove its Local snapshots.
   publish --visibility <private|public> [--project <path>]
@@ -219,6 +225,22 @@ Options:
   --project <path>                       Project directory. Defaults to the current directory.
 ";
 
+const ASSISTANT_PREPARE: &str = "\
+shimpz assistant prepare
+
+Prepare the language pack that translates an Assistant's messages.
+
+Usage:
+  shimpz assistant prepare [--project <path>]
+
+Options:
+  --project <path>                       Project directory. Defaults to the current directory.
+
+Submits only the static English message catalog to Developers with your Creator credential, waits for every
+interface language, verifies the pack, and keeps it in the CLI cache outside the project. Run it again after
+changing any shimpz.text message; unchanged messages are never translated again.
+";
+
 const ASSISTANT_STAGE: &str = "\
 shimpz assistant stage
 
@@ -230,7 +252,8 @@ Usage:
 Options:
   --project <path>                       Project directory. Defaults to the current directory.
 
-The command needs no Shimpz Account. Finish installation from authenticated Local Admin.
+The command contacts no Shimpz service and needs no Shimpz Account, but it requires the language pack that
+'shimpz assistant prepare' made for the current messages. Finish installation from authenticated Local Admin.
 ";
 
 const ASSISTANT_UNSTAGE: &str = "\

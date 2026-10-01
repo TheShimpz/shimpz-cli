@@ -70,7 +70,7 @@ fn reports_pinned_version(output: &[u8]) -> bool {
     String::from_utf8_lossy(output).split_whitespace().nth(1) == Some(UV_VERSION)
 }
 
-fn cache_directory() -> Result<PathBuf, String> {
+pub(crate) fn cache_directory() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("SHIMPZ_CACHE_DIR") {
         return Ok(PathBuf::from(path));
     }
