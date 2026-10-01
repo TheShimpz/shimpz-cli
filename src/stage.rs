@@ -4,8 +4,11 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -692,22 +695,74 @@ where
     docker_output_within(docker, arguments, MAX_DOCKER_OUTPUT_BYTES)
 }
 
+/// Run Docker and capture its output, never holding more than `limit` bytes of stdout or
+/// `MAX_DOCKER_OUTPUT_BYTES` of stderr: a stream that exceeds its bound, or cannot be read, kills and reaps Docker
+/// at once instead of letting Creator-controlled output, such as an exported file, exhaust host memory.
 fn docker_output_within<I, S>(docker: &Path, arguments: I, limit: usize) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = Command::new(docker)
+    const UNAVAILABLE: &str = "Docker could not execute the Local snapshot operation";
+    let mut child = Command::new(docker)
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|_| "Docker could not execute the Local snapshot operation")?;
-    if result.stdout.len() > limit || result.stderr.len() > MAX_DOCKER_OUTPUT_BYTES {
-        return Err("Docker returned excessive Local snapshot output".into());
+        .spawn()
+        .map_err(|_| UNAVAILABLE)?;
+    let (sender, receiver) = mpsc::channel();
+    let streams: [(Option<Box<dyn Read + Send>>, usize); 2] = [
+        (
+            child.stdout.take().map(|stream| Box::new(stream) as _),
+            limit,
+        ),
+        (
+            child.stderr.take().map(|stream| Box::new(stream) as _),
+            MAX_DOCKER_OUTPUT_BYTES,
+        ),
+    ];
+    for (index, (stream, bound)) in streams.into_iter().enumerate() {
+        let sender = sender.clone();
+        // A reader is never joined: after a kill, a process Docker started may still hold its pipe open.
+        thread::spawn(move || {
+            let _ = sender.send((
+                index,
+                stream.map_or(Ok(Some(Vec::new())), |stream| bounded(stream, bound)),
+            ));
+        });
     }
-    Ok(result)
+    drop(sender);
+    let mut captured = [Vec::new(), Vec::new()];
+    for _ in 0..captured.len() {
+        let failure = match receiver.recv() {
+            Ok((index, Ok(Some(bytes)))) => {
+                captured[index] = bytes;
+                continue;
+            }
+            Ok((_, Ok(None))) => "Docker returned excessive Local snapshot output",
+            Ok((_, Err(_))) | Err(_) => UNAVAILABLE,
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(failure.into());
+    }
+    let status = child.wait().map_err(|_| UNAVAILABLE)?;
+    let [stdout, stderr] = captured;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Read a stream to its end, or stop as soon as it exceeds `limit` bytes (`None`).
+fn bounded(stream: impl Read, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    stream
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= limit).then_some(bytes))
 }
 
 fn require_docker_success<I, S>(docker: &Path, arguments: I, message: &str) -> Result<(), String>
@@ -1396,6 +1451,88 @@ mod tests {
             fs::read_to_string(directory.path().join("removed")).unwrap(),
             format!("{PROOF_CONTAINER}\n")
         );
+    }
+
+    /// A fake Docker whose `cp` runs `export` in place of the shell and records the process it became.
+    #[cfg(unix)]
+    fn exporting_docker(directory: &Path, export: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = directory.join("docker-export");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = create ]; then printf '%s\\n' '{PROOF_CONTAINER}'; exit 0; fi\n\
+                 if [ \"$1\" = rm ]; then printf '%s\\n' \"$2\" >> '{dir}/removed'; exit 0; fi\n\
+                 if [ \"$1\" = cp ]; then echo $$ > '{dir}/export.pid'; exec {export}; fi\n\
+                 exit 2\n",
+                dir = directory.display()
+            ),
+        )
+        .expect("fake Docker");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("executable fake Docker");
+        await_executable(&executable);
+        executable
+    }
+
+    /// Verify through `docker`, failing instead of hanging if the export is never cut off.
+    #[cfg(unix)]
+    fn verify_within_deadline(docker: PathBuf) -> Result<(), String> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = with_expected(&image('b'), |expected| {
+                verify_language_files(&docker, &image('a'), expected)
+            });
+            let _ = sender.send(result);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .expect("an unbounded export was never cut off")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_export_is_refused_and_the_container_still_removed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let oversized = vec![b' '; MAX_CONTRACT_BYTES + 8 * 1024];
+        export_archives(directory.path(), &oversized, PROOF_PACK, 0o444);
+        let docker = fake_docker(directory.path(), "exit 1");
+        assert_eq!(
+            verify_within_deadline(docker).unwrap_err(),
+            "Docker returned excessive Local snapshot output"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("removed")).unwrap(),
+            format!("{PROOF_CONTAINER}\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_endless_export_stream_is_cut_off_and_docker_killed_and_reaped() {
+        for export in ["cat /dev/zero", "cat /dev/zero >&2"] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let docker = exporting_docker(directory.path(), export);
+            assert_eq!(
+                verify_within_deadline(docker).unwrap_err(),
+                "Docker returned excessive Local snapshot output",
+                "{export}"
+            );
+            assert_eq!(
+                fs::read_to_string(directory.path().join("removed")).unwrap(),
+                format!("{PROOF_CONTAINER}\n"),
+                "{export}"
+            );
+            let pid = fs::read_to_string(directory.path().join("export.pid")).unwrap();
+            let pid = nix::unistd::Pid::from_raw(pid.trim().parse().unwrap());
+            // Neither running nor a zombie: the exporting process was killed and reaped.
+            assert_eq!(
+                nix::sys::signal::kill(pid, None),
+                Err(nix::errno::Errno::ESRCH),
+                "{export}"
+            );
+        }
     }
 
     /// Creator code in the build stage poisons the interpreter and standard library the final image copies; the
