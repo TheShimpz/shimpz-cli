@@ -102,12 +102,6 @@ pub(crate) struct Observation {
     runtime: Runtime,
 }
 
-impl Observation {
-    pub(crate) const fn is_present(self) -> bool {
-        !matches!(self.runtime, Runtime::Missing)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AssistantObservation {
     runtime: Runtime,
@@ -675,7 +669,7 @@ mod tests {
         assert!(observe_assistant(&"x".repeat(MAX_RECORD_BYTES + 1)).is_err());
         assert!(render(&installed(), true, false, &healthy_observations()[..7], &[]).is_err());
         assert!(fully_stopped(&healthy_observations()[..7], &[]).is_err());
-        assert!(!observe(component, None).unwrap().is_present());
+        assert_eq!(observe(component, None).unwrap().runtime, Runtime::Missing);
     }
 
     #[test]

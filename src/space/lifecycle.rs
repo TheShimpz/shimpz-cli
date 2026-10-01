@@ -1,5 +1,6 @@
 //! Native install, reconcile, update, stop, status, and reset orchestration.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -20,7 +21,7 @@ use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::paths::Paths;
 use super::poll;
-use super::resources::Inventory;
+use super::resources::{self, Inventory};
 use super::scheduler;
 use super::state::{self, Environment, Installed, Lock};
 use super::status as status_report;
@@ -127,42 +128,46 @@ fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<boo
     }
 }
 
+/// Observes the inventory-proven containers in bounded `docker inspect` batches. A static component the inventory
+/// does not hold is absent; any record that is not exactly one distinct known component refuses the snapshot.
 fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSnapshot, String> {
+    let inconsistent = || "Docker returned an inconsistent Local runtime snapshot".to_owned();
+    let records = resources::inspect_containers(
+        engine,
+        &inventory.project_containers,
+        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.State.Status}}|{{with .State.Health}}{{.Status}}{{end}}|{{.State.ExitCode}}",
+        "Local runtime state",
+    )?;
+    let mut present = BTreeMap::new();
+    for record in &records {
+        let (name, state) = record.split_once('|').ok_or_else(inconsistent)?;
+        let name = name.strip_prefix('/').ok_or_else(inconsistent)?;
+        if present.insert(name, state).is_some() {
+            return Err(inconsistent());
+        }
+    }
     let components = status_report::COMPONENTS
         .iter()
         .copied()
-        .map(|component| {
-            let record = engine.run_output([
-                "inspect",
-                "--type=container",
-                "--format",
-                "{{index .Config.Labels \"com.docker.compose.service\"}}|{{.State.Status}}|{{with .State.Health}}{{.Status}}{{end}}|{{.State.ExitCode}}",
-                component.docker_name(),
-            ]);
-            status_report::observe(component, record.as_deref().ok())
-        })
+        .map(|component| status_report::observe(component, present.remove(component.docker_name())))
         .collect::<Result<Vec<_>, _>>()?;
-    let present = components
-        .iter()
-        .filter(|observation| observation.is_present())
-        .count();
-    if present != inventory.project_containers.len() {
-        return Err("Docker returned an inconsistent Local runtime snapshot".into());
+    if !present.is_empty() {
+        return Err(inconsistent());
     }
-    let assistants = inventory
+    let assistant_ids: Vec<String> = inventory
         .assistant_containers()
         .into_iter()
-        .map(|identifier| {
-            let record = engine.run_output([
-                "inspect",
-                "--type=container",
-                "--format",
-                "{{.State.Status}}|{{.State.ExitCode}}",
-                identifier,
-            ])?;
-            status_report::observe_assistant(&record)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        .map(str::to_owned)
+        .collect();
+    let assistants = resources::inspect_containers(
+        engine,
+        &assistant_ids,
+        "{{.State.Status}}|{{.State.ExitCode}}",
+        "Assistant runtime state",
+    )?
+    .iter()
+    .map(|record| status_report::observe_assistant(record))
+    .collect::<Result<Vec<_>, String>>()?;
     Ok(RuntimeSnapshot {
         components,
         assistants,
@@ -3921,5 +3926,119 @@ mod tests {
         assert_eq!(document["release"], release(2, 'b').reference);
         assert_eq!(document["outcome"], "rollback-needed");
         assert!(!context.paths.status.exists());
+    }
+
+    /// A fake `docker` that logs each call and answers every identifier after `--format` from `map`, whose lines
+    /// start with each identifier's full 64-character id.
+    #[cfg(unix)]
+    fn inspecting_docker(map: &str) -> (tempfile::TempDir, Engine) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::write(root.join("map"), map).unwrap();
+        let command = root.join("docker");
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf 'call\\n' >> '{calls}'\nseen=0\nfor argument in \"$@\"; do\n  \
+                 if [ \"$seen\" = 2 ]; then grep -m1 \"^$argument\" '{map}' || true; fi\n  \
+                 if [ \"$seen\" = 1 ]; then seen=2; fi\n  \
+                 if [ \"$argument\" = --format ]; then seen=1; fi\ndone\n",
+                calls = root.join("calls").display(),
+                map = root.join("map").display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&command);
+        let _ = fs::remove_file(root.join("calls"));
+        (temporary, Engine::with_docker(command))
+    }
+
+    #[cfg(unix)]
+    fn inspect_calls(temporary: &tempfile::TempDir) -> usize {
+        fs::read_to_string(temporary.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_snapshot_inspects_only_inventory_proven_containers_in_batches() {
+        let components = status_report::COMPONENTS;
+        let map = format!(
+            "{:0<64}|/shimpz-admin|admin|running|healthy|0\n\
+             {:0<64}|/shimpz-team|team|exited||7\n\
+             {:0<64}|/shimpz-account-egress-init|shimpz-account-egress-init|exited||0\n\
+             {:0<64}|running|0\n{:0<64}|exited|137\n",
+            "c001", "c002", "c003", "a001", "a002"
+        );
+        let inventory = Inventory {
+            project_containers: vec!["c001".into(), "c002".into(), "c003".into()],
+            dynamic_containers: vec!["c002".into(), "a001".into(), "a002".into()],
+            ..Inventory::default()
+        };
+        let (temporary, engine) = inspecting_docker(&map);
+        let snapshot = runtime_snapshot(&engine, &inventory).unwrap();
+        // Eight components and two Assistants used to cost ten Docker processes; two batches answer them all.
+        assert_eq!(inspect_calls(&temporary), 2);
+        let expected = components
+            .iter()
+            .map(|component| {
+                let record = match component.docker_name() {
+                    "shimpz-admin" => Some("admin|running|healthy|0"),
+                    "shimpz-team" => Some("team|exited||7"),
+                    "shimpz-account-egress-init" => Some("shimpz-account-egress-init|exited||0"),
+                    _ => None,
+                };
+                status_report::observe(*component, record).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot.components, expected);
+        assert_eq!(
+            snapshot.assistants,
+            [
+                status_report::observe_assistant("running|0").unwrap(),
+                status_report::observe_assistant("exited|137").unwrap(),
+            ]
+        );
+
+        let (temporary, engine) = inspecting_docker("");
+        let snapshot = runtime_snapshot(&engine, &Inventory::default()).unwrap();
+        assert_eq!(inspect_calls(&temporary), 0);
+        assert_eq!(
+            snapshot.components,
+            components.map(|component| status_report::observe(component, None).unwrap())
+        );
+        assert!(snapshot.assistants.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_snapshot_refuses_records_that_are_not_distinct_known_components() {
+        let inventory = Inventory {
+            project_containers: vec!["c001".into(), "c002".into()],
+            ..Inventory::default()
+        };
+        let admin = format!("{:0<64}|/shimpz-admin|admin|running|healthy|0\n", "c001");
+        for second in [
+            "/foreign|admin|running|healthy|0",
+            "/shimpz-admin|admin|running|healthy|0",
+            "shimpz-team|team|running|healthy|0",
+            "/shimpz-team|admin|running|healthy|0",
+        ] {
+            let (_temporary, engine) =
+                inspecting_docker(&format!("{admin}{:0<64}|{second}\n", "c002"));
+            assert!(runtime_snapshot(&engine, &inventory).is_err(), "{second}");
+        }
+        // A container that vanished after the inventory leaves its batch unanswered.
+        let (_temporary, engine) = inspecting_docker(&admin);
+        assert!(runtime_snapshot(&engine, &inventory).is_err());
+        let assistant = Inventory {
+            dynamic_containers: vec!["a001".into()],
+            ..Inventory::default()
+        };
+        let (_temporary, engine) = inspecting_docker(&format!("{:0<64}|running|-1\n", "a001"));
+        assert!(runtime_snapshot(&engine, &assistant).is_err());
     }
 }

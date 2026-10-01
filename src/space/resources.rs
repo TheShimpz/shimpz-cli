@@ -340,6 +340,23 @@ fn inspect_records(
     Ok(records)
 }
 
+/// Inspect inventory-proven containers by id in bounded batches; record `i` answers `identifiers[i]`.
+pub(crate) fn inspect_containers(
+    engine: &Engine,
+    identifiers: &[String],
+    format: &str,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    inspect_records(
+        engine,
+        &["inspect", "--type=container"],
+        Identity::Id,
+        format,
+        identifiers,
+        label,
+    )
+}
+
 fn validate_project_containers(engine: &Engine, identifiers: &[String]) -> Result<(), String> {
     let mut services = BTreeSet::new();
     for record in inspect_records(
