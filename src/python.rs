@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.5.0";
 const PRIVATE_BRIDGE_FAILURE: &str = "Action execution failed; review the Action source and tests";
+const RENDER_FAILURE: &str =
+    "Action human request cannot be rendered; review its shimpz.text copy and the Action tests";
 
 pub(crate) struct Assistant {
     root: PathBuf,
@@ -38,7 +41,27 @@ impl Assistant {
         bridge(
             Some(&self.requirements),
             ["invoke".as_ref(), self.root.as_os_str(), action_id.as_ref()],
-            Some(input),
+            Some(PrivateInput {
+                bytes: input,
+                failure: PRIVATE_BRIDGE_FAILURE,
+            }),
+        )
+    }
+
+    /// Render a canonical request frame's catalog references in English for terminal display only.
+    pub(crate) fn render(&self, frame: &Value) -> Result<String, String> {
+        // Request parameters stay private like the invocation that produced them.
+        let input = Zeroizing::new(
+            serde_json::to_vec(&serde_json::json!({ "request": frame }))
+                .map_err(|_| "Action human request is invalid".to_owned())?,
+        );
+        bridge(
+            None,
+            ["render".as_ref(), self.root.as_os_str()],
+            Some(PrivateInput {
+                bytes: &input,
+                failure: RENDER_FAILURE,
+            }),
         )
     }
 }
@@ -55,10 +78,16 @@ fn project_root(project: &Path) -> Result<PathBuf, String> {
         .map_err(|_| "Assistant project is unavailable".into())
 }
 
+/// Bytes sent to the bridge on stdin; the bridge's diagnostics are then discarded for this fixed failure.
+struct PrivateInput<'a> {
+    bytes: &'a [u8],
+    failure: &'static str,
+}
+
 fn bridge<const SIZE: usize>(
     requirements: Option<&Requirements>,
     arguments: [&OsStr; SIZE],
-    input: Option<&[u8]>,
+    input: Option<PrivateInput>,
 ) -> Result<String, String> {
     let secret_bearing = input.is_some();
     let mut command = toolchain::uv()?;
@@ -126,9 +155,9 @@ fn bridge<const SIZE: usize>(
         command.stdin(Stdio::null());
     }
     let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
-    if let (Some(source), Some(mut destination)) = (input, child.stdin.take()) {
+    if let (Some(source), Some(mut destination)) = (&input, child.stdin.take()) {
         destination
-            .write_all(source)
+            .write_all(source.bytes)
             .map_err(|_| "Action input cannot be sent")?;
     }
     let output = child
@@ -137,16 +166,18 @@ fn bridge<const SIZE: usize>(
     if output.status.success() {
         decode(output.stdout)
     } else {
-        Err(bridge_failure(&output.stderr, secret_bearing))
+        Err(bridge_failure(
+            &output.stderr,
+            input.map(|input| input.failure),
+        ))
     }
 }
 
-fn bridge_failure(stderr: &[u8], secret_bearing: bool) -> String {
-    if secret_bearing {
-        PRIVATE_BRIDGE_FAILURE.into()
-    } else {
-        diagnostic(stderr, "Assistant validation failed")
-    }
+fn bridge_failure(stderr: &[u8], private_failure: Option<&'static str>) -> String {
+    private_failure.map_or_else(
+        || diagnostic(stderr, "Assistant validation failed"),
+        str::to_owned,
+    )
 }
 
 fn decode(stdout: Vec<u8>) -> Result<String, String> {
@@ -255,7 +286,7 @@ mod tests {
     fn discards_secret_bearing_bridge_diagnostics() {
         let private_output = b"private-output-sentinel";
 
-        let diagnostic = bridge_failure(private_output, true);
+        let diagnostic = bridge_failure(private_output, Some(PRIVATE_BRIDGE_FAILURE));
 
         assert_eq!(diagnostic, PRIVATE_BRIDGE_FAILURE);
         assert!(!diagnostic.contains("private-output-sentinel"));
@@ -264,7 +295,7 @@ mod tests {
     #[test]
     fn preserves_non_secret_bridge_diagnostics() {
         assert_eq!(
-            bridge_failure(b"shimpz: contract failure", false),
+            bridge_failure(b"shimpz: contract failure", None),
             "contract failure"
         );
     }

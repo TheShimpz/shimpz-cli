@@ -164,7 +164,8 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
                 return Err("Action requested human input after a password response".into());
             }
             ActionResponse::Request(frame) => {
-                let response = answer(&frame)?;
+                let display = frame.display(&assistant.render(&frame.frame())?)?;
+                let response = answer(&frame, &display)?;
                 request.push_response(response)?;
                 secret_answered = frame.contains_secret_input();
             }

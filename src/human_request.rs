@@ -1,14 +1,22 @@
 //! Interactive terminal adapter for local Action human requests.
+//!
+//! An Action emits a canonical request whose copy fields are message-catalog references (ADR-0091). The terminal
+//! shows the SDK's English rendering of those references, while every answer carries only the canonical
+//! fingerprint and canonical option values, so replay never depends on display text.
 
 use std::collections::HashSet;
 use std::io;
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::output;
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
+const OPTION_FIELDS: [&str; 3] = ["description", "label", "value"];
+/// The largest copy bound of any request field (a description).
+const MAX_DISPLAY_CHARACTERS: usize = 500;
 
 pub(crate) enum ActionResponse {
     Result(Value),
@@ -16,13 +24,20 @@ pub(crate) enum ActionResponse {
     StoredInputRejected(String),
 }
 
+/// One canonical request frame exactly as the Action emitted it.
 pub(crate) struct HumanRequest {
     kind: String,
     ordinal: u64,
     fingerprint: String,
+    frame: Map<String, Value>,
+}
+
+/// The English rendering of one canonical request, used only for display.
+pub(crate) struct Display {
     title: String,
     description: String,
-    fields: Map<String, Value>,
+    label: Option<String>,
+    options: Vec<(String, Option<String>)>,
 }
 
 pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
@@ -61,11 +76,64 @@ impl HumanRequest {
     pub(crate) fn contains_secret_input(&self) -> bool {
         self.kind == "input:password"
     }
+
+    /// The exact canonical frame, for the SDK's English rendering.
+    pub(crate) fn frame(&self) -> Value {
+        Value::Object(self.frame.clone())
+    }
+
+    /// Admit the SDK's English rendering only when it changes nothing but the copy references.
+    pub(crate) fn display(&self, rendered: &str) -> Result<Display, String> {
+        let invalid = || "Python SDK rendered an invalid human request".to_owned();
+        let value: Value = serde_json::from_str(rendered).map_err(|_| invalid())?;
+        let shown = value
+            .as_object()
+            .filter(|shown| shown.keys().eq(self.frame.keys()))
+            .ok_or_else(invalid)?;
+        for (key, canonical) in &self.frame {
+            let projected = &shown[key];
+            let valid = match key.as_str() {
+                "title" | "description" | "label" => display_text(projected).is_some(),
+                "placeholder" => {
+                    canonical.is_null() == projected.is_null()
+                        && (projected.is_null() || display_text(projected).is_some())
+                }
+                "options" => rendered_options(canonical, projected),
+                _ => projected == canonical,
+            };
+            if !valid {
+                return Err(invalid());
+            }
+        }
+        let text = |key: &str| display_text(&shown[key]).unwrap_or_default().to_owned();
+        Ok(Display {
+            title: text("title"),
+            description: text("description"),
+            label: shown.contains_key("label").then(|| text("label")),
+            options: shown
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|option| {
+                    (
+                        display_text(&option["label"])
+                            .unwrap_or_default()
+                            .to_owned(),
+                        display_text(&option["description"]).map(str::to_owned),
+                    )
+                })
+                .collect(),
+        })
+    }
 }
 
-pub(crate) fn answer(request: &HumanRequest) -> Result<Value, String> {
-    output::request(&request.title);
-    output::request(&request.description);
+pub(crate) fn answer(request: &HumanRequest, display: &Display) -> Result<Value, String> {
+    output::request(&display.title);
+    output::request(&display.description);
+    if let Some(label) = &display.label {
+        output::request(label);
+    }
     let value = match request.kind.as_str() {
         "approval" => Value::Bool(confirm("Approve this action? [y/N]")?),
         "input:text" | "input:phone" => Value::String(line("Enter the requested value:")?),
@@ -77,8 +145,8 @@ pub(crate) fn answer(request: &HumanRequest) -> Result<Value, String> {
             );
             Value::String(secret.as_str().to_owned())
         }
-        "input:select" | "input:choice" => Value::String(select(request)?),
-        "input:choices" => Value::Array(choices(request)?),
+        "input:select" | "input:choice" => Value::String(select(request, display)?),
+        "input:choices" => Value::Array(choices(request, display)?),
         kind if kind.starts_with("auth:") => {
             return Err("request_auth requires an authenticated Team Admin session".into());
         }
@@ -96,33 +164,39 @@ pub(crate) fn answer(request: &HumanRequest) -> Result<Value, String> {
 }
 
 fn parse_request(value: Option<&Value>) -> Result<HumanRequest, String> {
-    let fields = value
-        .and_then(Value::as_object)
-        .ok_or("Python SDK human request is invalid")?;
-    let kind = text(fields, "kind")?;
-    if !valid_request_fields(fields, &kind) {
-        return Err("Python SDK human request is invalid".into());
+    let invalid = || "Python SDK human request is invalid".to_owned();
+    let fields = value.and_then(Value::as_object).ok_or_else(invalid)?;
+    let kind = fields
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?
+        .to_owned();
+    if !valid_request_fields(fields, &kind) || !valid_copy(fields) {
+        return Err(invalid());
     }
     let ordinal = fields
         .get("ordinal")
         .and_then(Value::as_u64)
         .filter(|value| *value < 8)
-        .ok_or("Python SDK human request is invalid")?;
-    let fingerprint = text(fields, "fingerprint")?;
-    if fingerprint.len() != 64
-        || !fingerprint
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err("Python SDK human request is invalid".into());
+        .ok_or_else(invalid)?;
+    let fingerprint = fields
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .filter(|value| valid_hex_digest(value))
+        .ok_or_else(invalid)?
+        .to_owned();
+    // ADR-0038's canonical preimage is the whole request without its fingerprint, references included.
+    let mut preimage = fields.clone();
+    preimage.remove("fingerprint");
+    let encoded = serde_json::to_vec(&Value::Object(preimage)).map_err(|_| invalid())?;
+    if format!("{:x}", Sha256::digest(encoded)) != fingerprint {
+        return Err(invalid());
     }
     Ok(HumanRequest {
         kind,
         ordinal,
         fingerprint,
-        title: text(fields, "title")?,
-        description: text(fields, "description")?,
-        fields: fields.clone(),
+        frame: fields.clone(),
     })
 }
 
@@ -158,6 +232,81 @@ fn valid_request_fields(fields: &Map<String, Value>, kind: &str) -> bool {
         && fields
             .get("stored_input")
             .is_none_or(|value| value.as_str().is_some_and(valid_stored_input_id))
+}
+
+/// Every copy field is a catalog reference; only a placeholder or an option description may be absent (null).
+fn valid_copy(fields: &Map<String, Value>) -> bool {
+    ["title", "description"]
+        .iter()
+        .all(|field| fields.get(*field).is_some_and(valid_reference))
+        && fields.get("label").is_none_or(valid_reference)
+        && fields
+            .get("placeholder")
+            .is_none_or(|value| value.is_null() || valid_reference(value))
+        && fields.get("options").is_none_or(|options| {
+            options
+                .as_array()
+                .filter(|options| (2..=32).contains(&options.len()))
+                .is_some_and(|options| options.iter().all(valid_option))
+        })
+}
+
+fn valid_option(option: &Value) -> bool {
+    option.as_object().is_some_and(|option| {
+        option.keys().map(String::as_str).eq(OPTION_FIELDS)
+            && option["value"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+            && valid_reference(&option["label"])
+            && (option["description"].is_null() || valid_reference(&option["description"]))
+    })
+}
+
+fn valid_reference(value: &Value) -> bool {
+    value.as_object().is_some_and(|reference| {
+        reference
+            .keys()
+            .map(String::as_str)
+            .eq(["message", "params"])
+            && reference["message"].as_str().is_some_and(valid_hex_digest)
+            && reference["params"].is_object()
+    })
+}
+
+fn rendered_options(canonical: &Value, projected: &Value) -> bool {
+    let (Some(canonical), Some(projected)) = (canonical.as_array(), projected.as_array()) else {
+        return false;
+    };
+    canonical.len() == projected.len()
+        && canonical
+            .iter()
+            .zip(projected)
+            .all(|(canonical, projected)| {
+                projected.as_object().is_some_and(|projected| {
+                    projected.keys().map(String::as_str).eq(OPTION_FIELDS)
+                        && projected["value"] == canonical["value"]
+                        && display_text(&projected["label"]).is_some()
+                        && canonical["description"].is_null() == projected["description"].is_null()
+                        && (projected["description"].is_null()
+                            || display_text(&projected["description"]).is_some())
+                })
+            })
+}
+
+/// Rendered copy reaches the terminal only as bounded text without control characters.
+fn display_text(value: &Value) -> Option<&str> {
+    value.as_str().filter(|text| {
+        !text.is_empty()
+            && text.chars().count() <= MAX_DISPLAY_CHARACTERS
+            && !text.chars().any(char::is_control)
+    })
+}
+
+fn valid_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_stored_input_id(value: &str) -> bool {
@@ -203,55 +352,52 @@ fn textarea() -> Result<String, String> {
     }
 }
 
-fn select(request: &HumanRequest) -> Result<String, String> {
-    let options = options(request)?;
-    render_options(&options);
-    let selected = selection(&line("Choose one option number:")?, options.len())?;
-    Ok(options[selected]["value"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned())
+fn select(request: &HumanRequest, display: &Display) -> Result<String, String> {
+    let values = option_values(request)?;
+    render_options(display);
+    let selected = selection(&line("Choose one option number:")?, values.len())?;
+    Ok(values[selected].to_owned())
 }
 
-fn choices(request: &HumanRequest) -> Result<Vec<Value>, String> {
-    let options = options(request)?;
-    render_options(&options);
+fn choices(request: &HumanRequest, display: &Display) -> Result<Vec<Value>, String> {
+    let values = option_values(request)?;
+    render_options(display);
     let raw = line("Choose option numbers separated by commas:")?;
     let mut selected = raw
         .split(',')
-        .map(|value| selection(value.trim(), options.len()))
+        .map(|value| selection(value.trim(), values.len()))
         .collect::<Result<Vec<_>, _>>()?;
     selected.sort_unstable();
     selected.dedup();
     Ok(selected
         .into_iter()
-        .map(|index| options[index]["value"].clone())
+        .map(|index| Value::String(values[index].to_owned()))
         .collect())
 }
 
-fn options(request: &HumanRequest) -> Result<Vec<&Map<String, Value>>, String> {
+/// The canonical option values, in order; a selection never answers with display text.
+fn option_values(request: &HumanRequest) -> Result<Vec<&str>, String> {
     request
-        .fields
+        .frame
         .get("options")
         .and_then(Value::as_array)
-        .filter(|options| (2..=32).contains(&options.len()))
-        .ok_or_else(|| "Python SDK human request options are invalid".to_owned())?
-        .iter()
-        .map(|option| {
-            option
-                .as_object()
-                .ok_or_else(|| "Python SDK human request options are invalid".to_owned())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| option["value"].as_str())
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .filter(|values| (2..=32).contains(&values.len()))
+        .ok_or_else(|| "Python SDK human request options are invalid".to_owned())
 }
 
-fn render_options(options: &[&Map<String, Value>]) {
-    for (index, option) in options.iter().enumerate() {
-        output::request(&format!(
-            "{}. {}",
-            index + 1,
-            option["label"].as_str().unwrap_or("invalid option")
-        ));
+fn render_options(display: &Display) {
+    for (index, (label, description)) in display.options.iter().enumerate() {
+        let line = description.as_ref().map_or_else(
+            || format!("{}. {label}", index + 1),
+            |description| format!("{}. {label} — {description}", index + 1),
+        );
+        output::request(&line);
     }
 }
 
@@ -264,15 +410,6 @@ fn selection(value: &str, count: usize) -> Result<usize, String> {
         .ok_or_else(|| "Human request selection is invalid".to_owned())
 }
 
-fn text(fields: &Map<String, Value>, key: &str) -> Result<String, String> {
-    fields
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| "Python SDK human request is invalid".to_owned())
-}
-
 fn exact_fields(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.keys().map(String::as_str).collect::<HashSet<_>>() == expected.iter().copied().collect()
 }
@@ -281,6 +418,59 @@ fn exact_fields(object: &Map<String, Value>, expected: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    fn reference(character: char, params: &Value) -> Value {
+        json!({"message": character.to_string().repeat(64), "params": params})
+    }
+
+    /// Attach the canonical fingerprint to a request preimage.
+    fn framed(mut request: Value) -> Value {
+        let encoded = serde_json::to_vec(&request).unwrap();
+        request["fingerprint"] = json!(format!("{:x}", Sha256::digest(encoded)));
+        request
+    }
+
+    fn approval() -> Value {
+        framed(json!({
+            "kind": "approval",
+            "ordinal": 0,
+            "title": reference('a', &json!({})),
+            "description": reference('b', &json!({"zone": "example.com", "count": 12})),
+        }))
+    }
+
+    fn choice() -> Value {
+        framed(json!({
+            "kind": "input:choice",
+            "ordinal": 1,
+            "title": reference('a', &json!({})),
+            "description": reference('b', &json!({})),
+            "label": reference('c', &json!({})),
+            "required": true,
+            "options": [
+                {"value": "proxied", "label": reference('d', &json!({})), "description": null},
+                {"value": "dns-only", "label": reference('e', &json!({})), "description": reference('f', &json!({}))},
+            ],
+        }))
+    }
+
+    fn request(frame: &Value) -> HumanRequest {
+        match parse_response(&json!({"type": "request", "request": frame}).to_string()) {
+            Ok(ActionResponse::Request(request)) => request,
+            _ => panic!("canonical request"),
+        }
+    }
+
+    fn rendered_choice() -> Value {
+        let mut rendered = choice();
+        rendered["title"] = json!("Choose the DNS mode");
+        rendered["description"] = json!("The Action needs this decision.");
+        rendered["label"] = json!("Mode");
+        rendered["options"][0]["label"] = json!("Proxied");
+        rendered["options"][1]["label"] = json!("DNS only");
+        rendered["options"][1]["description"] = json!("Serve records without the proxy.");
+        rendered
+    }
+
     #[test]
     fn parses_a_tagged_result() {
         let parsed = parse_response(r#"{"type":"result","result":{"ok":true}}"#).unwrap();
@@ -288,41 +478,75 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_closed_approval_request() {
-        let parsed = parse_response(
-            r#"{"type":"request","request":{"kind":"approval","ordinal":0,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Deploy","description":"Deploy safely."}}"#,
-        )
-        .unwrap();
-        assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == "approval"));
+    fn fingerprints_references_exactly_like_the_protocol_reference() {
+        // Python: sha256(json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))).
+        assert_eq!(
+            approval()["fingerprint"],
+            "556560e7f9a6014aaf3cd769d79b53ad6b9417f62c137d70b08b8891a5b28a82"
+        );
+        let unicode = framed(json!({
+            "kind": "approval",
+            "ordinal": 0,
+            "title": reference('a', &json!({})),
+            "description": reference('b', &json!({"zone": "exämple", "count": 12})),
+        }));
+        assert_eq!(
+            unicode["fingerprint"],
+            "a00f75bc84503e83df1e34344620b3c8631102f7ef27a74002b60b403d38bff6"
+        );
     }
 
     #[test]
-    fn parses_each_named_authentication_request() {
+    fn parses_only_canonical_reference_requests() {
+        assert_eq!(request(&approval()).kind, "approval");
+        assert_eq!(request(&choice()).kind, "input:choice");
         for kind in ["auth:password", "auth:totp", "auth:passkey"] {
-            let source = format!(
-                r#"{{"type":"request","request":{{"kind":"{kind}","ordinal":0,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Authorize","description":"Authorize safely."}}}}"#
+            let mut frame = approval();
+            frame["kind"] = json!(kind);
+            frame.as_object_mut().unwrap().remove("fingerprint");
+            assert_eq!(request(&framed(frame)).kind, kind);
+        }
+
+        let mut tampered = approval();
+        tampered["description"]["params"]["count"] = json!(13);
+        let mut string_copy = approval();
+        string_copy["title"] = json!("Deploy");
+        string_copy.as_object_mut().unwrap().remove("fingerprint");
+        let mut extra = approval();
+        extra["extra"] = json!(true);
+        let mut option = choice();
+        option["options"][0]["label"] = json!("Proxied");
+        option.as_object_mut().unwrap().remove("fingerprint");
+        for invalid in [tampered, framed(string_copy), extra, framed(option)] {
+            assert!(
+                parse_response(&json!({"type": "request", "request": invalid}).to_string())
+                    .is_err(),
+                "{invalid}"
             );
-            let parsed = parse_response(&source).expect("authentication request");
-            assert!(matches!(parsed, ActionResponse::Request(request) if request.kind == kind));
         }
     }
 
     #[test]
     fn parses_only_canonical_stored_input_password_requests() {
-        let source = r#"{"type":"request","request":{"kind":"input:password","ordinal":1,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"WhatsApp access token","description":"Enter the token.","label":"Meta access token","required":true,"placeholder":"","min_length":1,"max_length":1024,"stored_input":"whatsapp-token"}}"#;
-        let parsed = parse_response(source).expect("stored input password request");
-        assert!(
-            matches!(parsed, ActionResponse::Request(request) if request.contains_secret_input())
-        );
-
+        let frame = |stored_input: &str| {
+            framed(json!({
+                "kind": "input:password",
+                "ordinal": 1,
+                "title": reference('a', &json!({})),
+                "description": reference('b', &json!({})),
+                "label": reference('c', &json!({})),
+                "required": true,
+                "placeholder": null,
+                "min_length": 1,
+                "max_length": 1024,
+                "stored_input": stored_input,
+            }))
+        };
+        assert!(request(&frame("whatsapp-token")).contains_secret_input());
         for stored_input in ["", "Whatsapp_Token", "a--b", &"a".repeat(65)] {
-            let invalid = source.replace("whatsapp-token", stored_input);
-            assert!(
-                parse_response(&invalid).is_err(),
-                "stored input: {stored_input}"
-            );
+            let source = json!({"type": "request", "request": frame(stored_input)}).to_string();
+            assert!(parse_response(&source).is_err(), "{stored_input}");
         }
-        assert!(parse_response(&source.replace("input:password", "input:text")).is_err());
     }
 
     #[test]
@@ -344,12 +568,52 @@ mod tests {
     }
 
     #[test]
+    fn displays_only_a_rendering_that_keeps_every_canonical_value() {
+        let request = request(&choice());
+        let display = request
+            .display(&rendered_choice().to_string())
+            .expect("rendering");
+        assert_eq!(display.title, "Choose the DNS mode");
+        assert_eq!(display.label.as_deref(), Some("Mode"));
+        assert_eq!(
+            display.options,
+            vec![
+                ("Proxied".to_owned(), None),
+                (
+                    "DNS only".to_owned(),
+                    Some("Serve records without the proxy.".to_owned())
+                )
+            ]
+        );
+        assert_eq!(option_values(&request).unwrap(), ["proxied", "dns-only"]);
+
+        let mut changed_value = rendered_choice();
+        changed_value["options"][0]["value"] = json!("dns-only");
+        let mut changed_fingerprint = rendered_choice();
+        changed_fingerprint["fingerprint"] = json!("0".repeat(64));
+        let mut unrendered = rendered_choice();
+        unrendered["title"] = choice()["title"].clone();
+        let mut control = rendered_choice();
+        control["description"] = json!("Line one\u{1b}[2J");
+        let mut invented = rendered_choice();
+        invented["options"][0]["description"] = json!("Invented");
+        let mut extra = rendered_choice();
+        extra["extra"] = json!(true);
+        for invalid in [
+            changed_value,
+            changed_fingerprint,
+            unrendered,
+            control,
+            invented,
+            extra,
+        ] {
+            assert!(request.display(&invalid.to_string()).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_request_fields_and_legacy_results() {
         assert!(parse_response(r#"{"ok":true}"#).is_err());
-        assert!(parse_response(
-            r#"{"type":"request","request":{"kind":"approval","ordinal":0,"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","title":"Deploy","description":"Deploy safely.","extra":true}}"#,
-        )
-        .is_err());
     }
 
     #[test]
