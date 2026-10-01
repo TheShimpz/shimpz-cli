@@ -149,7 +149,7 @@ impl Param {
     fn valid(&self) -> bool {
         let maximum = match self.kind.as_str() {
             "integer" => 15,
-            "domain" => 253,
+            "domain" | "dns_name" => 253,
             "identifier" => 128,
             _ => return false,
         };
@@ -432,6 +432,38 @@ pub(crate) mod tests {
             Catalog::from_document(&json!({"messages": reversed, "summary": SUMMARY}).to_string())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn admits_each_closed_param_kind_only_within_its_bound() {
+        let document = |kind: &str, max_length: usize| {
+            let mut messages = vec![
+                message(SUMMARY, 160, &json!([])),
+                message(
+                    "Authorize {value}.",
+                    500,
+                    &json!([{"name": "value", "kind": kind, "max_length": max_length}]),
+                ),
+            ];
+            messages.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+            json!({"messages": messages, "summary": SUMMARY}).to_string()
+        };
+        for (kind, maximum) in [
+            ("integer", 15),
+            ("domain", 253),
+            ("dns_name", 253),
+            ("identifier", 128),
+        ] {
+            assert!(
+                Catalog::from_document(&document(kind, maximum)).is_ok(),
+                "{kind}"
+            );
+            assert!(
+                Catalog::from_document(&document(kind, maximum + 1)).is_err(),
+                "{kind}"
+            );
+        }
+        assert!(Catalog::from_document(&document("text", 10)).is_err());
     }
 
     type Mutation = fn(&mut Value, &str);
