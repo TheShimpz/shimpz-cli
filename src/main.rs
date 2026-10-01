@@ -1,5 +1,6 @@
 //! Command-line tooling for Shimpz Assistants.
 
+mod action_failure;
 mod args;
 mod auth;
 mod credentials;

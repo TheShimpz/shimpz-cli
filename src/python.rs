@@ -2,9 +2,9 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -13,7 +13,9 @@ use crate::{language_pack, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.5.0";
-const PRIVATE_BRIDGE_FAILURE: &str = "Action execution failed; review the Action source and tests";
+const PRIVATE_BRIDGE_FAILURE: &str = "the Action process ended without a response frame";
+/// The largest response frame Team admits from one Action process.
+const MAX_RESPONSE_BYTES: u64 = 512 * 1_024;
 const RENDER_FAILURE: &str =
     "Action human request cannot be rendered; review its shimpz.text copy and the Action tests";
 
@@ -191,24 +193,57 @@ fn bridge<const SIZE: usize>(
             .write_all(source.bytes)
             .map_err(|_| "Action input cannot be sent")?;
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|_| "Python SDK execution failed")?;
-    if output.status.success() {
-        decode(output.stdout)
+    finish(child, input.and_then(|input| input.withheld))
+}
+
+/// Read one bounded response frame and the child's exit status; stderr is drained only when it was captured.
+fn finish(mut child: Child, withheld: Option<&'static str>) -> Result<String, String> {
+    let stderr = child.stderr.take().map(|stream| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.take(MAX_RESPONSE_BYTES).read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let mut stdout = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|stream| stream.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut stdout));
+    if stdout.len() as u64 > MAX_RESPONSE_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Python SDK response frame is larger than 512 KiB".into());
+    }
+    let status = child.wait().map_err(|_| "Python SDK execution failed")?;
+    let stderr = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    if !matches!(read, Some(Ok(_))) {
+        return Err("Python SDK execution failed".into());
+    }
+    if status.success() {
+        decode(stdout)
     } else {
-        Err(bridge_failure(
-            &output.stderr,
-            input.and_then(|input| input.withheld),
-        ))
+        Err(bridge_failure(&stderr, status.code(), withheld))
     }
 }
 
-fn bridge_failure(stderr: &[u8], private_failure: Option<&'static str>) -> String {
-    private_failure.map_or_else(
-        || diagnostic(stderr, "Assistant validation failed"),
-        str::to_owned,
-    )
+/// A secret-bearing bridge reports only its exit status: raw child output may hold a private value.
+fn bridge_failure(
+    stderr: &[u8],
+    code: Option<i32>,
+    private_failure: Option<&'static str>,
+) -> String {
+    match (private_failure, code) {
+        (None, _) => diagnostic(stderr, "Assistant validation failed"),
+        (Some(failure), Some(code)) => {
+            format!("{failure} (exit status {code}); review the Action source and tests")
+        }
+        (Some(failure), None) => {
+            format!("{failure} (terminated by a signal); review the Action source and tests")
+        }
+    }
 }
 
 fn decode(stdout: Vec<u8>) -> Result<String, String> {
@@ -314,19 +349,26 @@ mod tests {
     }
 
     #[test]
-    fn discards_secret_bearing_bridge_diagnostics() {
+    fn reports_only_the_exit_status_of_a_secret_bearing_bridge() {
         let private_output = b"private-output-sentinel";
 
-        let diagnostic = bridge_failure(private_output, Some(PRIVATE_BRIDGE_FAILURE));
+        let diagnostic = bridge_failure(private_output, Some(1), Some(PRIVATE_BRIDGE_FAILURE));
 
-        assert_eq!(diagnostic, PRIVATE_BRIDGE_FAILURE);
+        assert_eq!(
+            diagnostic,
+            "the Action process ended without a response frame (exit status 1); review the Action source and tests"
+        );
         assert!(!diagnostic.contains("private-output-sentinel"));
+        assert!(
+            bridge_failure(private_output, None, Some(PRIVATE_BRIDGE_FAILURE))
+                .contains("terminated by a signal")
+        );
     }
 
     #[test]
     fn preserves_non_secret_bridge_diagnostics() {
         assert_eq!(
-            bridge_failure(b"shimpz: contract failure", None),
+            bridge_failure(b"shimpz: contract failure", Some(1), None),
             "contract failure"
         );
     }

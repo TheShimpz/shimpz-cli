@@ -115,7 +115,8 @@ fn discards_private_invocation_stderr_on_failure() {
 
     assert!(!output.status.success());
     let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(diagnostic.contains("Action execution failed; review the Action source and tests"));
+    assert!(diagnostic.contains("the Action process ended without a response frame (exit status"));
+    assert!(diagnostic.contains("review the Action source and tests"));
     assert!(!diagnostic.contains("integration-secret"));
     assert!(!diagnostic.contains("integrations"));
 }

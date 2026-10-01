@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::action_failure::ActionFailure;
 use crate::output;
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
@@ -22,6 +23,7 @@ pub(crate) enum ActionResponse {
     Result(Value),
     Request(HumanRequest),
     StoredInputRejected(String),
+    Failure(ActionFailure),
 }
 
 /// One canonical request frame exactly as the Action emitted it.
@@ -67,6 +69,9 @@ pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
                     .unwrap_or_default()
                     .to_owned(),
             ))
+        }
+        Some("failure") if exact_fields(object, &["type", "failure"]) => {
+            ActionFailure::parse(object.get("failure")).map(ActionResponse::Failure)
         }
         _ => Err("Python SDK response is invalid".into()),
     }

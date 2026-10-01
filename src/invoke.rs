@@ -151,12 +151,16 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     for _ in 0..=8 {
         let serialized = request.serialized()?;
         let output = assistant.invoke(action_id, serialized.as_slice())?;
+        let response = parse_response(&output)?;
         let response_value: Value = serde_json::from_str(&output)
             .map_err(|_| "Python SDK response is invalid".to_owned())?;
-        if request.response_exposes_secret(&response_value) {
+        // Only a failure diagnostic is sanitized; every other frame that echoes a private value is refused.
+        if !matches!(response, ActionResponse::Failure(_))
+            && request.response_exposes_secret(&response_value)
+        {
             return Err("Action response exposes private input".into());
         }
-        match parse_response(&output)? {
+        match response {
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
                     .map_err(|_| "Action result is invalid".into());
@@ -172,6 +176,10 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
             }
             ActionResponse::StoredInputRejected(stored_input) => {
                 return Err(format!("Action rejected Stored Input {stored_input}"));
+            }
+            ActionResponse::Failure(mut failure) => {
+                failure.redact(&request.protected_values());
+                return Err(failure.render());
             }
         }
     }
