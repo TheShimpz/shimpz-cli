@@ -2535,7 +2535,7 @@ mod tests {
     fn a_failed_restoration_is_never_reported_as_restored() {
         let home = tempfile::tempdir().unwrap();
         // Every Compose call, including the restoration, exits unsuccessfully.
-        let (context, backup) = installed_space(home.path(), PathBuf::from("/bin/false"));
+        let (context, backup) = installed_space(home.path(), PathBuf::from("/usr/bin/false"));
         let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
         // The failed-release memory cannot be written, so the scheduler diagnostic follows the outcome.
         fs::create_dir(&context.paths.failed_release).unwrap();
@@ -3702,7 +3702,7 @@ mod tests {
     #[test]
     fn commit_evidence_separates_proved_commits_rollbacks_and_unknown_state() {
         let home = tempfile::tempdir().unwrap();
-        let (context, _backup) = installed_space(home.path(), PathBuf::from("/bin/false"));
+        let (context, _backup) = installed_space(home.path(), PathBuf::from("/usr/bin/false"));
         let paths = &context.paths;
         let installed = release(1, 'a');
         let evidence =
