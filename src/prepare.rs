@@ -239,19 +239,26 @@ impl Api {
         timeout: Duration,
     ) -> Result<Preparation, String> {
         let authorization = Zeroizing::new(format!("Bearer {token}"));
-        let mut response = self
-            .agent
-            .get(format!(
-                "{}{PREPARATIONS_PATH}/{catalog_digest}",
-                self.origin
-            ))
-            .config()
-            .timeout_global(Some(timeout))
-            .build()
-            .header("Accept", "application/json")
-            .header("Authorization", authorization.as_str())
-            .call()
-            .map_err(|_| publish::unavailable())?;
+        let url = format!("{}{PREPARATIONS_PATH}/{catalog_digest}", self.origin);
+        let deadline = Instant::now() + timeout;
+        // The status read is idempotent, so a signal-interrupted attempt is repeated within the same timeout.
+        let mut response = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self
+                .agent
+                .get(&url)
+                .config()
+                .timeout_global(Some(remaining))
+                .build()
+                .header("Accept", "application/json")
+                .header("Authorization", authorization.as_str())
+                .call()
+            {
+                Err(ureq::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted && !remaining.is_zero() => {}
+                result => break result.map_err(|_| publish::unavailable())?,
+            }
+        };
         match response.status().as_u16() {
             200 => ready(&mut response),
             202 | 429 => retry_after(&response).map(Preparation::Pending),
