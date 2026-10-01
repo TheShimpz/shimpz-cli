@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -16,7 +16,7 @@ const DEVELOPERS_ORIGIN: &str = "https://developers.shimpz.com";
 const PREPARATIONS_PATH: &str = "/api/v1/language-packs";
 const PACK_DIGEST_HEADER: &str = "X-Shimpz-Pack-Digest";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The longest this command waits for translation before asking the Creator to resume it.
+/// The longest this command, including every request, waits for translation before asking to resume it.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 
@@ -35,12 +35,15 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     } else {
         let credentials = auth::ensure_authenticated(auth::ASSISTANT_PUBLISH_SCOPE)?;
         let api = Api::new(DEVELOPERS_ORIGIN);
-        let pack = prepare(
-            &api,
-            credentials.access_token(),
-            &catalog,
-            &mut thread::sleep,
-        )?;
+        let now = Instant::now;
+        let mut budget = Budget {
+            deadline: now()
+                .checked_add(MAX_WAIT)
+                .ok_or_else(publish::unavailable)?,
+            now: &now,
+            sleep: &mut thread::sleep,
+        };
+        let pack = prepare(&api, credentials.access_token(), &catalog, &mut budget)?;
         language_pack::store(&directory, &catalog, &pack)?;
         (pack, "Language pack prepared.")
     };
@@ -54,36 +57,67 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     ))
 }
 
-/// Resume or submit the preparation of `catalog`, wait a bounded time, and return its verified pack.
-fn prepare(
-    api: &Api,
-    token: &str,
-    catalog: &Catalog,
-    sleep: &mut dyn FnMut(Duration),
-) -> Result<Pack, String> {
+/// One monotonic deadline shared by every request and every wait of a preparation.
+struct Budget<'a> {
+    deadline: Instant,
+    now: &'a dyn Fn() -> Instant,
+    sleep: &'a mut dyn FnMut(Duration),
+}
+
+impl Budget<'_> {
+    fn remaining(&self) -> Result<Duration, String> {
+        self.deadline
+            .checked_duration_since((self.now)())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(wait_timeout)
+    }
+
+    /// Run one request capped by the remaining budget; a transport failure at the deadline is the timeout.
+    fn request<T>(&self, request: impl FnOnce(Duration) -> Result<T, String>) -> Result<T, String> {
+        let timeout = self.remaining()?.min(REQUEST_TIMEOUT);
+        request(timeout).map_err(|error| {
+            if error == publish::unavailable() && self.remaining().is_err() {
+                wait_timeout()
+            } else {
+                error
+            }
+        })
+    }
+
+    /// Wait only when the whole interval ends before the deadline, leaving time for the next request.
+    fn wait(&mut self, duration: Duration) -> Result<(), String> {
+        if duration >= self.remaining()? {
+            return Err(wait_timeout());
+        }
+        (self.sleep)(duration);
+        Ok(())
+    }
+}
+
+/// Resume or submit the preparation of `catalog`, wait within `budget`, and return its verified pack.
+fn prepare(api: &Api, token: &str, catalog: &Catalog, budget: &mut Budget) -> Result<Pack, String> {
+    let fetch =
+        |budget: &Budget| budget.request(|timeout| api.fetch(token, catalog.digest(), timeout));
     // An earlier run may have timed out while its preparation continued; resuming it spends no quota.
-    let mut state = api.fetch(token, catalog.digest())?;
+    let mut state = fetch(budget)?;
     let mut policy = None;
     if matches!(state, Preparation::Missing | Preparation::Failed(_)) {
         output::progress("Submitting the static message catalog for translation...");
-        policy = Some(api.submit(token, catalog)?);
-        state = api.fetch(token, catalog.digest())?;
+        policy = Some(budget.request(|timeout| api.submit(token, catalog, timeout))?);
+        state = fetch(budget)?;
     }
-    let mut waited = Duration::ZERO;
+    let mut announced = false;
     loop {
         match state {
             Preparation::Ready { bytes, digest } => {
                 return verify_ready(bytes, &digest, catalog, policy.as_deref());
             }
             Preparation::Pending(retry_after) => {
-                if waited.is_zero() {
+                if !announced {
                     output::progress("Waiting for every interface language...");
+                    announced = true;
                 }
-                waited = waited
-                    .checked_add(retry_after)
-                    .filter(|waited| *waited <= MAX_WAIT)
-                    .ok_or_else(wait_timeout)?;
-                sleep(retry_after);
+                budget.wait(retry_after)?;
             }
             Preparation::Missing => {
                 return Err(
@@ -93,7 +127,7 @@ fn prepare(
             }
             Preparation::Failed(message) => return Err(message),
         }
-        state = api.fetch(token, catalog.digest())?;
+        state = fetch(budget)?;
     }
 }
 
@@ -155,11 +189,14 @@ impl Api {
     }
 
     /// Submit only the static catalog and return the translation policy Developers bound to it.
-    fn submit(&self, token: &str, catalog: &Catalog) -> Result<String, String> {
+    fn submit(&self, token: &str, catalog: &Catalog, timeout: Duration) -> Result<String, String> {
         let authorization = Zeroizing::new(format!("Bearer {token}"));
         let mut response = self
             .agent
             .post(format!("{}{PREPARATIONS_PATH}", self.origin))
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
             .header("Accept", "application/json")
             .header("Authorization", authorization.as_str())
             .send_json(json!({"messages": catalog.messages()}))
@@ -180,7 +217,12 @@ impl Api {
         Ok(accepted.policy)
     }
 
-    fn fetch(&self, token: &str, catalog_digest: &str) -> Result<Preparation, String> {
+    fn fetch(
+        &self,
+        token: &str,
+        catalog_digest: &str,
+        timeout: Duration,
+    ) -> Result<Preparation, String> {
         let authorization = Zeroizing::new(format!("Bearer {token}"));
         let mut response = self
             .agent
@@ -188,6 +230,9 @@ impl Api {
                 "{}{PREPARATIONS_PATH}/{catalog_digest}",
                 self.origin
             ))
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
             .header("Accept", "application/json")
             .header("Authorization", authorization.as_str())
             .call()
@@ -287,6 +332,7 @@ mod tests {
         status: u16,
         headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
+        delay: Duration,
     }
 
     impl Reply {
@@ -295,7 +341,13 @@ mod tests {
                 status,
                 headers: Vec::new(),
                 body: Vec::new(),
+                delay: Duration::ZERO,
             }
+        }
+
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
         }
 
         fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
@@ -362,8 +414,11 @@ mod tests {
                         write!(head, "{name}: {value}\r\n").unwrap();
                     }
                     head.push_str("\r\n");
-                    stream.write_all(head.as_bytes()).unwrap();
-                    stream.write_all(&reply.body).unwrap();
+                    thread::sleep(reply.delay);
+                    // A client that gave up at its deadline has closed the connection.
+                    let _ = stream
+                        .write_all(head.as_bytes())
+                        .and_then(|()| stream.write_all(&reply.body));
                 }
             });
             Self { origin, requests }
@@ -402,12 +457,32 @@ mod tests {
     }
 
     fn run_prepare(server: &Server, catalog: &Catalog) -> (Result<Pack, String>, Vec<Duration>) {
+        run_within(server, catalog, MAX_WAIT)
+    }
+
+    /// Prepare against a clock where requests take real time and each recorded wait advances time instantly.
+    fn run_within(
+        server: &Server,
+        catalog: &Catalog,
+        limit: Duration,
+    ) -> (Result<Pack, String>, Vec<Duration>) {
+        let waited = std::cell::Cell::new(Duration::ZERO);
+        let now = || Instant::now() + waited.get();
         let mut sleeps = Vec::new();
+        let mut sleep = |duration| {
+            sleeps.push(duration);
+            waited.set(waited.get() + duration);
+        };
+        let mut budget = Budget {
+            deadline: now() + limit,
+            now: &now,
+            sleep: &mut sleep,
+        };
         let result = prepare(
             &Api::new(&server.origin),
             "creator-token",
             catalog,
-            &mut |duration| sleeps.push(duration),
+            &mut budget,
         );
         (result, sleeps)
     }
@@ -475,6 +550,34 @@ mod tests {
         assert_eq!(
             run_prepare(&server, &catalog).0.unwrap_err(),
             invalid_response()
+        );
+    }
+
+    #[test]
+    fn request_time_counts_against_the_wait_bound() {
+        let catalog = catalog();
+        // The slow answer leaves less than its Retry-After interval, so the command stops without sleeping.
+        let server = Server::start(vec![
+            pending("1").delayed(Duration::from_millis(700)),
+            ready(pack_bytes(&catalog)),
+        ]);
+        let (result, sleeps) = run_within(&server, &catalog, Duration::from_secs(1));
+        assert_eq!(result.unwrap_err(), wait_timeout());
+        assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn a_request_never_outlives_the_remaining_budget() {
+        let catalog = catalog();
+        let server = Server::start(vec![pending("10").delayed(Duration::from_secs(5))]);
+        let started = Instant::now();
+        let (result, sleeps) = run_within(&server, &catalog, Duration::from_millis(400));
+        assert_eq!(result.unwrap_err(), wait_timeout());
+        assert!(sleeps.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
         );
     }
 
