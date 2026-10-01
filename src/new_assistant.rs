@@ -22,22 +22,31 @@ def hello(name: str) -> str:
 ";
 
 const HELLO_ACTION: &str = "\
-\"\"\"Greet one person.\"\"\"
+\"\"\"Greet one person after an approval.\"\"\"
 
 from typing import Annotated, TypedDict
 
 from lib.hello import hello
-from shimpz import action
+from shimpz import Context, action, identifier, text
 
-Name = Annotated[str, \"Name to greet.\", {\"minLength\": 1, \"maxLength\": 80}]
+Name = Annotated[
+    str,
+    \"Name to greet.\",
+    {\"minLength\": 1, \"maxLength\": 80, \"pattern\": \"^[A-Za-z0-9][A-Za-z0-9._:-]*$\"},
+]
 
 
 class HelloWorldResult(TypedDict):
     message: str
 
 
-@action()
-async def run(name: Name) -> HelloWorldResult:
+@action(human_requests=[\"approval\"])
+async def run(name: Name, *, ctx: Context) -> HelloWorldResult:
+    # Request copy is English shimpz.text; Shimpz shows it in each person's interface language.
+    ctx.request_approval(
+        title=text(\"Send a greeting\"),
+        description=text(\"Greet {name} with a Hello World message.\", name=identifier(name, max_length=80)),
+    )
     return {\"message\": hello(name)}
 ";
 
@@ -156,6 +165,19 @@ Python and the SDK, generates the machine contract in memory, and runs Actions w
 shimpz assistant check
 shimpz assistant run hello-world --input '{{\"name\":\"World\"}}'
 ```
+
+The Action asks for approval before it greets. Write every request message in English with `shimpz.text`;
+parameters such as `identifier(...)` are inserted unchanged, and Shimpz translates each distinct message once.
+
+## Local Space
+
+```console
+shimpz assistant prepare
+shimpz assistant stage
+```
+
+`prepare` uses your Creator sign-in to translate the current messages and keeps the language pack outside this
+project. `stage` then builds the Local snapshot offline; run `prepare` again after changing any message.
 "
     )
 }
@@ -248,6 +270,11 @@ mod tests {
                 .unwrap()
                 .contains("return {\"message\": hello(name)}")
         );
+        let action = fs::read_to_string(root.join("actions/hello_world.py")).unwrap();
+        assert!(action.contains("@action(human_requests=[\"approval\"])"));
+        assert!(action.contains("title=text(\"Send a greeting\")"));
+        assert!(action.contains("name=identifier(name, max_length=80)"));
+        assert!(readme.contains("shimpz assistant prepare"));
     }
 
     #[test]
