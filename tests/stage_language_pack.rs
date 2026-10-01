@@ -49,6 +49,11 @@ struct Workspace {
 
 impl Workspace {
     fn new(name: &str) -> Self {
+        Self::with_validator(name, None)
+    }
+
+    /// A fake toolchain whose SDK reference validator admits every pack, or refuses with `refusal`.
+    fn with_validator(name: &str, refusal: Option<&str>) -> Self {
         let root =
             std::env::temp_dir().join(format!("shimpz-stage-pack-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -60,9 +65,19 @@ impl Workspace {
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> '{log}'\n\
              if [ \"$1\" = --version ]; then echo 'uv 0.11.32'; exit 0; fi\n\
-             if [ \"$1\" = run ]; then for argument in \"$@\"; do if [ \"$argument\" = catalog ]; then printf '%s\\n' '{catalog}'; exit 0; fi; done; fi\n\
+             if [ \"$1\" = run ]; then for argument in \"$@\"; do\n\
+               if [ \"$argument\" = catalog ]; then printf '%s\\n' '{catalog}'; exit 0; fi\n\
+               if [ \"$argument\" = verify-pack ]; then {verify}; fi\n\
+             done; fi\n\
              exit 1\n",
             log = log.display(),
+            verify = refusal.map_or_else(
+                || format!(
+                    "pack=$(sha256sum | cut -d' ' -f1); printf '{{\"catalog\":\"sha256:{}\",\"pack\":\"sha256:%s\"}}\\n' \"$pack\"; exit 0",
+                    catalog_digest()
+                ),
+                |code| format!("cat >/dev/null; printf 'shimpz: {code}\\n' >&2; exit 1"),
+            ),
         );
         let uv = root.join("uv");
         fs::write(&uv, script).unwrap();
@@ -146,4 +161,22 @@ fn stages_offline_with_the_pack_prepared_for_the_current_catalog() {
     assert!(!stderr.contains("shimpz assistant prepare"), "{stderr}");
     assert!(stderr.contains("Local snapshot dependencies"), "{stderr}");
     assert!(workspace.calls().contains("pip compile"));
+}
+
+#[test]
+fn refuses_a_cached_pack_the_sdk_reference_validator_refuses() {
+    let workspace = Workspace::with_validator("sdk-refused", Some("translation_placeholders"));
+    let directory = workspace.root.join("cache/language-packs");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join(format!("{}.json", catalog_digest())), pack()).unwrap();
+    let output = workspace.stage();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("the Python SDK refuses the language pack (translation_placeholders)"),
+        "{stderr}"
+    );
+    let calls = workspace.calls();
+    assert!(calls.contains("shimpz._bridge verify-pack"), "{calls}");
+    assert!(!calls.contains("pip compile"), "{calls}");
 }

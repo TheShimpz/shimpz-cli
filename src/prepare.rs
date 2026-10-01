@@ -27,7 +27,11 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     output::progress("Extracting the static message catalog...");
     let catalog = Catalog::from_document(&python::catalog(project)?)?;
     let directory = language_pack::cache_directory()?;
-    let (pack, heading) = if let Some(pack) = language_pack::load(&directory, &catalog)? {
+    let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
+    // A cached pack the SDK reference validator refuses is never reported as prepared; preparation replaces it.
+    let cached =
+        language_pack::load(&directory, &catalog)?.filter(|pack| sdk_verify(pack.bytes()).is_ok());
+    let (pack, heading) = if let Some(pack) = cached {
         (
             pack,
             "Language pack already prepared for the current messages.",
@@ -44,7 +48,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
             sleep: &mut thread::sleep,
         };
         let pack = prepare(&api, credentials.access_token(), &catalog, &mut budget)?;
-        language_pack::store(&directory, &catalog, &pack)?;
+        admit(&directory, &catalog, &pack, sdk_verify)?;
         (pack, "Language pack prepared.")
     };
     Ok(format!(
@@ -55,6 +59,17 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         catalog.digest(),
         pack.digest()
     ))
+}
+
+/// Cache a pack only after the SDK's reference validator, the rules Team applies, admits its exact bytes.
+fn admit(
+    directory: &Path,
+    catalog: &Catalog,
+    pack: &Pack,
+    verify: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    verify(pack.bytes())?;
+    language_pack::store(directory, catalog, pack)
 }
 
 /// One monotonic deadline shared by every request and every wait of a preparation.
@@ -656,6 +671,30 @@ mod tests {
         assert_eq!(
             run_prepare(&server, &catalog).0.unwrap_err(),
             invalid_response()
+        );
+    }
+
+    #[test]
+    fn caches_only_a_pack_the_sdk_reference_validator_admits() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = catalog();
+        let pack = language_pack::verify(pack_bytes(&catalog), &catalog).unwrap();
+        let refused = admit(directory.path(), &catalog, &pack, |bytes| {
+            assert_eq!(bytes, pack_bytes(&catalog));
+            Err("the Python SDK refuses the language pack (public_text)".into())
+        });
+        assert!(refused.unwrap_err().contains("public_text"));
+        assert!(
+            language_pack::load(directory.path(), &catalog)
+                .unwrap()
+                .is_none()
+        );
+
+        admit(directory.path(), &catalog, &pack, |_| Ok(())).unwrap();
+        assert!(
+            language_pack::load(directory.path(), &catalog)
+                .unwrap()
+                .is_some()
         );
     }
 

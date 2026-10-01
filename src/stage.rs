@@ -129,6 +129,8 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     output::progress("Extracting the static message catalog...");
     let catalog = Catalog::from_document(&python::catalog(project)?)?;
     let pack = language_pack::prepared(&catalog)?;
+    let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
+    sdk_verify(pack.bytes())?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
     prepare_context(context.path(), &package, &pack)?;
     output::progress("Resolving hashed Python dependencies...");
@@ -148,6 +150,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
             discovery: &discovery,
             catalog: catalog.canonical(),
             pack: pack.bytes(),
+            verify_pack: &sdk_verify,
         },
     )?;
     if let Some(message) = source_package::exclusion_warning(&package) {
@@ -299,6 +302,8 @@ struct ExpectedImage<'a> {
     catalog: &'a [u8],
     /// The exact prepared pack bytes.
     pack: &'a [u8],
+    /// The SDK reference validator, applied again to the pack exported from the final image.
+    verify_pack: &'a dyn Fn(&[u8]) -> Result<(), String>,
 }
 
 struct CurrentImage {
@@ -523,11 +528,10 @@ fn verify_language_files(
                 .ok()
                 .and_then(|contract| contract.get("messages").map(serde_json::to_vec))
                 .and_then(Result::ok);
-            if catalog.as_deref() == Some(expected.catalog) {
-                Ok(())
-            } else {
-                Err(PACK_MISMATCH.to_owned())
+            if catalog.as_deref() != Some(expected.catalog) {
+                return Err(PACK_MISMATCH.to_owned());
             }
+            (expected.verify_pack)(&pack)
         });
     let removed = docker_succeeds(docker, ["rm", container.as_str()]);
     match (verified, removed) {
@@ -993,6 +997,21 @@ mod tests {
     }
 
     fn with_expected<T>(build: &str, operation: impl FnOnce(&ExpectedImage) -> T) -> T {
+        with_verifier(
+            build,
+            &|bytes| {
+                assert_eq!(bytes, PROOF_PACK);
+                Ok(())
+            },
+            operation,
+        )
+    }
+
+    fn with_verifier<T>(
+        build: &str,
+        verify_pack: &dyn Fn(&[u8]) -> Result<(), String>,
+        operation: impl FnOnce(&ExpectedImage) -> T,
+    ) -> T {
         let identity = proof_identity();
         let source = image('d');
         operation(&ExpectedImage {
@@ -1007,6 +1026,7 @@ mod tests {
             },
             catalog: PROOF_CATALOG,
             pack: PROOF_PACK,
+            verify_pack,
         })
     }
 
@@ -1352,6 +1372,29 @@ mod tests {
             verify(b"not json", PROOF_PACK, 0o444)
                 .unwrap_err()
                 .contains("generated catalog")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sdk_reference_validator_checks_the_exported_pack() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let docker = fake_docker(directory.path(), "exit 1");
+        let checked = std::cell::Cell::new(0);
+        let refuse = |bytes: &[u8]| {
+            assert_eq!(bytes, PROOF_PACK);
+            checked.set(checked.get() + 1);
+            Err("the Python SDK refuses the language pack (public_text)".to_owned())
+        };
+        let error = with_verifier(&image('b'), &refuse, |expected| {
+            verify_language_files(&docker, &image('a'), expected)
+        })
+        .unwrap_err();
+        assert!(error.contains("public_text"), "{error}");
+        assert_eq!(checked.get(), 1);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("removed")).unwrap(),
+            format!("{PROOF_CONTAINER}\n")
         );
     }
 

@@ -9,7 +9,7 @@ use std::process::Stdio;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::toolchain;
+use crate::{language_pack, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.5.0";
@@ -41,9 +41,9 @@ impl Assistant {
         bridge(
             Some(&self.requirements),
             ["invoke".as_ref(), self.root.as_os_str(), action_id.as_ref()],
-            Some(PrivateInput {
+            Some(BridgeInput {
                 bytes: input,
-                failure: PRIVATE_BRIDGE_FAILURE,
+                withheld: Some(PRIVATE_BRIDGE_FAILURE),
             }),
         )
     }
@@ -58,9 +58,9 @@ impl Assistant {
         bridge(
             None,
             ["render".as_ref(), self.root.as_os_str()],
-            Some(PrivateInput {
+            Some(BridgeInput {
                 bytes: &input,
-                failure: RENDER_FAILURE,
+                withheld: Some(RENDER_FAILURE),
             }),
         )
     }
@@ -72,24 +72,52 @@ pub(crate) fn catalog(project: &Path) -> Result<String, String> {
     bridge(None, ["catalog".as_ref(), root.as_os_str()], None)
 }
 
+/// Admit exact pack bytes with the pinned SDK's packaged reference validator, the rules Team applies at install,
+/// against the project's statically extracted catalog.
+pub(crate) fn verify_pack(project: &Path, catalog_digest: &str, pack: &[u8]) -> Result<(), String> {
+    let root = project_root(project)?;
+    let acknowledgement = bridge(
+        None,
+        ["verify-pack".as_ref(), root.as_os_str()],
+        Some(BridgeInput {
+            bytes: pack,
+            withheld: None,
+        }),
+    )
+    .map_err(|reason| {
+        format!(
+            "the Python SDK refuses the language pack ({reason}); run 'shimpz assistant prepare' again"
+        )
+    })?;
+    let expected = serde_json::json!({
+        "catalog": catalog_digest,
+        "pack": language_pack::digest(pack),
+    });
+    if serde_json::from_str::<Value>(&acknowledgement).ok() == Some(expected) {
+        Ok(())
+    } else {
+        Err("Python SDK returned an invalid language pack acknowledgement".into())
+    }
+}
+
 fn project_root(project: &Path) -> Result<PathBuf, String> {
     project
         .canonicalize()
         .map_err(|_| "Assistant project is unavailable".into())
 }
 
-/// Bytes sent to the bridge on stdin; the bridge's diagnostics are then discarded for this fixed failure.
-struct PrivateInput<'a> {
+/// Bytes sent to the bridge on stdin. Secret-bearing input withholds every bridge diagnostic behind a fixed failure.
+struct BridgeInput<'a> {
     bytes: &'a [u8],
-    failure: &'static str,
+    withheld: Option<&'static str>,
 }
 
 fn bridge<const SIZE: usize>(
     requirements: Option<&Requirements>,
     arguments: [&OsStr; SIZE],
-    input: Option<PrivateInput>,
+    input: Option<BridgeInput>,
 ) -> Result<String, String> {
-    let secret_bearing = input.is_some();
+    let secret_bearing = input.as_ref().is_some_and(|input| input.withheld.is_some());
     let mut command = toolchain::uv()?;
     command.env_clear();
     for key in [
@@ -152,7 +180,7 @@ fn bridge<const SIZE: usize>(
         } else {
             Stdio::piped()
         });
-    if secret_bearing {
+    if input.is_some() {
         command.stdin(Stdio::piped());
     } else {
         command.stdin(Stdio::null());
@@ -171,7 +199,7 @@ fn bridge<const SIZE: usize>(
     } else {
         Err(bridge_failure(
             &output.stderr,
-            input.map(|input| input.failure),
+            input.and_then(|input| input.withheld),
         ))
     }
 }
