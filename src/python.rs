@@ -136,6 +136,9 @@ fn bridge<const SIZE: usize>(
             "--quiet",
             "--no-progress",
             "python",
+            // Isolated mode keeps the working directory, user site, and PYTHON* variables off the import path,
+            // so an excluded project root such as `shimpz/` can never shadow the pinned SDK bridge.
+            "-I",
             "-m",
             "shimpz._bridge",
         ])
