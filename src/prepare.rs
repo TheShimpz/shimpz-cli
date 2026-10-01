@@ -19,6 +19,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest this command, including every request, waits for translation before asking to resume it.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
+/// A transport failure this close to the deadline is the deadline expiring.
+const DEADLINE_SLACK: Duration = Duration::from_millis(250);
 
 pub(crate) fn run(project: &Path) -> Result<String, String> {
     output::progress("Collecting the exact Assistant source...");
@@ -91,7 +93,10 @@ impl Budget<'_> {
     fn request<T>(&self, request: impl FnOnce(Duration) -> Result<T, String>) -> Result<T, String> {
         let timeout = self.remaining()?.min(REQUEST_TIMEOUT);
         request(timeout).map_err(|error| {
-            if error == publish::unavailable() && self.remaining().is_err() {
+            // A transport timer can fire marginally before this clock reaches the same deadline.
+            let at_deadline =
+                self.deadline.saturating_duration_since((self.now)()) <= DEADLINE_SLACK;
+            if error == publish::unavailable() && at_deadline {
                 wait_timeout()
             } else {
                 error
@@ -580,10 +585,10 @@ mod tests {
         let catalog = catalog();
         // The slow answer leaves less than its Retry-After interval, so the command stops without sleeping.
         let server = Server::start(vec![
-            pending("1").delayed(Duration::from_millis(700)),
+            pending("1").delayed(Duration::from_millis(1200)),
             ready(pack_bytes(&catalog)),
         ]);
-        let (result, sleeps) = run_within(&server, &catalog, Duration::from_secs(1));
+        let (result, sleeps) = run_within(&server, &catalog, Duration::from_secs(2));
         assert_eq!(result.unwrap_err(), wait_timeout());
         assert!(sleeps.is_empty());
     }
