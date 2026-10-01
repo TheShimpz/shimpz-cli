@@ -149,4 +149,18 @@ mod tests {
             assert_eq!(sources, VOLUME_NAMES.into_iter().collect::<BTreeSet<_>>());
         }
     }
+
+    #[test]
+    fn team_receives_exactly_the_pinned_assistant_egress_image() {
+        let document: Value = serde_yaml::from_str(&render(StorageProfile::ManagedDisk)).unwrap();
+        let services = &document["services"];
+        let pinned = services["shimpz-assistant-egress"]["image"]
+            .as_str()
+            .unwrap();
+        assert!(pinned.starts_with("${SHIMPZ_EGRESS_IMAGE:?"));
+        assert_eq!(
+            services["team"]["environment"]["SHIMPZ_ASSISTANT_EGRESS_IMAGE"].as_str(),
+            Some(pinned)
+        );
+    }
 }

@@ -61,6 +61,7 @@ services:
       SHIMPZ_OAUTH_BROKER_PROXY_HOST: shimpz-account-egress
       SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
       SHIMPZ_ASSISTANT_EGRESS_CONTAINER: shimpz-assistant-egress
+      SHIMPZ_ASSISTANT_EGRESS_IMAGE: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /var/lib/shimpz-local/assistant-egress
     volumes:
       - type: bind
