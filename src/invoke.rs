@@ -51,7 +51,17 @@ impl Invocation {
         !secrets.is_empty() && contains_secret(response, &secrets, 0)
     }
 
+    /// Every nonempty private value in the invocation, for failure-diagnostic redaction: unlike the echo check,
+    /// redaction needs no length floor because replacing a short value cannot refuse a valid result.
+    fn injected_values(&self) -> Vec<&str> {
+        self.private_values(|value| !value.is_empty())
+    }
+
     fn protected_values(&self) -> Vec<&str> {
+        self.private_values(protected_value)
+    }
+
+    fn private_values(&self, admit: fn(&str) -> bool) -> Vec<&str> {
         let Some(invocation) = self.0.as_object() else {
             return Vec::new();
         };
@@ -64,7 +74,7 @@ impl Invocation {
                     .into_iter()
                     .flat_map(|values| values.values())
                     .filter_map(Value::as_str)
-                    .filter(|value| protected_value(value)),
+                    .filter(|value| admit(value)),
             );
         }
         secrets.extend(
@@ -77,7 +87,7 @@ impl Invocation {
                     response.get("kind").and_then(Value::as_str) == Some("input:password")
                 })
                 .filter_map(|response| response.get("value").and_then(Value::as_str))
-                .filter(|value| protected_value(value)),
+                .filter(|value| admit(value)),
         );
         secrets
     }
@@ -178,7 +188,7 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
                 return Err(format!("Action rejected Stored Input {stored_input}"));
             }
             ActionResponse::Failure(mut failure) => {
-                failure.redact(&request.protected_values());
+                failure.redact(&request.injected_values());
                 return Err(failure.render());
             }
         }

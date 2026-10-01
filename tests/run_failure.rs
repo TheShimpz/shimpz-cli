@@ -165,3 +165,19 @@ fn refuses_an_oversized_response_frame() {
 
     assert!(shown.contains("larger than 512 KiB"), "{shown}");
 }
+
+#[test]
+fn refuses_a_successful_frame_with_stderr_output_without_showing_it() {
+    let workspace = Workspace::new(
+        "stderr",
+        &format!("echo 'warning {TOKEN}' >&2; echo '{FAILURE}'; exit 0;;"),
+    );
+
+    let output = workspace.run("");
+    let shown = shown(&output);
+
+    assert!(!output.status.success());
+    assert!(shown.contains("bytes to stderr"), "{shown}");
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(!shown.contains("warning"), "{shown}");
+}

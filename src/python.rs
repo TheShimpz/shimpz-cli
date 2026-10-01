@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStderr, Stdio};
 
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -119,7 +119,6 @@ fn bridge<const SIZE: usize>(
     arguments: [&OsStr; SIZE],
     input: Option<BridgeInput>,
 ) -> Result<String, String> {
-    let secret_bearing = input.as_ref().is_some_and(|input| input.withheld.is_some());
     let mut command = toolchain::uv()?;
     command.env_clear();
     for key in [
@@ -175,13 +174,8 @@ fn bridge<const SIZE: usize>(
         .args(arguments)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdout(Stdio::piped())
-        // The SDK currently redirects Action-authored stdout to stderr. Never capture
-        // that mixed stream while the bridge receives credentials or hidden input.
-        .stderr(if secret_bearing {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        });
+        // A secret-bearing bridge's stderr is drained and counted, never kept: any byte is a transport fault.
+        .stderr(Stdio::piped());
     if input.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -198,13 +192,11 @@ fn bridge<const SIZE: usize>(
 
 /// Read one bounded response frame and the child's exit status; stderr is drained only when it was captured.
 fn finish(mut child: Child, withheld: Option<&'static str>) -> Result<String, String> {
-    let stderr = child.stderr.take().map(|stream| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stream.take(MAX_RESPONSE_BYTES).read_to_end(&mut bytes);
-            bytes
-        })
-    });
+    let private = withheld.is_some();
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stream| std::thread::spawn(move || drain(stream, private)));
     let mut stdout = Vec::new();
     let read = child
         .stdout
@@ -216,17 +208,34 @@ fn finish(mut child: Child, withheld: Option<&'static str>) -> Result<String, St
         return Err("Python SDK response frame is larger than 512 KiB".into());
     }
     let status = child.wait().map_err(|_| "Python SDK execution failed")?;
-    let stderr = stderr
+    let (stderr, stderr_bytes) = stderr
         .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+        .unwrap_or((Vec::new(), 1));
     if !matches!(read, Some(Ok(_))) {
         return Err("Python SDK execution failed".into());
     }
-    if status.success() {
-        decode(stdout)
-    } else {
-        Err(bridge_failure(&stderr, status.code(), withheld))
+    match (status.success(), private && stderr_bytes > 0) {
+        (true, false) => decode(stdout),
+        (true, true) => Err(format!(
+            "the Action process wrote {stderr_bytes} bytes to stderr, which Team refuses as a transport fault; \
+             the content is withheld"
+        )),
+        (false, _) => Err(bridge_failure(&stderr, status.code(), withheld)),
     }
+}
+
+/// Drain one stderr stream to its end. Private output is only counted; other output keeps a bounded prefix for
+/// diagnostics. A read failure counts as output, so it can never pass as an empty stream.
+fn drain(mut stream: ChildStderr, private: bool) -> (Vec<u8>, u64) {
+    let mut kept = Vec::new();
+    if !private {
+        let _ = (&mut stream)
+            .take(MAX_RESPONSE_BYTES)
+            .read_to_end(&mut kept);
+    }
+    let rest = std::io::copy(&mut stream, &mut std::io::sink()).unwrap_or(1);
+    let count = kept.len() as u64 + rest;
+    (kept, count)
 }
 
 /// A secret-bearing bridge reports only its exit status: raw child output may hold a private value.

@@ -69,17 +69,44 @@ impl ActionFailure {
         })
     }
 
-    /// Replace every private value this invocation injected, as Team does independently of the SDK.
+    /// Replace every nonempty private value this invocation injected in every member, as Team does independently of
+    /// the SDK, then bound each member again. A provider host that held one is withheld.
     pub(crate) fn redact(&mut self, secrets: &[&str]) {
-        for text in [Some(&mut self.message), self.response_excerpt.as_mut()]
-            .into_iter()
-            .flatten()
+        let secrets: Vec<&str> = secrets
+            .iter()
+            .copied()
+            .filter(|secret| !secret.is_empty())
+            .collect();
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(|host| secrets.iter().any(|secret| host.contains(secret)))
         {
-            for secret in secrets {
+            self.provider = None;
+            self.redacted = true;
+        }
+        let mut replaced = false;
+        for text in [
+            Some(&mut self.error_type),
+            Some(&mut self.message),
+            self.response_excerpt.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for secret in &secrets {
                 if text.contains(secret) {
                     *text = text.replace(secret, REDACTED);
-                    self.redacted = true;
+                    replaced = true;
                 }
+            }
+        }
+        if replaced {
+            self.redacted = true;
+            self.truncated |= bound(&mut self.error_type, MAX_ERROR_TYPE);
+            self.truncated |= bound(&mut self.message, MAX_TEXT_BYTES);
+            if let Some(excerpt) = self.response_excerpt.as_mut() {
+                self.truncated |= bound(excerpt, MAX_TEXT_BYTES);
             }
         }
     }
@@ -108,6 +135,19 @@ impl ActionFailure {
         }
         lines.join("\n")
     }
+}
+
+/// Cut `text` to at most `limit` UTF-8 bytes on a character boundary; returns whether anything was cut.
+fn bound(text: &mut String, limit: usize) -> bool {
+    if text.len() <= limit {
+        return false;
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    true
 }
 
 fn text(object: &Map<String, Value>, field: &str) -> Option<String> {
@@ -227,6 +267,44 @@ mod tests {
         assert!(failure.redacted);
         assert!(failure.render().contains("token [REDACTED] rejected"));
         assert!(!failure.render().contains("private-token-1"));
+    }
+
+    #[test]
+    fn redacts_every_member_including_short_values_and_rebounds_them() {
+        let value = json!({
+            "error_type": "LeakTypeError",
+            "message": "\u{e9}".repeat(1_023) + "k1",
+            "provider": "k1.example.com",
+            "http_status": null,
+            "response_excerpt": "token k1",
+            "redacted": false,
+            "truncated": false
+        });
+        let mut failure = ActionFailure::parse(Some(&value)).expect("valid frame");
+
+        failure.redact(&["k1", "Leak", ""]);
+
+        assert_eq!(failure.error_type, "[REDACTED]TypeError");
+        assert_eq!(failure.provider, None);
+        assert_eq!(
+            failure.response_excerpt.as_deref(),
+            Some("token [REDACTED]")
+        );
+        assert!(failure.message.len() <= MAX_TEXT_BYTES);
+        assert!(failure.message.starts_with(&"\u{e9}".repeat(1_023)));
+        assert!(!failure.render().contains("k1"));
+        assert!(failure.redacted && failure.truncated);
+    }
+
+    #[test]
+    fn a_redacted_type_name_is_bounded_again() {
+        let value = with("error_type", json!("ab".repeat(64)));
+        let mut failure = ActionFailure::parse(Some(&value)).expect("valid frame");
+
+        failure.redact(&["b"]);
+
+        assert_eq!(failure.error_type.len(), MAX_ERROR_TYPE);
+        assert!(failure.truncated);
     }
 
     #[test]

@@ -56,8 +56,9 @@ any Shimpz service and refuses to start until the pack for the current messages 
 `shimpz assistant run` mints one logical `operation_id` per run and repeats it on every human-request replay, as Team
 does for one logical operation. A handled Action failure arrives as one sanitized failure frame: the CLI shows its real
 error type, message, provider host, HTTP status, and response excerpt after removing every Integration token and
-password it supplied once more, and refuses any frame outside the closed shape. A nonzero exit or a response frame over
-512 KiB is a transport fault reported only by its exit status or size, never by raw process output.
+password it supplied once more from every member, and refuses any frame outside the closed shape. A nonzero exit, any
+stderr output, or a response frame over 512 KiB is a transport fault reported only by its exit status, byte count, or
+size, never by raw process output.
 
 `shimpz assistant install <source-digest> [--team <team-id>]` installs one exact published Assistant. When more
 than one Team is available, `--team` is required.
