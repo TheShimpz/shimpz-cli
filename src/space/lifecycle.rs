@@ -833,15 +833,26 @@ impl Context {
     }
 
     fn recover_corrupt(&self, inventory: &Inventory, reason: &str) -> Result<(), String> {
+        self.recover_corrupt_after(inventory, reason, |names| {
+            recovery_prompt(reason, inventory, names)
+        })
+    }
+
+    /// Recover only after an affirmative answer: Team and Admin start for a bounded reset only once confirmed.
+    fn recover_corrupt_after(
+        &self,
+        inventory: &Inventory,
+        reason: &str,
+        confirm: impl FnOnce(&[String]) -> Result<bool, String>,
+    ) -> Result<(), String> {
         if self.scheduled {
             return Err(reason.into());
         }
-        let admin = self.prepare_admin_for_recovery()?;
         let names = inventory.container_names(&self.engine)?;
-        let confirmed = recovery_prompt(reason, inventory, &names)?;
-        if !confirmed {
+        if !confirm(&names)? {
             return Err("the corrupt Local Space was preserved; nothing changed".into());
         }
+        let admin = self.prepare_admin_for_recovery()?;
         let admin_port = match admin {
             AdminAttestation::Running { port } if admin_available(port) => Some(port),
             _ => None,
@@ -3928,6 +3939,92 @@ mod tests {
         assert_eq!(document["release"], release(2, 'b').reference);
         assert_eq!(document["outcome"], "rollback-needed");
         assert!(!context.paths.status.exists());
+    }
+
+    /// A Docker double that records every invocation and reports stopped owned Team and Admin containers.
+    #[cfg(unix)]
+    fn stopped_space_docker(root: &Path) -> PathBuf {
+        let command = root.join("docker");
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n\
+                 case \"$*\" in\n  \
+                 *'{{{{.Name}}}}'*) printf '{team}|/shimpz-team\\n{admin}|/shimpz-admin\\n' ;;\n  \
+                 *'shimpz-admin') printf 'false|shimpz-space|admin|{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}}]}}\\n' ;;\n  \
+                 *'shimpz-team') printf 'false\\n' ;;\n\
+                 esac\n",
+                calls = root.join("calls").display(),
+                team = format_args!("{:0<64}", "c001"),
+                admin = format_args!("{:0<64}", "c002"),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::stage::await_executable(&command);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_recovery_starts_nothing_without_an_affirmative_answer() {
+        let declined = || Ok(false);
+        let noninteractive =
+            || Err("recovery requires an interactive terminal; nothing changed".to_owned());
+        for (answer, expected) in [
+            (
+                &declined as &dyn Fn() -> Result<bool, String>,
+                "the corrupt Local Space was preserved; nothing changed",
+            ),
+            (
+                &noninteractive,
+                "recovery requires an interactive terminal; nothing changed",
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let docker = stopped_space_docker(temporary.path());
+            let context = Context {
+                paths: Paths::under(&temporary.path().join("home")).unwrap(),
+                profile: HostProfile::MacOs,
+                engine: Engine::with_docker(docker),
+                scheduled: false,
+            };
+            let inventory = Inventory {
+                project_containers: vec![format!("{:0<64}", "c001"), format!("{:0<64}", "c002")],
+                ..Inventory::default()
+            };
+            let mut shown = Vec::new();
+            let outcome = context.recover_corrupt_after(&inventory, "corrupt marker", |names| {
+                shown = names.to_vec();
+                answer()
+            });
+
+            assert_eq!(outcome, Err(expected.to_owned()));
+            assert_eq!(shown, ["shimpz-admin", "shimpz-team"]);
+            let calls = fs::read_to_string(temporary.path().join("calls")).unwrap();
+            assert!(
+                calls.lines().all(|call| !call.starts_with("start")),
+                "{calls}"
+            );
+        }
+        // The double does start a stopped Space once recovery is affirmed, so the refusal above is meaningful.
+        let temporary = tempfile::tempdir().unwrap();
+        let context = Context {
+            paths: Paths::under(&temporary.path().join("home")).unwrap(),
+            profile: HostProfile::MacOs,
+            engine: Engine::with_docker(stopped_space_docker(temporary.path())),
+            scheduled: false,
+        };
+        assert!(context.prepare_admin_for_recovery().is_ok());
+        let calls = fs::read_to_string(temporary.path().join("calls")).unwrap();
+        assert!(
+            calls.lines().any(|call| call == "start shimpz-team"),
+            "{calls}"
+        );
+        assert!(
+            calls.lines().any(|call| call == "start shimpz-admin"),
+            "{calls}"
+        );
     }
 
     /// A fake `docker` that logs each call and answers every identifier after `--format` from `map`, whose lines
