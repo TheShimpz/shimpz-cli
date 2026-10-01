@@ -135,7 +135,9 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
     let records = resources::inspect_containers(
         engine,
         &inventory.project_containers,
-        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.State.Status}}|{{with .State.Health}}{{.Status}}{{end}}|{{.State.ExitCode}}",
+        // A batched inspect formats raw JSON maps, where a container without a healthcheck has no Health key and
+        // `.State.Health` fails the whole call; `index` yields an empty value instead.
+        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.State.Status}}|{{if index .State \"Health\"}}{{.State.Health.Status}}{{end}}|{{.State.ExitCode}}",
         "Local runtime state",
     )?;
     let mut present = BTreeMap::new();
