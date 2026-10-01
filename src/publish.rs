@@ -509,6 +509,12 @@ impl Publication {
                 Some("signing_failed") => "publication signing failed",
                 Some("non_reproducible_build") => "publication build was not reproducible",
                 Some("assistant_tests_failed") => "publication Assistant tests failed",
+                Some("artifact_not_public") => {
+                    "publication artifacts are not publicly readable, so Teams cannot verify them; publish again"
+                }
+                Some("translation_failed") => {
+                    "publication messages could not be translated; review the shimpz.text copy, then publish again"
+                }
                 _ => "publication build failed",
             };
             let run = self
@@ -624,6 +630,8 @@ fn valid_build_error(value: &str) -> bool {
             | "signing_failed"
             | "non_reproducible_build"
             | "assistant_tests_failed"
+            | "artifact_not_public"
+            | "translation_failed"
     )
 }
 
@@ -792,6 +800,30 @@ mod tests {
         rejected.security_state = "security_rejected".into();
         rejected.blocked = true;
         assert!(rejected.terminal_result().unwrap().is_err());
+    }
+
+    #[test]
+    fn describes_every_closed_build_failure() {
+        for (code, expected) in [
+            ("artifact_not_public", "not publicly readable"),
+            ("translation_failed", "could not be translated"),
+            ("assistant_tests_failed", "Assistant tests failed"),
+        ] {
+            let mut failed = publication("build_failed");
+            failed.safe_error_code = Some(code.into());
+            if code == "assistant_tests_failed" {
+                failed.safe_error_details = Some(vec![AssistantTestFailure {
+                    test: "tests/test_zones.py::test_lists_zones".into(),
+                    reason: "assertion failed".into(),
+                }]);
+            }
+            assert!(failed.validate(DIGEST, "public").is_ok(), "{code}");
+            let error = failed.terminal_result().unwrap().unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        let mut unknown = publication("build_failed");
+        unknown.safe_error_code = Some("catalog_rejected".into());
+        assert!(unknown.validate(DIGEST, "public").is_err());
     }
 
     #[test]
