@@ -1,6 +1,7 @@
 //! Local Action invocation and Integration injection.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -244,8 +245,33 @@ fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Inv
     Ok(Invocation(serde_json::json!({
         "input": value,
         "integrations": integrations,
-        "stored_inputs": {}
+        "stored_inputs": {},
+        "operation_id": operation_id()?
     })))
+}
+
+/// Mint one logical operation id: the canonical lowercase text of a random version 4 UUID. Every human-request
+/// replay of this run repeats it, exactly as Team repeats the id of one logical operation.
+fn operation_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| "Action operation id cannot be generated".to_owned())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -347,14 +373,40 @@ mod tests {
             &integrations,
         )
         .expect("valid invocation");
+        let operation_id = invocation.0["operation_id"].clone();
         assert_eq!(
             invocation.0,
             serde_json::json!({
                 "input": {"zone": "example.com"},
                 "integrations": {},
-                "stored_inputs": {}
+                "stored_inputs": {},
+                "operation_id": operation_id
             })
         );
+    }
+
+    #[test]
+    fn mints_a_canonical_random_version_4_operation_id() {
+        let first = operation_id().expect("operation id");
+        let second = operation_id().expect("operation id");
+
+        assert_ne!(first, second);
+        for id in [first, second] {
+            let bytes = id.as_bytes();
+            assert_eq!(bytes.len(), 36, "{id}");
+            for (index, byte) in bytes.iter().enumerate() {
+                if [8, 13, 18, 23].contains(&index) {
+                    assert_eq!(*byte, b'-', "{id}");
+                } else {
+                    assert!(
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+                        "{id}"
+                    );
+                }
+            }
+            assert_eq!(bytes[14], b'4', "{id}");
+            assert!(b"89ab".contains(&bytes[19]), "{id}");
+        }
     }
 
     #[test]
