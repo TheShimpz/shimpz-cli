@@ -25,6 +25,8 @@ shimpz assistant develop codex
 shimpz assistant develop claude hello-assistant --yolo
 shimpz assistant check
 shimpz assistant run create-dns --input '{"zone":"example.com"}'
+shimpz assistant prepare
+shimpz assistant stage
 shimpz assistant publish --visibility public
 shimpz install
 shimpz status
@@ -44,6 +46,12 @@ OS user configuration directory with owner-only permissions.
 `shimpz assistant publish` validates the Assistant, requests `assistant:publish` in its
 browser authorization when needed, and continues the publication in the same
 command. A separate `shimpz auth` step is not required.
+
+Action request copy is English `shimpz.text` catalog copy. `shimpz assistant run` shows its English rendering and
+answers with the canonical request fingerprint and option values. `shimpz assistant prepare` submits only the static
+message catalog to Developers with the Creator credential, verifies the returned language pack, and keeps it in the
+CLI cache outside the project. `shimpz assistant stage` then builds an unpublished Local snapshot without contacting
+any Shimpz service and refuses to start until the pack for the current messages has been prepared.
 
 `shimpz assistant install <source-digest> [--team <team-id>]` installs one exact published Assistant. When more
 than one Team is available, `--team` is required.
