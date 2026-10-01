@@ -15,6 +15,7 @@ mod output;
 mod prepare;
 mod publish;
 mod python;
+mod snapshot_files;
 mod snapshot_lock;
 mod source_package;
 mod space;

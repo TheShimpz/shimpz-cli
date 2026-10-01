@@ -30,6 +30,7 @@ const FIELD_BOUNDS: [usize; 4] = [80, 120, 160, 500];
 /// One extracted English catalog and its canonical digest.
 pub(crate) struct Catalog {
     messages: Value,
+    canonical: Vec<u8>,
     entries: Vec<Message>,
     digest: String,
 }
@@ -86,11 +87,17 @@ impl Catalog {
             messages,
             entries,
             digest: digest(&canonical),
+            canonical,
         })
     }
 
     pub(crate) fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// The canonical catalog bytes the digest covers.
+    pub(crate) fn canonical(&self) -> &[u8] {
+        &self.canonical
     }
 
     pub(crate) fn messages(&self) -> &Value {
