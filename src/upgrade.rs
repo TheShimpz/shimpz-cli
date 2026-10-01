@@ -189,7 +189,7 @@ fn install(agent: &Agent, release: &Release) -> Result<String, String> {
     make_executable(&staged)?;
 
     output::progress("Installing the verified Standalone CLI...");
-    self_update::self_replace::self_replace(&staged).map_err(|_| {
+    self_replace::self_replace(&staged).map_err(|_| {
         format!(
             "the Standalone CLI replacement did not complete; download {archive_url}, verify it with {checksum_url}, and replace the command manually"
         )
