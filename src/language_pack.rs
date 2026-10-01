@@ -158,6 +158,10 @@ impl Param {
 }
 
 impl Pack {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     pub(crate) fn digest(&self) -> &str {
         &self.digest
     }
@@ -256,6 +260,13 @@ pub(crate) fn store(directory: &Path, catalog: &Catalog, pack: &Pack) -> Result<
     file.write_all(&pack.bytes)
         .and_then(|()| file.commit())
         .map_err(|_| "the language pack cannot be stored".into())
+}
+
+/// The pack staging needs; staging never contacts Developers, so a missing pack names the command that makes it.
+pub(crate) fn prepared(catalog: &Catalog) -> Result<Pack, String> {
+    load(&cache_directory()?, catalog)?.ok_or_else(|| {
+        "no language pack is prepared for this Assistant's current messages; run 'shimpz assistant prepare', then stage again".into()
+    })
 }
 
 fn cache_file(directory: &Path, catalog: &Catalog) -> PathBuf {

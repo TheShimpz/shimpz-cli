@@ -11,10 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use toml::Value;
 
+use crate::language_pack::{self, Catalog, Pack};
 use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
-use crate::{output, snapshot_lock, source_package, toolchain};
+use crate::{output, python, snapshot_lock, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
@@ -61,6 +62,55 @@ if __name__ == "__main__":
     raise SystemExit(main())
 "#;
 
+const PACK_MISMATCH: &str = "the generated catalog does not match the prepared language pack";
+
+const PACK_CHECK: &str = r#"# Refuse a Local snapshot whose final files do not carry the prepared pack for their generated catalog.
+
+import hashlib
+import json
+import os
+import sys
+
+LOCALES = ("ar", "de", "es", "fr", "ja", "pt", "zh")
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def digest(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def consistent() -> bool:
+    with open("/opt/shimpz/shimpz.contract.json", "rb") as source:
+        messages = json.load(source)["messages"]
+    with open("/opt/shimpz/shimpz.pack.json", "rb") as source:
+        raw = source.read()
+    pack = json.loads(raw)
+    catalog = digest(canonical(messages))
+    identifiers = {message["id"] for message in messages}
+    return (
+        catalog == os.environ["SHIMPZ_CATALOG_DIGEST"]
+        and digest(raw) == os.environ["SHIMPZ_PACK_DIGEST"]
+        and canonical(pack) == raw
+        and pack["format"] == "assistant-language-pack-v1"
+        and pack["catalog"] == catalog
+        and sorted(pack["locales"]) == list(LOCALES)
+        and all(set(pack["locales"][locale]) == identifiers for locale in LOCALES)
+    )
+
+
+if __name__ == "__main__":
+    try:
+        valid = consistent()
+    except (OSError, KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        sys.stderr.write("shimpz: the generated catalog does not match the prepared language pack\n")
+    raise SystemExit(0 if valid else 1)
+"#;
+
 const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS build
 
@@ -97,6 +147,12 @@ COPY --from=build /usr/local/lib/libpython3.14.so.1.0 /usr/local/lib/libpython3.
 COPY --from=build /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 COPY --from=build /opt/shimpz/ /opt/shimpz/
 COPY --from=build /usr/local/bin/shimpz-action /usr/local/bin/shimpz-action
+# The prepared pack enters only here, after the stage that ran Creator code, and the check reads the final files.
+COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json
+ARG SHIMPZ_CATALOG_DIGEST
+ARG SHIMPZ_PACK_DIGEST
+RUN --network=none --mount=type=bind,source=shimpz_pack_check.py,target=/tmp/shimpz_pack_check.py \
+    ["/usr/local/bin/python3.14","-I","-S","-B","/tmp/shimpz_pack_check.py"]
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -115,21 +171,29 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         integrations: manifest::integration_ids(&package.manifest)?,
     };
     validate_dependency_sources(&package.pyproject)?;
+    output::progress("Extracting the static message catalog...");
+    let catalog = Catalog::from_document(&python::catalog(project)?)?;
+    let pack = language_pack::prepared(&catalog)?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
-    prepare_context(context.path(), &package)?;
+    prepare_context(context.path(), &package, &pack)?;
     output::progress("Resolving hashed Python dependencies...");
     let requirements = compile_requirements(context.path())?;
     let docker = connect_docker()?;
     let platform = daemon_platform(&docker)?;
-    let build_digest = build_digest(&package.bytes, &requirements, platform);
+    let build_digest = build_digest(&package.bytes, &requirements, platform, pack.bytes());
     let image_id = stage_image(
         &docker,
         context.path(),
-        &identity,
-        &package.digest,
-        &build_digest,
-        platform,
-        &discovery,
+        &ExpectedImage {
+            reference: &canonical_reference(&identity.id),
+            identity: &identity,
+            source_digest: &package.digest,
+            build_digest: &build_digest,
+            platform,
+            discovery: &discovery,
+            catalog_digest: catalog.digest(),
+            pack_digest: pack.digest(),
+        },
     )?;
     if let Some(message) = source_package::exclusion_warning(&package) {
         output::warning(&message);
@@ -140,9 +204,15 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     ))
 }
 
-fn prepare_context(path: &Path, package: &source_package::SourcePackage) -> Result<(), String> {
+fn prepare_context(
+    path: &Path,
+    package: &source_package::SourcePackage,
+    pack: &Pack,
+) -> Result<(), String> {
     write(path.join("Dockerfile"), DOCKERFILE.as_bytes())?;
     write(path.join("shimpz_action.py"), ACTION_RUNNER.as_bytes())?;
+    write(path.join("shimpz_pack_check.py"), PACK_CHECK.as_bytes())?;
+    write(path.join("shimpz.pack.json"), pack.bytes())?;
     write(path.join("source.package"), &package.bytes)?;
     write(path.join("pyproject.toml"), &package.pyproject)
 }
@@ -224,32 +294,18 @@ fn local_digests_valid(digests: &str, assistant_id: &str, image_id: &str) -> boo
         || digests == format!("[\"{LOCAL_SNAPSHOT_REPOSITORY}/{assistant_id}@{image_id}\"]")
 }
 
-fn stage_image(
-    docker: &Path,
-    context: &Path,
-    identity: &PublicationIdentity,
-    source_digest: &str,
-    build_digest: &str,
-    platform: &str,
-    discovery: &DiscoveryProjection,
-) -> Result<String, String> {
-    let reference = canonical_reference(&identity.id);
-    let current = current_image(docker, &reference, &identity.id)?;
-    let expected = ExpectedImage {
-        reference: &reference,
-        identity,
-        source_digest,
-        build_digest,
-        platform,
-        discovery,
-    };
+fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Result<String, String> {
+    let reference = expected.reference;
+    let identity = expected.identity;
+    let current = current_image(docker, reference, &identity.id)?;
+    // The build digest covers the prepared pack, so a changed pack never reuses an image that carries another one.
     if let Some(current) = current
         .as_ref()
-        .filter(|current| current.build_digest == build_digest)
+        .filter(|current| current.build_digest == expected.build_digest)
     {
         output::progress("Reusing the current Local Assistant snapshot...");
-        validate_image(docker, &current.image_id, &expected)?;
-        require_current(docker, &reference, &current.image_id)?;
+        validate_image(docker, &current.image_id, expected)?;
+        require_current(docker, reference, &current.image_id)?;
         return Ok(current.image_id.clone());
     }
     output::progress("Building the Local Assistant snapshot...");
@@ -258,16 +314,16 @@ fn stage_image(
     // A failure anywhere after the build may already have moved the tag, so every one reconciles it; the nonce
     // proves which tagged image this attempt produced.
     let nonce = stage_nonce();
-    build_image(docker, context, &expected, &nonce)
+    build_image(docker, context, expected, &nonce)
         .and_then(|image_id| {
-            validate_image(docker, &image_id, &expected)?;
-            require_current(docker, &reference, &image_id)?;
+            validate_image(docker, &image_id, expected)?;
+            require_current(docker, reference, &image_id)?;
             Ok(image_id)
         })
         .map_err(|error| {
             reconcile_current(
                 docker,
-                &reference,
+                reference,
                 &identity.id,
                 current.as_ref(),
                 &nonce,
@@ -283,6 +339,8 @@ struct ExpectedImage<'a> {
     build_digest: &'a str,
     platform: &'a str,
     discovery: &'a DiscoveryProjection,
+    catalog_digest: &'a str,
+    pack_digest: &'a str,
 }
 
 struct CurrentImage {
@@ -446,11 +504,26 @@ fn build_image(
         arguments.push(OsString::from("--label"));
         arguments.push(OsString::from(format!("{key}={value}")));
     }
+    for (key, value) in [
+        ("SHIMPZ_CATALOG_DIGEST", expected.catalog_digest),
+        ("SHIMPZ_PACK_DIGEST", expected.pack_digest),
+    ] {
+        arguments.push(OsString::from("--build-arg"));
+        arguments.push(OsString::from(format!("{key}={value}")));
+    }
     arguments.push(OsString::from("--file"));
     arguments.push(context.join("Dockerfile").into_os_string());
     arguments.push(context.as_os_str().to_owned());
     let result = docker_output(docker, arguments)?;
     if !result.status.success() {
+        // A quiet build reports only the failed step, so the step that runs the pack check identifies the mismatch.
+        if String::from_utf8_lossy(&result.stderr)
+            .contains("/tmp/shimpz_pack_check.py\" did not complete")
+        {
+            return Err(format!(
+                "{PACK_MISMATCH}; pin the CLI's Python SDK in pyproject.toml, run 'shimpz assistant prepare', then stage again"
+            ));
+        }
         return Err(docker_failure(&result, "Local snapshot image build failed"));
     }
     let image_id = fs::read_to_string(image_file.path())
@@ -568,15 +641,17 @@ fn declared_creators(identity: &PublicationIdentity) -> String {
         .join(",")
 }
 
-fn build_digest(source: &[u8], requirements: &[u8], platform: &str) -> String {
+fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8]) -> String {
     let mut digest = Sha256::new();
     for value in [
         b"shimpz-local-stage-v3".as_slice(),
         platform.as_bytes(),
         DOCKERFILE.as_bytes(),
         ACTION_RUNNER.as_bytes(),
+        PACK_CHECK.as_bytes(),
         source,
         requirements,
+        pack,
     ] {
         digest.update(value.len().to_be_bytes());
         digest.update(value);
@@ -770,13 +845,23 @@ mod tests {
 
     #[test]
     fn exact_build_inputs_have_one_stable_cache_identity() {
-        let one = build_digest(b"source", b"requirements", "linux/amd64");
-        assert_eq!(one, build_digest(b"source", b"requirements", "linux/amd64"));
+        let one = build_digest(b"source", b"requirements", "linux/amd64", b"pack");
+        assert_eq!(
+            one,
+            build_digest(b"source", b"requirements", "linux/amd64", b"pack")
+        );
         assert_ne!(
             one,
-            build_digest(b"changed", b"requirements", "linux/amd64")
+            build_digest(b"changed", b"requirements", "linux/amd64", b"pack")
         );
-        assert_ne!(one, build_digest(b"source", b"requirements", "linux/arm64"));
+        assert_ne!(
+            one,
+            build_digest(b"source", b"requirements", "linux/arm64", b"pack")
+        );
+        assert_ne!(
+            one,
+            build_digest(b"source", b"requirements", "linux/amd64", b"changed pack")
+        );
     }
 
     #[test]
@@ -845,16 +930,24 @@ mod tests {
 
     fn stage_proof(docker: &Path, context: &Path, build: &str) -> Result<String, String> {
         let identity = proof_identity();
+        let source = image('d');
+        let catalog = image('7');
+        let pack = image('8');
         stage_image(
             docker,
             context,
-            &identity,
-            &image('d'),
-            build,
-            "linux/amd64",
-            &DiscoveryProjection {
-                actions: vec!["ping".into()],
-                integrations: Vec::new(),
+            &ExpectedImage {
+                reference: &canonical_reference(&identity.id),
+                identity: &identity,
+                source_digest: &source,
+                build_digest: build,
+                platform: "linux/amd64",
+                discovery: &DiscoveryProjection {
+                    actions: vec!["ping".into()],
+                    integrations: Vec::new(),
+                },
+                catalog_digest: &catalog,
+                pack_digest: &pack,
             },
         )
     }
@@ -966,6 +1059,11 @@ mod tests {
             .find(|call| call.starts_with("buildx build"))
             .expect("build");
         assert!(build_call.contains("--tag shimpz-local/proof-assistant:staged"));
+        assert!(build_call.contains(&format!(
+            "--build-arg SHIMPZ_CATALOG_DIGEST={} --build-arg SHIMPZ_PACK_DIGEST={}",
+            image('7'),
+            image('8')
+        )));
         assert!(build_call.contains("--label org.shimpz.local.stage.nonce="));
         assert!(!calls.lines().any(|call| call.starts_with("tag ")));
     }
@@ -1138,5 +1236,37 @@ mod tests {
         assert!(!implementation.contains("developers.shimpz.com"));
         assert!(!implementation.contains("lifecycle::"));
         assert!(!implementation.contains("credentials"));
+        assert!(!implementation.contains("ureq"));
+        assert!(!implementation.contains("prepare::"));
+    }
+
+    #[test]
+    fn the_prepared_pack_enters_the_final_image_after_creator_code_and_is_checked_there() {
+        let (build, last) = DOCKERFILE
+            .split_once("\nFROM gcr.io/distroless")
+            .expect("final stage");
+        assert!(build.contains("shimpz._bridge contract"));
+        assert!(!build.contains("shimpz.pack.json"));
+        let copy = last
+            .find("COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json")
+            .expect("pack copy");
+        let check = last.find("shimpz_pack_check.py").expect("pack check");
+        assert!(last.rfind("COPY --from=build").unwrap() < copy && copy < check);
+        assert!(last.contains(
+            "RUN --network=none --mount=type=bind,source=shimpz_pack_check.py,target=/tmp/shimpz_pack_check.py"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_check_failure_names_the_preparation_command() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let docker = fake_docker(
+            directory.path(),
+            "if [ \"$1\" = buildx ]; then printf '%s\\n' 'ERROR: failed to build: failed to solve: process \"/usr/local/bin/python3.14 -I -S -B /tmp/shimpz_pack_check.py\" did not complete successfully: exit code: 1' >&2; exit 1; fi\n\
+                 printf 'No such image\\n' >&2; exit 1",
+        );
+        let error = stage_proof(&docker, directory.path(), &image('b')).unwrap_err();
+        assert!(error.contains("run 'shimpz assistant prepare'"), "{error}");
     }
 }
