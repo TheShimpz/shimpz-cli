@@ -993,43 +993,65 @@ impl Context {
                 .arg(&release.reference)
                 .arg("--candidate");
         }
-        if let Some(reason) = handoff_failure(command.stdin(Stdio::null()).status()) {
-            match commit_evidence(&self.paths, self.profile, release) {
-                CommitEvidence::Committed => {
-                    // The child committed this release before failing, for example while enabling its scheduler,
-                    // so the Space now runs the release this CLI is bound to; the previous CLI must not be paired
-                    // with it.
-                    let failure = format!(
-                        "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
-                    );
-                    return Err(
-                        match remove_regular_if_present(&previous)
-                            .and_then(|()| ensure_public_cli(&self.paths))
-                        {
-                            Ok(()) => failure,
-                            Err(error) => format!("{failure}; {error}"),
-                        },
-                    );
-                }
-                CommitEvidence::Unknown(cause) => {
-                    // Neither CLI can be proved to match the Space, so neither is discarded.
-                    return Err(format!(
-                        "the release-bound CLI did not complete ({reason}), and whether it committed the release could not be determined: {cause}; both CLIs were kept: {} (release-bound) and {} (previous). Next: run {} install; it reconciles the Space, offers recovery when its state is corrupt, and removes the previous CLI",
-                        self.paths.managed_cli.display(),
-                        previous.display(),
-                        self.paths.managed_cli.display()
-                    ));
-                }
-                CommitEvidence::NotCommitted => {}
+        let failure = handoff_failure(command.stdin(Stdio::null()).status());
+        // A successful exit proves nothing on its own: a scheduled child also succeeds when it defers the update or
+        // finds storage locked, so the durable commit evidence decides which CLI matches the Space.
+        match (commit_evidence(&self.paths, self.profile, release), failure) {
+            (CommitEvidence::Committed, None) => {
+                remove_regular_if_present(&previous)?;
+                ensure_public_cli(&self.paths)?;
+                Ok(true)
             }
-            restore_previous_cli(&self.paths.managed_cli, &previous)?;
-            return Err(format!(
-                "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
-            ));
+            (CommitEvidence::Committed, Some(reason)) => {
+                // The child committed this release before failing, for example while enabling its scheduler, so
+                // the Space now runs the release this CLI is bound to; the previous CLI must not be paired with it.
+                let failure = format!(
+                    "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
+                );
+                Err(
+                    match remove_regular_if_present(&previous)
+                        .and_then(|()| ensure_public_cli(&self.paths))
+                    {
+                        Ok(()) => failure,
+                        Err(error) => format!("{failure}; {error}"),
+                    },
+                )
+            }
+            (CommitEvidence::Unknown(cause), None) => {
+                Err(self.uncertain_handoff("exited successfully, but", &cause, &previous))
+            }
+            (CommitEvidence::Unknown(cause), Some(reason)) => Err(self.uncertain_handoff(
+                &format!("did not complete ({reason}), and"),
+                &cause,
+                &previous,
+            )),
+            (CommitEvidence::NotCommitted, None) => {
+                restore_previous_cli(&self.paths.managed_cli, &previous)?;
+                if scheduled {
+                    // Only a scheduled run may legitimately skip the commit; the caller reports the deferred or
+                    // unapplied outcome from the unchanged Local state.
+                    Ok(true)
+                } else {
+                    Err("the release-bound CLI exited without committing the selected Local release; the previous CLI was restored".into())
+                }
+            }
+            (CommitEvidence::NotCommitted, Some(reason)) => {
+                restore_previous_cli(&self.paths.managed_cli, &previous)?;
+                Err(format!(
+                    "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
+                ))
+            }
         }
-        remove_regular_if_present(&previous)?;
-        ensure_public_cli(&self.paths)?;
-        Ok(true)
+    }
+
+    /// Neither CLI can be proved to match the Space, so neither is discarded.
+    fn uncertain_handoff(&self, outcome: &str, cause: &str, previous: &Path) -> String {
+        format!(
+            "the release-bound CLI {outcome} whether it committed the release could not be determined: {cause}; both CLIs were kept: {} (release-bound) and {} (previous). Next: run {} install; it reconciles the Space, offers recovery when its state is corrupt, and removes the previous CLI",
+            self.paths.managed_cli.display(),
+            previous.display(),
+            self.paths.managed_cli.display()
+        )
     }
 
     fn rollback(
@@ -3930,6 +3952,167 @@ mod tests {
         );
         assert!(
             error.contains(" install; it reconciles the Space, offers recovery"),
+            "{error}"
+        );
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_macos_arm64_sha256
+        );
+        assert_eq!(
+            fs::read_to_string(context.paths.managed_cli.with_extension("previous")).unwrap(),
+            "previous CLI"
+        );
+        assert!(!context.paths.public_cli.exists());
+    }
+
+    /// A scheduled handoff of a release-1 Space whose child exits successfully after running `child_body`.
+    #[cfg(unix)]
+    fn scheduled_handoff(
+        home: &Path,
+        child_body: &str,
+    ) -> (Context, ResolvedRelease, PathBuf, Result<bool, String>) {
+        let (context, target, root) = handoff_space(home, &format!("{child_body}exit 0\n"));
+        state::write_marker(&context.paths).unwrap();
+        let outcome = context.handoff_admitted_release(&target, true);
+        assert_eq!(
+            fs::read_to_string(root.join("child-arguments")).unwrap(),
+            format!(
+                "start --scheduled --release {} --candidate\n",
+                target.reference
+            )
+        );
+        (context, target, root, outcome)
+    }
+
+    #[cfg(unix)]
+    fn assert_previous_cli_restored(context: &Context) {
+        assert_eq!(
+            fs::read_to_string(&context.paths.managed_cli).unwrap(),
+            "previous CLI"
+        );
+        assert!(
+            !context
+                .paths
+                .managed_cli
+                .with_extension("previous")
+                .exists()
+        );
+        assert!(!context.paths.public_cli.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deferred_handoff_restores_the_previous_cli_and_reports_the_deferral() {
+        let home = tempfile::tempdir().unwrap();
+        // The child records an activity deferral of the target release and exits successfully without applying it.
+        let (context, target, _, outcome) = scheduled_handoff(home.path(), "");
+        let digest = poll::release_digest(&target.reference).unwrap();
+        assert!(
+            poll::defer_for_activity(&context.paths, digest, poll::now(), || {
+                poll::TeamActivity::Busy
+            })
+            .unwrap()
+        );
+
+        assert_eq!(outcome, Ok(true));
+        assert_previous_cli_restored(&context);
+        assert_eq!(context.handoff_outcome(&target).unwrap(), UPDATE_DEFERRED);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_that_found_storage_locked_restores_the_previous_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, target, _, outcome) = scheduled_handoff(home.path(), "");
+
+        assert_eq!(outcome, Ok(true));
+        assert_previous_cli_restored(&context);
+        assert_eq!(
+            context.handoff_outcome(&target).unwrap(),
+            "The release-bound CLI finished without applying the selected Local release."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unscheduled_handoff_that_exits_without_a_commit_restores_the_previous_cli_and_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, target, _) = handoff_space(home.path(), "exit 0\n");
+
+        let error = context
+            .handoff_admitted_release(&target, false)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "the release-bound CLI exited without committing the selected Local release; the previous CLI was restored"
+        );
+        assert_previous_cli_restored(&context);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_committed_handoff_removes_the_previous_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let child_body = format!(
+            "cp '{}' '{}'\nprintf '%s' '{}' > '{}'\n",
+            home.path().join("fixture/release-2.env").display(),
+            home.path().join(".shimpz/.env").display(),
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "updated",
+            }),
+            home.path().join(".shimpz/release-status.json").display(),
+        );
+        let (context, target, _, outcome) = scheduled_handoff(home.path(), &child_body);
+
+        assert_eq!(outcome, Ok(true));
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_macos_arm64_sha256
+        );
+        assert!(
+            !context
+                .paths
+                .managed_cli
+                .with_extension("previous")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_link(&context.paths.public_cli).unwrap(),
+            context.paths.managed_cli
+        );
+        assert_eq!(
+            context.handoff_outcome(&target).unwrap(),
+            "The release-bound CLI completed reconciliation."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_successful_handoff_with_unknown_commit_evidence_keeps_both_clis() {
+        let home = tempfile::tempdir().unwrap();
+        let status = home.path().join(".shimpz/release-status.json");
+        let child_body = format!(
+            "cp '{}' '{}'\nprintf '%s' '{}' > '{}'\nchmod 400 '{}'\n",
+            home.path().join("fixture/release-2.env").display(),
+            home.path().join(".shimpz/.env").display(),
+            serde_json::json!({
+                "release": release(2, 'b').reference,
+                "ordinal": 2,
+                "checked_at": 1,
+                "outcome": "updated",
+            }),
+            status.display(),
+            status.display(),
+        );
+        let (context, target, _, outcome) = scheduled_handoff(home.path(), &child_body);
+
+        let error = outcome.unwrap_err();
+        assert!(
+            error.starts_with("the release-bound CLI exited successfully, but whether it committed the release could not be determined: the Local release status is not a private record; both CLIs were kept"),
             "{error}"
         );
         assert_eq!(
