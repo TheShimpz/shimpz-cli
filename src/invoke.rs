@@ -260,10 +260,12 @@ fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Inv
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
+    // A direct run selects no Team file, so even an Action that declares a file input receives none (ADR-0093).
     Ok(Invocation(serde_json::json!({
         "input": value,
         "integrations": integrations,
         "stored_inputs": {},
+        "files": {},
         "operation_id": operation_id()?
     })))
 }
@@ -398,6 +400,7 @@ mod tests {
                 "input": {"zone": "example.com"},
                 "integrations": {},
                 "stored_inputs": {},
+                "files": {},
                 "operation_id": operation_id
             })
         );
