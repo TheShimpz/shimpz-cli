@@ -874,16 +874,7 @@ impl Context {
             linux::reset(&self.paths, space_id.as_deref())?;
         }
         remove_runtime_files(&self.paths)?;
-        match scheduler::remove(self.profile, &self.paths) {
-            Ok(outcome) if outcome.execution_unverified => output::warning(&format!(
-                "Preserved unrecognized scheduler entries; their execution state is unverified: {}",
-                outcome.preserved.join(", ")
-            )),
-            Ok(_) => {}
-            Err(error) => output::warning(&format!(
-                "The corrupt Space was removed, but its scheduler cleanup could not be completed: {error}"
-            )),
-        }
+        corrupt_recovery_scheduler(scheduler::remove(self.profile, &self.paths))?;
         output::info("Corrupt Local Space removed; continuing with a fresh installation.");
         Ok(())
     }
@@ -1284,6 +1275,26 @@ impl Context {
             }
         }
         Ok(preserved.into_strings())
+    }
+}
+
+/// A fresh installation may follow corrupt recovery only once owned scheduler entries are gone: later failures would
+/// otherwise skip scheduler reconciliation and leave owned residue. Unrecognized entries stay preserved with a warning.
+fn corrupt_recovery_scheduler(
+    removal: Result<scheduler::RemovalOutcome, String>,
+) -> Result<(), String> {
+    match removal {
+        Ok(outcome) if outcome.execution_unverified => {
+            output::warning(&format!(
+                "Preserved unrecognized scheduler entries; their execution state is unverified: {}",
+                outcome.preserved.join(", ")
+            ));
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!(
+            "the corrupt Local Space was removed, but its owned scheduler cleanup did not complete, so no fresh installation was started: {error}. After resolving that, run shimpz reset to finish the cleanup, then run shimpz install"
+        )),
     }
 }
 
@@ -2853,6 +2864,33 @@ mod tests {
             "Shimpz Space is ready.\nAdmin: http://127.0.0.1:7777\nRelease: ordinal 3\nNext: open the Admin address above."
         );
         assert!(!outcome.contains("sha256:"));
+    }
+
+    #[test]
+    fn corrupt_recovery_refuses_a_fresh_install_while_owned_scheduler_entries_remain() {
+        assert_eq!(
+            corrupt_recovery_scheduler(Ok(scheduler::RemovalOutcome::default())),
+            Ok(())
+        );
+        let foreign = scheduler::RemovalOutcome {
+            preserved: vec!["/home/ada/.config/systemd/user/shimpz-update.timer".to_owned()],
+            execution_unverified: true,
+        };
+        assert_eq!(corrupt_recovery_scheduler(Ok(foreign)), Ok(()));
+
+        let error = corrupt_recovery_scheduler(Err(
+            "the automatic Local update timer could not be proven stopped and disabled; the scheduler files were kept"
+                .to_owned(),
+        ))
+        .unwrap_err();
+        assert!(
+            error.starts_with("the corrupt Local Space was removed, but its owned scheduler cleanup did not complete, so no fresh installation was started: the automatic Local update timer could not be proven stopped and disabled"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("run shimpz reset to finish the cleanup, then run shimpz install"),
+            "{error}"
+        );
     }
 
     #[test]
