@@ -1,6 +1,6 @@
 [package]
 name = "shimpz-cli"
-version = "0.5.61"
+version = "0.5.62"
 description = "Fast local tooling for Shimpz Assistants"
 edition = "2024"
 license = "Apache-2.0"
