@@ -1,5 +1,6 @@
 //! Command-line tooling for Shimpz Assistants.
 
+mod action_failure;
 mod args;
 mod auth;
 mod credentials;
@@ -8,11 +9,14 @@ mod help;
 mod human_request;
 mod install;
 mod invoke;
+mod language_pack;
 mod manifest;
 mod new_assistant;
 mod output;
+mod prepare;
 mod publish;
 mod python;
+mod snapshot_files;
 mod snapshot_lock;
 mod source_package;
 mod space;
@@ -70,6 +74,9 @@ fn run(command: &Command) -> ExitCode {
             action,
             input,
         }) => (invoke::run(project, action, input), Presentation::Data),
+        Command::Assistant(AssistantCommand::Prepare { project }) => {
+            (prepare::run(project), Presentation::Success)
+        }
         Command::Assistant(AssistantCommand::Stage { project }) => {
             (stage::run(project), Presentation::Success)
         }

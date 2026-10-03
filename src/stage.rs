@@ -4,17 +4,21 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use toml::Value;
 
+use crate::language_pack::{self, Catalog, Pack};
 use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
-use crate::{output, snapshot_lock, source_package, toolchain};
+use crate::{output, python, snapshot_files, snapshot_lock, source_package, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
 pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
@@ -61,6 +65,13 @@ if __name__ == "__main__":
     raise SystemExit(main())
 "#;
 
+const PACK_MISMATCH: &str = "the staged image's generated catalog does not match the prepared language pack; pin the CLI's Python SDK in pyproject.toml, run 'shimpz assistant prepare', then stage again";
+const CONTRACT_PATH: &str = "/opt/shimpz/shimpz.contract.json";
+const PACK_PATH: &str = "/opt/shimpz/shimpz.pack.json";
+const MAX_CONTRACT_BYTES: usize = 524_288;
+/// Final-image files are immutable and root-owned, exactly as Team admits them.
+const FINAL_FILE_MODE: u32 = 0o444;
+
 const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS build
 
@@ -97,6 +108,9 @@ COPY --from=build /usr/local/lib/libpython3.14.so.1.0 /usr/local/lib/libpython3.
 COPY --from=build /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 COPY --from=build /opt/shimpz/ /opt/shimpz/
 COPY --from=build /usr/local/bin/shimpz-action /usr/local/bin/shimpz-action
+# The prepared pack enters only here, after the stage that ran Creator code. The CLI verifies the final files from
+# outside the image, because that stage could have changed the interpreter and standard library copied here.
+COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -115,21 +129,32 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         integrations: manifest::integration_ids(&package.manifest)?,
     };
     validate_dependency_sources(&package.pyproject)?;
+    output::progress("Extracting the static message catalog...");
+    let catalog = Catalog::from_document(&python::catalog(project)?)?;
+    let pack = language_pack::prepared(&catalog)?;
+    let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
+    sdk_verify(pack.bytes())?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
-    prepare_context(context.path(), &package)?;
+    prepare_context(context.path(), &package, &pack)?;
     output::progress("Resolving hashed Python dependencies...");
     let requirements = compile_requirements(context.path())?;
     let docker = connect_docker()?;
     let platform = daemon_platform(&docker)?;
-    let build_digest = build_digest(&package.bytes, &requirements, platform);
+    let build_digest = build_digest(&package.bytes, &requirements, platform, pack.bytes());
     let image_id = stage_image(
         &docker,
         context.path(),
-        &identity,
-        &package.digest,
-        &build_digest,
-        platform,
-        &discovery,
+        &ExpectedImage {
+            reference: &canonical_reference(&identity.id),
+            identity: &identity,
+            source_digest: &package.digest,
+            build_digest: &build_digest,
+            platform,
+            discovery: &discovery,
+            catalog: catalog.canonical(),
+            pack: pack.bytes(),
+            verify_pack: &sdk_verify,
+        },
     )?;
     if let Some(message) = source_package::exclusion_warning(&package) {
         output::warning(&message);
@@ -140,9 +165,14 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     ))
 }
 
-fn prepare_context(path: &Path, package: &source_package::SourcePackage) -> Result<(), String> {
+fn prepare_context(
+    path: &Path,
+    package: &source_package::SourcePackage,
+    pack: &Pack,
+) -> Result<(), String> {
     write(path.join("Dockerfile"), DOCKERFILE.as_bytes())?;
     write(path.join("shimpz_action.py"), ACTION_RUNNER.as_bytes())?;
+    write(path.join("shimpz.pack.json"), pack.bytes())?;
     write(path.join("source.package"), &package.bytes)?;
     write(path.join("pyproject.toml"), &package.pyproject)
 }
@@ -224,32 +254,19 @@ fn local_digests_valid(digests: &str, assistant_id: &str, image_id: &str) -> boo
         || digests == format!("[\"{LOCAL_SNAPSHOT_REPOSITORY}/{assistant_id}@{image_id}\"]")
 }
 
-fn stage_image(
-    docker: &Path,
-    context: &Path,
-    identity: &PublicationIdentity,
-    source_digest: &str,
-    build_digest: &str,
-    platform: &str,
-    discovery: &DiscoveryProjection,
-) -> Result<String, String> {
-    let reference = canonical_reference(&identity.id);
-    let current = current_image(docker, &reference, &identity.id)?;
-    let expected = ExpectedImage {
-        reference: &reference,
-        identity,
-        source_digest,
-        build_digest,
-        platform,
-        discovery,
-    };
+fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Result<String, String> {
+    let reference = expected.reference;
+    let identity = expected.identity;
+    let current = current_image(docker, reference, &identity.id)?;
+    // The build digest covers the prepared pack, so a changed pack never reuses an image that carries another one.
     if let Some(current) = current
         .as_ref()
-        .filter(|current| current.build_digest == build_digest)
+        .filter(|current| current.build_digest == expected.build_digest)
     {
         output::progress("Reusing the current Local Assistant snapshot...");
-        validate_image(docker, &current.image_id, &expected)?;
-        require_current(docker, &reference, &current.image_id)?;
+        validate_image(docker, &current.image_id, expected)?;
+        verify_language_files(docker, &current.image_id, expected)?;
+        require_current(docker, reference, &current.image_id)?;
         return Ok(current.image_id.clone());
     }
     output::progress("Building the Local Assistant snapshot...");
@@ -258,16 +275,17 @@ fn stage_image(
     // A failure anywhere after the build may already have moved the tag, so every one reconciles it; the nonce
     // proves which tagged image this attempt produced.
     let nonce = stage_nonce();
-    build_image(docker, context, &expected, &nonce)
+    build_image(docker, context, expected, &nonce)
         .and_then(|image_id| {
-            validate_image(docker, &image_id, &expected)?;
-            require_current(docker, &reference, &image_id)?;
+            validate_image(docker, &image_id, expected)?;
+            verify_language_files(docker, &image_id, expected)?;
+            require_current(docker, reference, &image_id)?;
             Ok(image_id)
         })
         .map_err(|error| {
             reconcile_current(
                 docker,
-                &reference,
+                reference,
                 &identity.id,
                 current.as_ref(),
                 &nonce,
@@ -283,6 +301,12 @@ struct ExpectedImage<'a> {
     build_digest: &'a str,
     platform: &'a str,
     discovery: &'a DiscoveryProjection,
+    /// The canonical catalog the trusted host SDK extracted: the anchor the image's contract must carry.
+    catalog: &'a [u8],
+    /// The exact prepared pack bytes.
+    pack: &'a [u8],
+    /// The SDK reference validator, applied again to the pack exported from the final image.
+    verify_pack: &'a dyn Fn(&[u8]) -> Result<(), String>,
 }
 
 struct CurrentImage {
@@ -476,6 +500,84 @@ fn stage_nonce() -> String {
     format!("{:x}", digest.finalize())[..32].to_owned()
 }
 
+/// Export the final contract and pack from a created, never-started container and compare them on the host with
+/// the trusted anchor and the prepared pack; nothing inside the image runs.
+fn verify_language_files(
+    docker: &Path,
+    image_id: &str,
+    expected: &ExpectedImage,
+) -> Result<(), String> {
+    let created = docker_output(
+        docker,
+        ["create", "--network=none", "--pull=never", image_id],
+    )?;
+    let container = output_text(&created)?.trim().to_owned();
+    if !created.status.success()
+        || container.len() != 64
+        || !container.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(docker_failure(
+            &created,
+            "Docker could not open the staged image's files",
+        ));
+    }
+    let verified =
+        exported_file(docker, &container, CONTRACT_PATH, MAX_CONTRACT_BYTES).and_then(|contract| {
+            let pack = exported_file(docker, &container, PACK_PATH, language_pack::MAX_PACK_BYTES)?;
+            if pack != expected.pack {
+                return Err("the staged image does not carry the prepared language pack".to_owned());
+            }
+            let catalog = serde_json::from_slice::<serde_json::Value>(&contract)
+                .ok()
+                .and_then(|contract| contract.get("messages").map(serde_json::to_vec))
+                .and_then(Result::ok);
+            if catalog.as_deref() != Some(expected.catalog) {
+                return Err(PACK_MISMATCH.to_owned());
+            }
+            (expected.verify_pack)(&pack)
+        });
+    let removed = docker_succeeds(docker, ["rm", container.as_str()]);
+    match (verified, removed) {
+        (Ok(()), true) => Ok(()),
+        (Err(error), true) => Err(error),
+        (result, false) => Err(format!(
+            "{}; the temporary container {container} could not be removed, so remove it with 'docker rm'",
+            result
+                .err()
+                .unwrap_or_else(|| "the staged image's files were verified".into())
+        )),
+    }
+}
+
+fn exported_file(
+    docker: &Path,
+    container: &str,
+    path: &str,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let result = docker_output_within(
+        docker,
+        [
+            "cp".to_owned(),
+            format!("{container}:{path}"),
+            "-".to_owned(),
+        ],
+        limit + 4 * 1024,
+    )?;
+    if !result.status.success() {
+        return Err(format!("the staged image does not carry {path}"));
+    }
+    let file = snapshot_files::single_file(&result.stdout, name, limit)
+        .map_err(|code| format!("the staged image's {path} is invalid ({code})"))?;
+    if file.mode & 0o7777 != FINAL_FILE_MODE || file.uid != 0 {
+        return Err(format!(
+            "the staged image's {path} is not a root-owned read-only file"
+        ));
+    }
+    Ok(file.bytes)
+}
+
 fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
     let identity = expected.identity;
     let declared_creators = declared_creators(identity);
@@ -568,7 +670,7 @@ fn declared_creators(identity: &PublicationIdentity) -> String {
         .join(",")
 }
 
-fn build_digest(source: &[u8], requirements: &[u8], platform: &str) -> String {
+fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8]) -> String {
     let mut digest = Sha256::new();
     for value in [
         b"shimpz-local-stage-v3".as_slice(),
@@ -577,6 +679,7 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str) -> String {
         ACTION_RUNNER.as_bytes(),
         source,
         requirements,
+        pack,
     ] {
         digest.update(value.len().to_be_bytes());
         digest.update(value);
@@ -589,19 +692,77 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = Command::new(docker)
+    docker_output_within(docker, arguments, MAX_DOCKER_OUTPUT_BYTES)
+}
+
+/// Run Docker and capture its output, never holding more than `limit` bytes of stdout or
+/// `MAX_DOCKER_OUTPUT_BYTES` of stderr: a stream that exceeds its bound, or cannot be read, kills and reaps Docker
+/// at once instead of letting Creator-controlled output, such as an exported file, exhaust host memory.
+fn docker_output_within<I, S>(docker: &Path, arguments: I, limit: usize) -> Result<Output, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    const UNAVAILABLE: &str = "Docker could not execute the Local snapshot operation";
+    let mut child = Command::new(docker)
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|_| "Docker could not execute the Local snapshot operation")?;
-    if result.stdout.len() > MAX_DOCKER_OUTPUT_BYTES
-        || result.stderr.len() > MAX_DOCKER_OUTPUT_BYTES
-    {
-        return Err("Docker returned excessive Local snapshot output".into());
+        .spawn()
+        .map_err(|_| UNAVAILABLE)?;
+    let (sender, receiver) = mpsc::channel();
+    let streams: [(Option<Box<dyn Read + Send>>, usize); 2] = [
+        (
+            child.stdout.take().map(|stream| Box::new(stream) as _),
+            limit,
+        ),
+        (
+            child.stderr.take().map(|stream| Box::new(stream) as _),
+            MAX_DOCKER_OUTPUT_BYTES,
+        ),
+    ];
+    for (index, (stream, bound)) in streams.into_iter().enumerate() {
+        let sender = sender.clone();
+        // A reader is never joined: after a kill, a process Docker started may still hold its pipe open.
+        thread::spawn(move || {
+            let _ = sender.send((
+                index,
+                stream.map_or(Ok(Some(Vec::new())), |stream| bounded(stream, bound)),
+            ));
+        });
     }
-    Ok(result)
+    drop(sender);
+    let mut captured = [Vec::new(), Vec::new()];
+    for _ in 0..captured.len() {
+        let failure = match receiver.recv() {
+            Ok((index, Ok(Some(bytes)))) => {
+                captured[index] = bytes;
+                continue;
+            }
+            Ok((_, Ok(None))) => "Docker returned excessive Local snapshot output",
+            Ok((_, Err(_))) | Err(_) => UNAVAILABLE,
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(failure.into());
+    }
+    let status = child.wait().map_err(|_| UNAVAILABLE)?;
+    let [stdout, stderr] = captured;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Read a stream to its end, or stop as soon as it exceeds `limit` bytes (`None`).
+fn bounded(stream: impl Read, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    stream
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= limit).then_some(bytes))
 }
 
 fn require_docker_success<I, S>(docker: &Path, arguments: I, message: &str) -> Result<(), String>
@@ -770,13 +931,23 @@ mod tests {
 
     #[test]
     fn exact_build_inputs_have_one_stable_cache_identity() {
-        let one = build_digest(b"source", b"requirements", "linux/amd64");
-        assert_eq!(one, build_digest(b"source", b"requirements", "linux/amd64"));
+        let one = build_digest(b"source", b"requirements", "linux/amd64", b"pack");
+        assert_eq!(
+            one,
+            build_digest(b"source", b"requirements", "linux/amd64", b"pack")
+        );
         assert_ne!(
             one,
-            build_digest(b"changed", b"requirements", "linux/amd64")
+            build_digest(b"changed", b"requirements", "linux/amd64", b"pack")
         );
-        assert_ne!(one, build_digest(b"source", b"requirements", "linux/arm64"));
+        assert_ne!(
+            one,
+            build_digest(b"source", b"requirements", "linux/arm64", b"pack")
+        );
+        assert_ne!(
+            one,
+            build_digest(b"source", b"requirements", "linux/amd64", b"changed pack")
+        );
     }
 
     #[test]
@@ -791,17 +962,54 @@ mod tests {
         }
         assert!(
             validate_dependency_sources(
-                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.4.2\", \"httpx>=0.28\"]\n"
+                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.5.0\", \"httpx>=0.28\"]\n"
             )
             .is_ok()
         );
     }
 
+    const PROOF_CATALOG: &[u8] = br#"[{"id":"proof"}]"#;
+    const PROOF_PACK: &[u8] = br#"{"pack":"proof"}"#;
+    const PROOF_CONTAINER: &str =
+        "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+
+    /// The final files `docker cp` exports from a proof image's created container.
+    fn export_archives(directory: &Path, contract: &[u8], pack: &[u8], pack_mode: u32) {
+        use crate::snapshot_files::tests::archive;
+        let regular = tar::EntryType::Regular;
+        fs::write(
+            directory.join("contract.tar"),
+            archive("shimpz.contract.json", 0o444, regular, contract),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("pack.tar"),
+            archive("shimpz.pack.json", pack_mode, regular, pack),
+        )
+        .unwrap();
+    }
+
+    /// A fake Docker CLI that also serves created containers and their exported final files.
     #[cfg(unix)]
     fn fake_docker(directory: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        if !directory.join("contract.tar").exists() {
+            export_archives(
+                directory,
+                br#"{"messages":[{"id":"proof"}],"version":1}"#,
+                PROOF_PACK,
+                0o444,
+            );
+        }
+        let export = format!(
+            "if [ \"$1\" = create ]; then printf '%s\\n' '{PROOF_CONTAINER}'; exit 0; fi\n\
+             if [ \"$1\" = cp ]; then case \"$2\" in *shimpz.contract.json) cat '{dir}/contract.tar';; *shimpz.pack.json) cat '{dir}/pack.tar';; *) exit 1;; esac; exit 0; fi\n\
+             if [ \"$1\" = rm ]; then printf '%s\\n' \"$2\" >> '{dir}/removed'; exit 0; fi\n",
+            dir = directory.display()
+        );
         let executable = directory.join("docker-proof");
-        fs::write(&executable, format!("#!/bin/sh\n{body}\nexit 2\n")).expect("fake Docker");
+        fs::write(&executable, format!("#!/bin/sh\n{export}{body}\nexit 2\n"))
+            .expect("fake Docker");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
             .expect("executable fake Docker");
         await_executable(&executable);
@@ -843,20 +1051,42 @@ mod tests {
         .join("\\n")
     }
 
-    fn stage_proof(docker: &Path, context: &Path, build: &str) -> Result<String, String> {
-        let identity = proof_identity();
-        stage_image(
-            docker,
-            context,
-            &identity,
-            &image('d'),
+    fn with_expected<T>(build: &str, operation: impl FnOnce(&ExpectedImage) -> T) -> T {
+        with_verifier(
             build,
-            "linux/amd64",
-            &DiscoveryProjection {
+            &|bytes| {
+                assert_eq!(bytes, PROOF_PACK);
+                Ok(())
+            },
+            operation,
+        )
+    }
+
+    fn with_verifier<T>(
+        build: &str,
+        verify_pack: &dyn Fn(&[u8]) -> Result<(), String>,
+        operation: impl FnOnce(&ExpectedImage) -> T,
+    ) -> T {
+        let identity = proof_identity();
+        let source = image('d');
+        operation(&ExpectedImage {
+            reference: &canonical_reference(&identity.id),
+            identity: &identity,
+            source_digest: &source,
+            build_digest: build,
+            platform: "linux/amd64",
+            discovery: &DiscoveryProjection {
                 actions: vec!["ping".into()],
                 integrations: Vec::new(),
             },
-        )
+            catalog: PROOF_CATALOG,
+            pack: PROOF_PACK,
+            verify_pack,
+        })
+    }
+
+    fn stage_proof(docker: &Path, context: &Path, build: &str) -> Result<String, String> {
+        with_expected(build, |expected| stage_image(docker, context, expected))
     }
 
     #[cfg(unix)]
@@ -966,6 +1196,11 @@ mod tests {
             .find(|call| call.starts_with("buildx build"))
             .expect("build");
         assert!(build_call.contains("--tag shimpz-local/proof-assistant:staged"));
+        assert!(!build_call.contains("--build-arg"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("removed")).unwrap(),
+            format!("{PROOF_CONTAINER}\n")
+        );
         assert!(build_call.contains("--label org.shimpz.local.stage.nonce="));
         assert!(!calls.lines().any(|call| call.starts_with("tag ")));
     }
@@ -1138,5 +1373,212 @@ mod tests {
         assert!(!implementation.contains("developers.shimpz.com"));
         assert!(!implementation.contains("lifecycle::"));
         assert!(!implementation.contains("credentials"));
+        assert!(!implementation.contains("ureq"));
+        assert!(!implementation.contains("prepare::"));
+    }
+
+    #[test]
+    fn the_prepared_pack_enters_the_final_image_after_creator_code_and_nothing_in_it_verifies() {
+        let (build, last) = DOCKERFILE
+            .split_once("\nFROM gcr.io/distroless")
+            .expect("final stage");
+        assert!(build.contains("shimpz._bridge contract"));
+        assert!(!build.contains("shimpz.pack.json"));
+        let copy = last
+            .find("COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json")
+            .expect("pack copy");
+        assert!(last.rfind("COPY --from=build").unwrap() < copy);
+        assert!(!last.contains("RUN "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verifies_the_exported_final_files_on_the_host_and_removes_the_container() {
+        let verify = |contract: &[u8], pack: &[u8], pack_mode: u32| {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            export_archives(directory.path(), contract, pack, pack_mode);
+            let docker = fake_docker(directory.path(), "exit 1");
+            let result = with_expected(&image('b'), |expected| {
+                verify_language_files(&docker, &image('a'), expected)
+            });
+            let removed = fs::read_to_string(directory.path().join("removed")).unwrap();
+            assert_eq!(removed, format!("{PROOF_CONTAINER}\n"));
+            result
+        };
+        let contract = br#"{"messages":[{"id":"proof"}],"version":1}"#;
+        assert_eq!(verify(contract, PROOF_PACK, 0o444), Ok(()));
+        // A contract or pack that an in-image verifier poisoned by Creator code would have accepted.
+        let other_catalog = br#"{"messages":[{"id":"other"}],"version":1}"#;
+        assert_eq!(
+            verify(other_catalog, PROOF_PACK, 0o444).unwrap_err(),
+            PACK_MISMATCH
+        );
+        assert!(
+            verify(contract, br#"{"pack":"other"}"#, 0o444)
+                .unwrap_err()
+                .contains("does not carry the prepared language pack")
+        );
+        assert!(
+            verify(contract, PROOF_PACK, 0o644)
+                .unwrap_err()
+                .contains("root-owned read-only")
+        );
+        assert!(
+            verify(b"not json", PROOF_PACK, 0o444)
+                .unwrap_err()
+                .contains("generated catalog")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sdk_reference_validator_checks_the_exported_pack() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let docker = fake_docker(directory.path(), "exit 1");
+        let checked = std::cell::Cell::new(0);
+        let refuse = |bytes: &[u8]| {
+            assert_eq!(bytes, PROOF_PACK);
+            checked.set(checked.get() + 1);
+            Err("the Python SDK refuses the language pack (public_text)".to_owned())
+        };
+        let error = with_verifier(&image('b'), &refuse, |expected| {
+            verify_language_files(&docker, &image('a'), expected)
+        })
+        .unwrap_err();
+        assert!(error.contains("public_text"), "{error}");
+        assert_eq!(checked.get(), 1);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("removed")).unwrap(),
+            format!("{PROOF_CONTAINER}\n")
+        );
+    }
+
+    /// A fake Docker whose `cp` runs `export` in place of the shell and records the process it became.
+    #[cfg(unix)]
+    fn exporting_docker(directory: &Path, export: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = directory.join("docker-export");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = create ]; then printf '%s\\n' '{PROOF_CONTAINER}'; exit 0; fi\n\
+                 if [ \"$1\" = rm ]; then printf '%s\\n' \"$2\" >> '{dir}/removed'; exit 0; fi\n\
+                 if [ \"$1\" = cp ]; then echo $$ > '{dir}/export.pid'; exec {export}; fi\n\
+                 exit 2\n",
+                dir = directory.display()
+            ),
+        )
+        .expect("fake Docker");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("executable fake Docker");
+        await_executable(&executable);
+        executable
+    }
+
+    /// Verify through `docker`, failing instead of hanging if the export is never cut off.
+    #[cfg(unix)]
+    fn verify_within_deadline(docker: PathBuf) -> Result<(), String> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = with_expected(&image('b'), |expected| {
+                verify_language_files(&docker, &image('a'), expected)
+            });
+            let _ = sender.send(result);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .expect("an unbounded export was never cut off")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_export_is_refused_and_the_container_still_removed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let oversized = vec![b' '; MAX_CONTRACT_BYTES + 8 * 1024];
+        export_archives(directory.path(), &oversized, PROOF_PACK, 0o444);
+        let docker = fake_docker(directory.path(), "exit 1");
+        assert_eq!(
+            verify_within_deadline(docker).unwrap_err(),
+            "Docker returned excessive Local snapshot output"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("removed")).unwrap(),
+            format!("{PROOF_CONTAINER}\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_endless_export_stream_is_cut_off_and_docker_killed_and_reaped() {
+        for export in ["cat /dev/zero", "cat /dev/zero >&2"] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let docker = exporting_docker(directory.path(), export);
+            assert_eq!(
+                verify_within_deadline(docker).unwrap_err(),
+                "Docker returned excessive Local snapshot output",
+                "{export}"
+            );
+            assert_eq!(
+                fs::read_to_string(directory.path().join("removed")).unwrap(),
+                format!("{PROOF_CONTAINER}\n"),
+                "{export}"
+            );
+            let pid = fs::read_to_string(directory.path().join("export.pid")).unwrap();
+            let pid = nix::unistd::Pid::from_raw(pid.trim().parse().unwrap());
+            // Neither running nor a zombie: the exporting process was killed and reaped.
+            assert_eq!(
+                nix::sys::signal::kill(pid, None),
+                Err(nix::errno::Errno::ESRCH),
+                "{export}"
+            );
+        }
+    }
+
+    /// Creator code in the build stage poisons the interpreter and standard library the final image copies; the
+    /// host verifier never runs them, so a mismatched catalog is still refused.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a Docker daemon with BuildKit"]
+    fn live_docker_refuses_a_poisoned_image_with_a_mismatched_catalog() {
+        let docker = PathBuf::from("docker");
+        let build = |name: &str, contract: &[u8]| {
+            let context = tempfile::tempdir().expect("context");
+            fs::write(
+                context.path().join("Dockerfile"),
+                "FROM scratch\n\
+                 COPY --chmod=0555 python3.14 /usr/local/bin/python3.14\n\
+                 COPY --chmod=0444 json.py /usr/local/lib/python3.14/json/__init__.py\n\
+                 COPY --chmod=0444 shimpz.contract.json /opt/shimpz/shimpz.contract.json\n\
+                 COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json\n\
+                 ENTRYPOINT [\"/usr/local/bin/python3.14\"]\n",
+            )
+            .unwrap();
+            fs::write(context.path().join("python3.14"), "#!/bin/sh\nexit 0\n").unwrap();
+            fs::write(context.path().join("json.py"), "def loads(_): return {}\n").unwrap();
+            fs::write(context.path().join("shimpz.contract.json"), contract).unwrap();
+            fs::write(context.path().join("shimpz.pack.json"), PROOF_PACK).unwrap();
+            let tag = format!("shimpz-verifier-proof:{name}-{}", process::id());
+            let status = Command::new(&docker)
+                .args(["buildx", "build", "--load", "--quiet", "--tag", &tag])
+                .arg(context.path())
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            tag
+        };
+        let poisoned = build("poisoned", br#"{"messages":[{"id":"other"}],"version":1}"#);
+        let faithful = build("faithful", br#"{"messages":[{"id":"proof"}],"version":1}"#);
+        let outcomes = [&poisoned, &faithful].map(|tag| {
+            with_expected(&image('b'), |expected| {
+                verify_language_files(&docker, tag, expected)
+            })
+        });
+        for tag in [&poisoned, &faithful] {
+            let _ = Command::new(&docker).args(["image", "rm", tag]).output();
+        }
+        assert_eq!(outcomes[0].clone().unwrap_err(), PACK_MISMATCH);
+        assert_eq!(outcomes[1], Ok(()));
     }
 }

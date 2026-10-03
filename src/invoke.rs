@@ -1,6 +1,7 @@
 //! Local Action invocation and Integration injection.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -50,7 +51,17 @@ impl Invocation {
         !secrets.is_empty() && contains_secret(response, &secrets, 0)
     }
 
+    /// Every nonempty private value in the invocation, for failure-diagnostic redaction: unlike the echo check,
+    /// redaction needs no length floor because replacing a short value cannot refuse a valid result.
+    fn injected_values(&self) -> Vec<&str> {
+        self.private_values(|value| !value.is_empty())
+    }
+
     fn protected_values(&self) -> Vec<&str> {
+        self.private_values(protected_value)
+    }
+
+    fn private_values(&self, admit: fn(&str) -> bool) -> Vec<&str> {
         let Some(invocation) = self.0.as_object() else {
             return Vec::new();
         };
@@ -63,7 +74,7 @@ impl Invocation {
                     .into_iter()
                     .flat_map(|values| values.values())
                     .filter_map(Value::as_str)
-                    .filter(|value| protected_value(value)),
+                    .filter(|value| admit(value)),
             );
         }
         secrets.extend(
@@ -76,7 +87,7 @@ impl Invocation {
                     response.get("kind").and_then(Value::as_str) == Some("input:password")
                 })
                 .filter_map(|response| response.get("value").and_then(Value::as_str))
-                .filter(|value| protected_value(value)),
+                .filter(|value| admit(value)),
         );
         secrets
     }
@@ -150,12 +161,16 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     for _ in 0..=8 {
         let serialized = request.serialized()?;
         let output = assistant.invoke(action_id, serialized.as_slice())?;
+        let response = parse_response(&output)?;
         let response_value: Value = serde_json::from_str(&output)
             .map_err(|_| "Python SDK response is invalid".to_owned())?;
-        if request.response_exposes_secret(&response_value) {
+        // Only a failure diagnostic is sanitized; every other frame that echoes a private value is refused.
+        if !matches!(response, ActionResponse::Failure(_))
+            && request.response_exposes_secret(&response_value)
+        {
             return Err("Action response exposes private input".into());
         }
-        match parse_response(&output)? {
+        match response {
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
                     .map_err(|_| "Action result is invalid".into());
@@ -164,12 +179,17 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
                 return Err("Action requested human input after a password response".into());
             }
             ActionResponse::Request(frame) => {
-                let response = answer(&frame)?;
+                let display = frame.display(&assistant.render(&frame.frame())?)?;
+                let response = answer(&frame, &display)?;
                 request.push_response(response)?;
                 secret_answered = frame.contains_secret_input();
             }
             ActionResponse::StoredInputRejected(stored_input) => {
                 return Err(format!("Action rejected Stored Input {stored_input}"));
+            }
+            ActionResponse::Failure(mut failure) => {
+                failure.redact(&request.injected_values());
+                return Err(failure.render());
             }
         }
     }
@@ -240,11 +260,38 @@ fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Inv
     if !value.is_object() {
         return Err("--input must be a JSON object".into());
     }
+    // A direct run selects no Team file, so even an Action that declares a file input receives none (ADR-0093).
     Ok(Invocation(serde_json::json!({
         "input": value,
         "integrations": integrations,
-        "stored_inputs": {}
+        "stored_inputs": {},
+        "files": {},
+        "operation_id": operation_id()?
     })))
+}
+
+/// Mint one logical operation id: the canonical lowercase text of a random version 4 UUID. Every human-request
+/// replay of this run repeats it, exactly as Team repeats the id of one logical operation.
+fn operation_id() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| "Action operation id cannot be generated".to_owned())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
 }
 
 fn read_input(input: &Input) -> Result<String, String> {
@@ -346,14 +393,41 @@ mod tests {
             &integrations,
         )
         .expect("valid invocation");
+        let operation_id = invocation.0["operation_id"].clone();
         assert_eq!(
             invocation.0,
             serde_json::json!({
                 "input": {"zone": "example.com"},
                 "integrations": {},
-                "stored_inputs": {}
+                "stored_inputs": {},
+                "files": {},
+                "operation_id": operation_id
             })
         );
+    }
+
+    #[test]
+    fn mints_a_canonical_random_version_4_operation_id() {
+        let first = operation_id().expect("operation id");
+        let second = operation_id().expect("operation id");
+
+        assert_ne!(first, second);
+        for id in [first, second] {
+            let bytes = id.as_bytes();
+            assert_eq!(bytes.len(), 36, "{id}");
+            for (index, byte) in bytes.iter().enumerate() {
+                if [8, 13, 18, 23].contains(&index) {
+                    assert_eq!(*byte, b'-', "{id}");
+                } else {
+                    assert!(
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+                        "{id}"
+                    );
+                }
+            }
+            assert_eq!(bytes[14], b'4', "{id}");
+            assert!(b"89ab".contains(&bytes[19]), "{id}");
+        }
     }
 
     #[test]
