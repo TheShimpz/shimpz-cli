@@ -168,11 +168,13 @@ fn bridge<const SIZE: usize>(
             // Isolated mode keeps the working directory, user site, and PYTHON* variables off the import path,
             // so an excluded project root such as `shimpz/` can never shadow the pinned SDK bridge.
             "-I",
+            // Isolated mode also ignores PYTHONDONTWRITEBYTECODE, so `-B` keeps imported Action modules from writing
+            // bytecode into the Creator's project.
+            "-B",
             "-m",
             "shimpz._bridge",
         ])
         .args(arguments)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdout(Stdio::piped())
         // A secret-bearing bridge's stderr is drained and counted, never kept: any byte is a transport fault.
         .stderr(Stdio::piped());

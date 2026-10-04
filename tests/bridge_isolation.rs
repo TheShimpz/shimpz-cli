@@ -28,6 +28,8 @@ fn copy_fixture(project: &Path) {
 }
 
 /// A real virtual environment whose only `shimpz` package is a trusted stand-in for the pinned SDK bridge.
+///
+/// Like the real bridge, the stand-in imports the project's Action module before it answers.
 fn trusted_environment(root: &Path) -> PathBuf {
     let environment = root.join("venv");
     let created = Command::new("python3")
@@ -47,12 +49,20 @@ fn trusted_environment(root: &Path) -> PathBuf {
         .unwrap();
     let package = PathBuf::from(String::from_utf8(purelib.stdout).unwrap().trim()).join("shimpz");
     fs::create_dir_all(&package).unwrap();
-    fs::write(package.join("__init__.py"), "").unwrap();
+    fs::write(
+        package.join("__init__.py"),
+        "def action(*args, **kwargs):\n    return lambda body: body\n",
+    )
+    .unwrap();
     let id = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(SUMMARY));
     fs::write(
         package.join("_bridge.py"),
         format!(
-            "import json\nprint(json.dumps({{'messages': [{{'id': '{id}', 'msgid': '{SUMMARY}', 'max_length': 160, 'params': []}}], 'summary': '{SUMMARY}'}}))\n"
+            "import importlib.util, json, pathlib, sys\n\
+             path = pathlib.Path(sys.argv[2]).resolve() / 'actions' / 'greet.py'\n\
+             spec = importlib.util.spec_from_file_location('greet', path)\n\
+             spec.loader.exec_module(importlib.util.module_from_spec(spec))\n\
+             print(json.dumps({{'messages': [{{'id': '{id}', 'msgid': '{SUMMARY}', 'max_length': 160, 'params': []}}], 'summary': '{SUMMARY}'}}))\n"
         ),
     )
     .unwrap();
@@ -100,8 +110,10 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let executed = sentinel.exists();
+    let bytecode = project.join("actions/__pycache__").exists();
     let _ = fs::remove_dir_all(&root);
     assert!(!executed, "the project's shimpz/ package ran: {stderr}");
+    assert!(!bytecode, "the bridge wrote bytecode into the project");
     // The trusted bridge answered with a valid catalog, so staging reached its prepared-pack requirement.
     assert!(stderr.contains("no language pack is prepared"), "{stderr}");
 }
