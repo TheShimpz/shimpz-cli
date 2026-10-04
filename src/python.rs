@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -176,18 +176,31 @@ fn bridge<const SIZE: usize>(
         .stdout(Stdio::piped())
         // A secret-bearing bridge's stderr is drained and counted, never kept: any byte is a transport fault.
         .stderr(Stdio::piped());
+    exchange(command, input)
+}
+
+/// Run one bridge process. Input is written on its own thread while stdout and stderr drain, so a child that fills
+/// either output before it consumes a large invocation can never block both processes; the child is always reaped.
+fn exchange(mut command: Command, input: Option<BridgeInput>) -> Result<String, String> {
     if input.is_some() {
         command.stdin(Stdio::piped());
     } else {
         command.stdin(Stdio::null());
     }
     let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
-    if let (Some(source), Some(mut destination)) = (&input, child.stdin.take()) {
-        destination
-            .write_all(source.bytes)
-            .map_err(|_| "Action input cannot be sent")?;
-    }
-    finish(child, input.and_then(|input| input.withheld))
+    let destination = child.stdin.take();
+    let withheld = input.as_ref().and_then(|input| input.withheld);
+    std::thread::scope(|scope| {
+        // The writer owns the pipe, so its end closes stdin; a child that exits early ends the write with an error.
+        let writer = input.zip(destination).map(|(source, mut destination)| {
+            scope.spawn(move || destination.write_all(source.bytes))
+        });
+        let response = finish(child, withheld)?;
+        match writer.map(std::thread::ScopedJoinHandle::join) {
+            None | Some(Ok(Ok(()))) => Ok(response),
+            Some(_) => Err("Action input cannot be sent".into()),
+        }
+    })
 }
 
 /// Read one bounded response frame and the child's exit status; stderr is drained only when it was captured.
@@ -372,6 +385,60 @@ mod tests {
             bridge_failure(private_output, None, Some(PRIVATE_BRIDGE_FAILURE))
                 .contains("terminated by a signal")
         );
+    }
+
+    /// Run `script` as the bridge with `input`, failing instead of hanging if the exchange deadlocks.
+    #[cfg(unix)]
+    fn exchange_within_deadline(script: &'static str, input: Vec<u8>) -> Result<String, String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut command = std::process::Command::new("sh");
+            command
+                .args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let result = super::exchange(
+                command,
+                Some(super::BridgeInput {
+                    bytes: &input,
+                    withheld: None,
+                }),
+            );
+            let _ = sender.send(result);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the bridge exchange deadlocked")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drains_stderr_written_before_a_large_input_is_read() {
+        let result = exchange_within_deadline(
+            r#"head -c 131072 /dev/zero >&2; bytes=$(wc -c); printf '{"bytes":%s}' $bytes"#,
+            vec![b'x'; 256 * 1_024],
+        );
+
+        assert_eq!(result, Ok("{\"bytes\":262144}".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drains_stdout_written_before_a_large_input_is_read() {
+        let result = exchange_within_deadline(
+            r#"printf '{"pad":"'; head -c 131072 /dev/zero | tr '\0' a; printf '"}'; cat >/dev/null"#,
+            vec![b'x'; 256 * 1_024],
+        );
+
+        assert!(result.is_ok_and(|response| response.len() == 131_072 + 10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_response_from_a_child_that_left_its_input_unread() {
+        let result = exchange_within_deadline(r"exec 0<&-; printf '{}'", vec![b'x'; 256 * 1_024]);
+
+        assert_eq!(result, Err("Action input cannot be sent".to_owned()));
     }
 
     #[test]
