@@ -441,6 +441,17 @@ mod tests {
         assert_eq!(result, Err("Action input cannot be sent".to_owned()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn reports_the_failure_of_a_child_that_ended_before_reading_its_input() {
+        let result = exchange_within_deadline(
+            r"exec 0<&-; echo 'shimpz: dependency setup failed' >&2; exit 3",
+            vec![b'x'; 256 * 1_024],
+        );
+
+        assert_eq!(result, Err("dependency setup failed".to_owned()));
+    }
+
     #[test]
     fn preserves_non_secret_bridge_diagnostics() {
         assert_eq!(
