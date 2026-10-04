@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::{language_pack, toolchain};
 
 const PYTHON_VERSION: &str = "3.14";
-const SDK_REQUIREMENT: &str = "shimpz==0.5.0";
+const SDK_REQUIREMENT: &str = "shimpz==0.5.2";
 const PRIVATE_BRIDGE_FAILURE: &str = "the Action process ended without a response frame";
 /// The largest response frame Team admits from one Action process.
 const MAX_RESPONSE_BYTES: u64 = 512 * 1_024;
