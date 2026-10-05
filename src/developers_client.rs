@@ -106,113 +106,91 @@ fn valid_error_code(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use ureq::{Body, http::Response};
 
     use super::{error_message, read_json, valid_error_code};
 
-    const REQUEST_ID: &str = "0123456789abcdef0123456789abcdef";
+    const ID: &str = "0123456789abcdef0123456789abcdef";
 
-    fn response(content_type: &str, body: &serde_json::Value) -> Response<Body> {
+    fn response(content_type: &str, body: &Value) -> Response<Body> {
         Response::builder()
             .header("Content-Type", content_type)
             .body(Body::builder().data(body.to_string()))
             .unwrap()
     }
 
-    fn envelope(code: &str, message: &str, request_id: &str) -> serde_json::Value {
-        json!({"error": {"code": code, "message": message, "request_id": request_id}})
+    fn shown(content_type: &str, error: &Value, limit: u64) -> String {
+        error_message(
+            &mut response(content_type, &json!({"error": error})),
+            limit,
+            "fallback",
+        )
+    }
+
+    fn error(code: &str, message: &str, request_id: &str) -> Value {
+        json!({"code": code, "message": message, "request_id": request_id})
     }
 
     #[test]
     fn shows_only_the_message_of_a_valid_closed_envelope() {
-        let mut valid = response(
-            "application/json",
-            &envelope("step_up_required", "Sign in again", REQUEST_ID),
-        );
-        assert_eq!(error_message(&mut valid, 1024, "fallback"), "Sign in again");
-
-        let mut wrong_type = response(
-            "application/json; charset=utf-8",
-            &envelope("step_up_required", "Sign in again", REQUEST_ID),
-        );
-        assert_eq!(error_message(&mut wrong_type, 1024, "fallback"), "fallback");
-
-        let mut extra_field = response(
-            "application/json",
-            &json!({"error": {"code": "a", "message": "m", "request_id": REQUEST_ID, "hint": "x"}}),
-        );
+        let valid = error("step_up_required", "Sign in again", ID);
+        assert_eq!(shown("application/json", &valid, 1024), "Sign in again");
         assert_eq!(
-            error_message(&mut extra_field, 1024, "fallback"),
+            shown("application/json; charset=utf-8", &valid, 1024),
             "fallback"
         );
-
-        let mut oversized = response(
-            "application/json",
-            &envelope("step_up_required", "Sign in again", REQUEST_ID),
+        assert_eq!(shown("application/json", &valid, 16), "fallback");
+        let mut extra = valid.clone();
+        extra["hint"] = json!("x");
+        assert_eq!(shown("application/json", &extra, 1024), "fallback");
+        assert_eq!(
+            shown("application/json", &error("a", &"m".repeat(200), ID), 1024),
+            "m".repeat(200)
         );
-        assert_eq!(error_message(&mut oversized, 16, "fallback"), "fallback");
     }
 
     /// The installation client once admitted a 256-byte message with control characters and any request id up to
     /// 64 bytes; every Developers response now passes the producer's envelope rule.
     #[test]
     fn refuses_envelopes_the_installation_client_used_to_admit() {
+        let upper = ID.to_uppercase();
+        let long = "m".repeat(201);
         for (message, request_id) in [
-            ("escape\u{1b}[2J", REQUEST_ID),
-            ("bidi \u{202e}txt", REQUEST_ID),
-            (&"m".repeat(201) as &str, REQUEST_ID),
+            ("escape\u{1b}[2J", ID),
+            ("bidi \u{202e}txt", ID),
+            (long.as_str(), ID),
             ("Team or Assistant is not available", "request_1"),
-            (
-                "Team or Assistant is not available",
-                &REQUEST_ID.to_uppercase(),
-            ),
+            ("Team or Assistant is not available", upper.as_str()),
         ] {
-            let mut refused = response(
-                "application/json",
-                &envelope("installation_not_found", message, request_id),
-            );
+            let refused = error("installation_not_found", message, request_id);
             assert_eq!(
-                error_message(&mut refused, 64 * 1024, "fallback"),
+                shown("application/json", &refused, 65_536),
                 "fallback",
-                "{message:?} {request_id:?}"
+                "{message:?}"
             );
         }
-        let mut longest = response(
-            "application/json",
-            &envelope("installation_not_found", &"m".repeat(200), REQUEST_ID),
-        );
-        assert_eq!(
-            error_message(&mut longest, 64 * 1024, "fallback"),
-            "m".repeat(200)
-        );
     }
 
     #[test]
     fn reads_only_bounded_exact_json() {
-        let mut valid = response("application/json", &json!({"value": 1}));
-        assert_eq!(
-            read_json::<serde_json::Value>(&mut valid, 1024, "invalid"),
-            Ok(json!({"value": 1}))
-        );
-        let mut html = response("text/html", &json!({"value": 1}));
-        assert_eq!(
-            read_json::<serde_json::Value>(&mut html, 1024, "invalid"),
-            Err("invalid".to_owned())
-        );
-        let mut oversized = response("application/json", &json!({"value": "x".repeat(64)}));
-        assert_eq!(
-            read_json::<serde_json::Value>(&mut oversized, 16, "invalid"),
-            Err("invalid".to_owned())
-        );
+        let read = |content_type, limit| {
+            read_json::<Value>(
+                &mut response(content_type, &json!({"value": "x"})),
+                limit,
+                "invalid",
+            )
+        };
+        assert_eq!(read("application/json", 1024), Ok(json!({"value": "x"})));
+        assert_eq!(read("text/html", 1024), Err("invalid".to_owned()));
+        assert_eq!(read("application/json", 8), Err("invalid".to_owned()));
     }
 
     #[test]
     fn admits_only_closed_error_codes() {
-        assert!(valid_error_code("step_up_required"));
-        assert!(valid_error_code("oauth2_denied"));
-        assert!(!valid_error_code("Step Up"));
-        assert!(!valid_error_code(""));
-        assert!(!valid_error_code(&"a".repeat(65)));
+        assert!(valid_error_code("step_up_required") && valid_error_code("oauth2_denied"));
+        for refused in ["Step Up", "", &"a".repeat(65)] {
+            assert!(!valid_error_code(refused), "{refused}");
+        }
     }
 }
