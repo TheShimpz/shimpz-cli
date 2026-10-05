@@ -179,16 +179,69 @@ Follow the contract.
         );
     }
 
+    fn response(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .header("Content-Type", content_type)
+            .body(Body::builder().data(body))
+            .unwrap()
+    }
+
     #[test]
-    fn downloads_a_bounded_markdown_guide_without_redirects() {
-        let valid = serve("200 OK", "text/markdown; charset=utf-8", GUIDE);
-        assert_eq!(fetch_guide(&valid).unwrap(), GUIDE);
+    fn reads_only_a_bounded_markdown_guide() {
+        let mut valid = response(200, "text/markdown; charset=utf-8", GUIDE);
+        assert_eq!(read_guide(&mut valid).unwrap(), GUIDE);
+        for mut refused in [
+            response(200, "text/html", GUIDE),
+            response(302, "text/markdown", GUIDE),
+            response(404, "text/markdown", GUIDE),
+            response(
+                200,
+                "text/markdown",
+                format!(
+                    "{GUIDE}{}",
+                    "x".repeat(usize::try_from(MAX_GUIDE_BYTES).unwrap())
+                ),
+            ),
+        ] {
+            assert_eq!(read_guide(&mut refused).unwrap_err(), invalid_guide());
+        }
+    }
 
-        let html = serve("200 OK", "text/html", GUIDE);
-        assert_eq!(fetch_guide(&html).unwrap_err(), invalid_guide());
+    /// A redirect is refused, never followed: the redirect target is never contacted. Only that is asserted about the
+    /// exchange, because a blocking socket read with a timeout is not restarted after an interruption of the
+    /// process (a stop and continue, for example), so its exact failure message is not deterministic.
+    #[test]
+    fn never_follows_a_redirect() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let location = format!("http://{}/assistant.md", target.local_addr().unwrap());
+        let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = redirect.local_addr().unwrap();
+        thread::spawn(move || {
+            use std::io::{Read, Write};
 
-        let redirected = serve("302 Found", "text/markdown", GUIDE);
-        assert_eq!(fetch_guide(&redirected).unwrap_err(), invalid_guide());
+            let (mut stream, _) = redirect.accept().unwrap();
+            // Read the request head before answering, so closing never resets a request with unread bytes.
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Type: text/markdown\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        });
+
+        assert!(fetch_guide(&format!("http://{address}/assistant.md")).is_err());
+        target.set_nonblocking(true).unwrap();
+        assert_eq!(
+            target.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -238,32 +291,5 @@ Follow the contract.
                 std::ffi::OsStr::new(GUIDE),
             ]
         );
-    }
-
-    fn serve(status: &'static str, content_type: &'static str, body: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        thread::spawn(move || {
-            use std::io::{Read, Write};
-
-            let (mut stream, _) = listener.accept().unwrap();
-            // Read the whole request head before answering: under load it can arrive in several reads, and closing
-            // the connection with request bytes unread resets it before the client sees the response.
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                match stream.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => request.extend_from_slice(&chunk[..read]),
-                }
-            }
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        });
-        format!("http://{address}")
     }
 }
