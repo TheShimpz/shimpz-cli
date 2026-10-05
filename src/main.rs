@@ -21,6 +21,7 @@ mod snapshot_lock;
 mod source_package;
 mod space;
 mod stage;
+mod team_id;
 mod toolchain;
 mod translation;
 mod unstage;

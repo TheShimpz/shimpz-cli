@@ -3,9 +3,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::digest;
 use crate::help::Topic;
 use crate::space::release::{valid_developer_release_ref, valid_published_release_ref};
+use crate::{digest, team_id};
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
@@ -538,7 +538,7 @@ fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
     }
     let team = match &arguments[1..] {
         [] => None,
-        [option, value] if option == "--team" && valid_team_id(value) => Some(value.clone()),
+        [option, value] if option == "--team" && team_id::valid(value) => Some(value.clone()),
         [option, _] if option == "--team" => return Err("Team id is invalid".into()),
         [option] if option == "--team" => return Err("--team requires a value".into()),
         _ => return Err("assistant install accepts only --team <team-id>".into()),
@@ -586,14 +586,6 @@ fn valid_assistant_name(value: &str) -> bool {
             value,
             "postgres" | "assistant-egress" | "shimpz-assistant-egress"
         )
-}
-
-fn valid_team_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 40
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 #[cfg(test)]

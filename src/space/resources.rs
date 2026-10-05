@@ -6,6 +6,7 @@ use super::docker::Engine;
 use super::graph::{StorageProfile, VOLUME_NAMES};
 use super::paths::Paths;
 use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
+use crate::team_id;
 
 const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
@@ -463,7 +464,7 @@ fn validate_dynamic_containers(
         match fields[4] {
             "assistant"
                 if fields[0].starts_with("/shimpz-local-")
-                    && valid_team(fields[5])
+                    && team_id::valid(fields[5])
                     && valid_assistant(fields[6]) => {}
             "assistant-egress" if fields[0] == "/shimpz-assistant-egress" => {}
             "assistant-release" if fields[0] == "/shimpz-assistant-release" => {}
@@ -498,7 +499,7 @@ fn validate_dynamic_networks(
             || fields[2] != PROFILE
             || fields[3] != space_id
             || fields[4] != "team"
-            || !valid_team(fields[5])
+            || !team_id::valid(fields[5])
         {
             return Err("a managed network has invalid ownership labels".into());
         }
@@ -527,14 +528,6 @@ fn valid_space_id(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
-}
-
-fn valid_team(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 40
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn valid_assistant(value: &str) -> bool {
@@ -691,9 +684,7 @@ mod tests {
     #[test]
     fn validates_closed_dynamic_identifiers() {
         assert!(valid_space_id("space-0123456789abcdef01234567"));
-        assert!(valid_team("team_1"));
         assert!(valid_assistant("dns-manager"));
-        assert!(!valid_team("Team"));
         assert!(!valid_assistant("DnsManager"));
         assert!(!valid_assistant("dns--manager"));
     }

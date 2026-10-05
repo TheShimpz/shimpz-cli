@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::{auth, digest};
+use crate::{auth, digest, team_id};
 
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
@@ -196,7 +196,7 @@ struct Team {
 
 impl Team {
     fn valid(&self) -> bool {
-        valid_team_id(&self.id)
+        team_id::valid(&self.id)
             && !self.name.is_empty()
             // The assistant-install schema admits 1 to 80 code points without C0 controls or DEL; anything else it
             // admits is escaped when rendered, never allowed to invalidate the whole Team list.
@@ -275,14 +275,6 @@ impl ErrorBody {
             && !self.request_id.is_empty()
             && self.request_id.len() <= 64
     }
-}
-
-fn valid_team_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 40
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn valid_assistant_id(value: &str) -> bool {
