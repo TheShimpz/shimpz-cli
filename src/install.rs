@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
-use zeroize::Zeroizing;
 
-use crate::{auth, digest, team_id};
+use crate::{auth, developers_client, digest, team_id};
 
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
@@ -72,18 +71,13 @@ struct Api {
 
 impl Api {
     fn new() -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: config.into(),
+            agent: developers_client::agent(REQUEST_TIMEOUT),
         }
     }
 
     fn teams(&self, credentials: &crate::credentials::Credentials) -> Result<TeamList, String> {
-        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let authorization = developers_client::bearer(credentials.access_token());
         let mut response = self
             .agent
             .get(TEAMS_URL)
@@ -103,7 +97,7 @@ impl Api {
         team_id: &str,
         source_digest: &str,
     ) -> Result<Installed, String> {
-        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let authorization = developers_client::bearer(credentials.access_token());
         let mut response = self
             .agent
             .post(INSTALLATIONS_URL)
@@ -127,39 +121,15 @@ impl Api {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(response: &mut Response<Body>) -> Result<T, String> {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return Err("Developers returned an invalid installation response".into());
-    }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json()
-        .map_err(|_| "Developers returned an invalid installation response".into())
+    developers_client::read_json(
+        response,
+        MAX_RESPONSE_BYTES,
+        "Developers returned an invalid installation response",
+    )
 }
 
 fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return fallback.into();
-    }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json::<ErrorEnvelope>()
-        .ok()
-        .filter(|envelope| envelope.error.valid())
-        .map_or_else(|| fallback.into(), |envelope| envelope.error.message)
+    developers_client::error_message(response, MAX_RESPONSE_BYTES, fallback)
 }
 
 #[derive(Serialize)]
@@ -245,35 +215,6 @@ impl Installed {
             self.oci_digest,
             self.binding_digest
         ))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ErrorBody {
-    code: String,
-    message: String,
-    request_id: String,
-}
-
-impl ErrorBody {
-    fn valid(&self) -> bool {
-        !self.code.is_empty()
-            && self.code.len() <= 64
-            && self
-                .code
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-            && !self.message.is_empty()
-            && self.message.len() <= 256
-            && !self.request_id.is_empty()
-            && self.request_id.len() <= 64
     }
 }
 
