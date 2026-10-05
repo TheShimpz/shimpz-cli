@@ -52,9 +52,11 @@ answers with the canonical request fingerprint and option values.
 `shimpz assistant stage` builds an unpublished Local snapshot without any Shimpz Account, sign-in, or service, and
 embeds the language pack of its messages. When an OpenAI API key is saved in the owner-only file
 `~/.config/shimpz/openai-api-key` (`$XDG_CONFIG_HOME/shimpz/openai-api-key`, or `%APPDATA%\shimpz\openai-api-key` on
-Windows, where the CLI does not check file permissions), the CLI sends each new or changed English message, and
-nothing else, to OpenAI (`gpt-6-luna`) for every interface language, admits each answer with the protocol's
-reference rules, and remembers it per message in its cache so it is never translated again. Without that file the
+Windows, where the CLI does not check file permissions), the CLI sends each English message without a valid
+remembered translation, and nothing else, to OpenAI (`gpt-6-luna`) for every interface language. It admits each
+answer with the protocol's reference rules and, once the pinned SDK's validator admits the complete pack, remembers
+it per message in its cache, so an unchanged message is not translated again while that entry stays valid. Without
+that file the
 pack shows the English text in every interface language and staging says so. A key file that is unsafe, unreadable,
 or malformed, a provider failure, or a message refused three times fails staging instead of silently falling back.
 Neither pack claims a Developers translation: publication builds and translates its own pack in Developers.

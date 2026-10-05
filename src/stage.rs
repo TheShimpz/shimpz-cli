@@ -133,12 +133,12 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     validate_dependency_sources(&package.pyproject)?;
     output::progress("Extracting the static message catalog...");
     let catalog = Catalog::from_document(&python::catalog(project)?)?;
-    let (pack, language) = translation::pack(&catalog)?;
+    let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
+    // The SDK reference validator admits the exact pack before it is staged or any translation is remembered.
+    let (pack, language) = translation::pack(&catalog, &sdk_verify)?;
     if language == translation::Language::SourceText {
         output::warning(&translation::key_hint());
     }
-    let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
-    sdk_verify(pack.bytes())?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
     prepare_context(context.path(), &package, &pack)?;
     output::progress("Resolving hashed Python dependencies...");

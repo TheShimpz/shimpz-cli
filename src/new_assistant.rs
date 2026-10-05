@@ -176,8 +176,8 @@ shimpz assistant stage
 ```
 
 `stage` builds the Local snapshot without any Shimpz sign-in. With an OpenAI API key saved in
-`~/.config/shimpz/openai-api-key` (readable only by you), it translates each new or changed message into every
-interface language once; without that file, every language shows your English text.
+`~/.config/shimpz/openai-api-key` (readable only by you), it translates new or changed messages into every
+interface language and remembers them; without that file, every language shows your English text.
 "
     )
 }

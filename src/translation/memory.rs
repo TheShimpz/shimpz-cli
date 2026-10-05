@@ -4,9 +4,12 @@
 //! interrupted, or now too-long entry is simply translated again and replaced.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::language_pack::LOCALES;
 
@@ -22,9 +25,9 @@ impl Memory {
         Self { directory }
     }
 
-    /// The remembered texts of one message, or `None` when absent or unreadable.
+    /// The remembered texts of one message, or `None` when absent, unreadable, or not a regular file.
     pub(crate) fn get(&self, id: &str) -> Option<BTreeMap<String, String>> {
-        let file = File::open(self.directory.join(format!("{id}.json"))).ok()?;
+        let file = open_regular(&self.directory.join(format!("{id}.json")))?;
         let mut bytes = Vec::new();
         file.take(MAX_ENTRY_BYTES + 1)
             .read_to_end(&mut bytes)
@@ -52,6 +55,19 @@ impl Memory {
             .and_then(|()| file.commit())
             .map_err(|_| failure())
     }
+}
+
+/// Open a regular file without following a final symbolic link or blocking on a FIFO.
+fn open_regular(path: &Path) -> Option<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path).ok()?;
+    file.metadata()
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .map(|_| file)
 }
 
 #[cfg(test)]
@@ -101,5 +117,42 @@ mod tests {
             memory.put("a", &texts("x")).unwrap_err(),
             "the translation memory cannot be stored"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn treats_special_or_linked_entries_as_absent_without_blocking() {
+        let directory = tempfile::tempdir().unwrap();
+        let memory = Memory::new(directory.path().to_owned());
+        let fifo = directory.path().join("fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RWXU,
+            0,
+        )
+        .unwrap();
+        let fifo_entry = directory.path().join(format!("{}.json", "f".repeat(64)));
+        fs::rename(&fifo, &fifo_entry).unwrap();
+        assert!(memory.get(&"f".repeat(64)).is_none());
+
+        let real = directory.path().join("real");
+        fs::write(&real, serde_json::to_vec(&texts("x")).unwrap()).unwrap();
+        std::os::unix::fs::symlink(
+            &real,
+            directory.path().join(format!("{}.json", "a".repeat(64))),
+        )
+        .unwrap();
+        assert!(memory.get(&"a".repeat(64)).is_none());
+        std::os::unix::fs::symlink(
+            &fifo_entry,
+            directory.path().join(format!("{}.json", "b".repeat(64))),
+        )
+        .unwrap();
+        assert!(memory.get(&"b".repeat(64)).is_none());
+
+        fs::create_dir(directory.path().join(format!("{}.json", "c".repeat(64)))).unwrap();
+        assert!(memory.get(&"c".repeat(64)).is_none());
     }
 }

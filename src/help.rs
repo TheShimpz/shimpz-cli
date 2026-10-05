@@ -232,8 +232,9 @@ Options:
 
 The command contacts no Shimpz service and needs no Shimpz Account or sign-in. With an OpenAI API key saved in
 the private file 'openai-api-key' of the CLI configuration directory (~/.config/shimpz, or %APPDATA%\\shimpz on
-Windows), each new or changed message is translated through OpenAI into every interface language once; without
-that file, every interface language shows the English text. Finish installation from authenticated Local Admin.
+Windows), new or changed messages are translated through OpenAI into every interface language and remembered;
+without that file, every interface language shows the English text. Finish installation from authenticated Local
+Admin.
 ";
 
 const ASSISTANT_UNSTAGE: &str = "\
