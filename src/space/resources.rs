@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use super::docker::Engine;
 use super::graph::{StorageProfile, VOLUME_NAMES};
 use super::paths::Paths;
+use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
 
 const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
@@ -371,9 +372,9 @@ fn validate_project_containers(engine: &Engine, identifiers: &[String]) -> Resul
         if fields.len() != 3 {
             return Err("a Compose container record is malformed".into());
         }
-        let repository = static_service(fields[0], fields[1])
+        let package = static_service(fields[0], fields[1])
             .ok_or_else(|| format!("unknown Compose container: {}", fields[0]))?;
-        if !valid_image(fields[2], repository) || !services.insert(fields[1].to_owned()) {
+        if !package.admits(fields[2]) || !services.insert(fields[1].to_owned()) {
             return Err(
                 "a Compose container has invalid image or duplicate service identity".into(),
             );
@@ -505,32 +506,18 @@ fn validate_dynamic_networks(
     Ok(())
 }
 
-fn static_service(name: &str, service: &str) -> Option<&'static str> {
+fn static_service(name: &str, service: &str) -> Option<Package> {
     match (name, service) {
-        ("/shimpz-admin", "admin") => Some("ghcr.io/theshimpz/shimpz-admin"),
-        ("/shimpz-team", "team") => Some("ghcr.io/theshimpz/shimpz-team-local"),
-        ("/shimpz-brain", "brain") => Some("ghcr.io/theshimpz/shimpz-brain"),
+        ("/shimpz-admin", "admin") => Some(ADMIN),
+        ("/shimpz-team", "team") => Some(TEAM),
+        ("/shimpz-brain", "brain") => Some(BRAIN),
         ("/shimpz-brain-egress", "shimpz-brain-egress")
         | ("/shimpz-assistant-egress", "shimpz-assistant-egress")
         | ("/shimpz-assistant-release", "shimpz-assistant-release")
         | ("/shimpz-account-egress", "shimpz-account-egress")
-        | ("/shimpz-account-egress-init", "shimpz-account-egress-init") => {
-            Some("ghcr.io/theshimpz/shimpz-egress")
-        }
+        | ("/shimpz-account-egress-init", "shimpz-account-egress-init") => Some(EGRESS),
         _ => None,
     }
-}
-
-fn valid_image(value: &str, repository: &str) -> bool {
-    value
-        .strip_prefix(repository)
-        .and_then(|suffix| suffix.strip_prefix("@sha256:"))
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
 }
 
 fn valid_space_id(value: &str) -> bool {
@@ -713,10 +700,14 @@ mod tests {
 
     #[test]
     fn static_services_bind_exact_names_to_responsibility_images() {
-        assert_eq!(
-            static_service("/shimpz-team", "team"),
-            Some("ghcr.io/theshimpz/shimpz-team-local")
-        );
+        assert_eq!(static_service("/shimpz-team", "team"), Some(TEAM));
+        let digest = "a".repeat(64);
+        let team = static_service("/shimpz-team", "team").unwrap();
+        assert!(team.admits(&format!(
+            "ghcr.io/theshimpz/shimpz-team-local@sha256:{digest}"
+        )));
+        assert!(team.admits(&format!("localhost/shimpz-team-local@sha256:{digest}")));
+        assert!(!team.admits(&format!("localhost/shimpz-admin@sha256:{digest}")));
         assert!(static_service("/shimpz-team", "admin").is_none());
         assert!(static_service("/foreign", "team").is_none());
     }

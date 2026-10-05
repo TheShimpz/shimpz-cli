@@ -10,6 +10,7 @@ use std::path::Path;
 use super::docker::ResolvedRelease;
 use super::host::HostProfile;
 use super::paths::{MARKER, Paths};
+use super::release;
 
 const STOPPED: &str = "shimpz-space-stopped-v1\n";
 const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
@@ -21,6 +22,15 @@ pub(crate) struct Installed {
     pub(crate) admin_image: String,
     pub(crate) ordinal: u64,
     pub(crate) port: u16,
+    /// The exact published release a developer release was assembled from; `None` for a published release.
+    pub(crate) baseline: Option<String>,
+}
+
+impl Installed {
+    /// The published release this Space follows: itself, or the baseline of an installed developer release.
+    pub(crate) fn published_ref(&self) -> &str {
+        self.baseline.as_deref().unwrap_or(&self.release_ref)
+    }
 }
 
 pub(crate) struct Lock {
@@ -152,6 +162,9 @@ fn parse_installed(
         admin_image: values["SHIMPZ_ADMIN_IMAGE"].into(),
         ordinal,
         port,
+        baseline: values
+            .get("SHIMPZ_LOCAL_RELEASE_BASELINE")
+            .map(|value| (*value).to_owned()),
     })
 }
 
@@ -199,10 +212,14 @@ fn validate_environment(
     ];
     let expected_storage = profile.storage().name();
     let linux = profile == HostProfile::Linux;
-    let expected = required.len() + usize::from(linux);
+    let developer = values
+        .get("SHIMPZ_LOCAL_RELEASE_IMAGE")
+        .is_some_and(|value| release::valid_developer_release_ref(value));
+    let expected = required.len() + usize::from(linux) + usize::from(developer);
     if values.len() != expected
         || required.iter().any(|key| !values.contains_key(key))
         || (linux && !values.contains_key("SHIMPZ_SECURE_VOLUME_ROOT"))
+        || (developer && !values.contains_key("SHIMPZ_LOCAL_RELEASE_BASELINE"))
     {
         return Err("the installed Local environment has unknown or missing fields".into());
     }
@@ -211,8 +228,14 @@ fn validate_environment(
         return Err("the installed Local Space identity is invalid".into());
     }
     let release_ref = values["SHIMPZ_LOCAL_RELEASE_IMAGE"];
-    if !super::release::valid_release_ref(release_ref) {
+    if !release::valid_release_ref(release_ref) {
         return Err("the installed Local release reference is invalid".into());
+    }
+    if developer
+        && (profile == HostProfile::MacOs
+            || !release::valid_published_release_ref(values["SHIMPZ_LOCAL_RELEASE_BASELINE"]))
+    {
+        return Err("the installed developer release baseline is invalid".into());
     }
     let port = values["SHIMPZ_PORT"]
         .parse::<u16>()
@@ -231,13 +254,19 @@ fn validate_environment(
     {
         return Err("the installed Local host profile is invalid".into());
     }
-    for (key, repository) in [
-        ("SHIMPZ_ADMIN_IMAGE", "ghcr.io/theshimpz/shimpz-admin"),
-        ("SHIMPZ_TEAM_IMAGE", "ghcr.io/theshimpz/shimpz-team-local"),
-        ("SHIMPZ_BRAIN_IMAGE", "ghcr.io/theshimpz/shimpz-brain"),
-        ("SHIMPZ_EGRESS_IMAGE", "ghcr.io/theshimpz/shimpz-egress"),
+    for (key, package) in [
+        ("SHIMPZ_ADMIN_IMAGE", release::ADMIN),
+        ("SHIMPZ_TEAM_IMAGE", release::TEAM),
+        ("SHIMPZ_BRAIN_IMAGE", release::BRAIN),
+        ("SHIMPZ_EGRESS_IMAGE", release::EGRESS),
     ] {
-        if !valid_digest_ref(values[key], repository) {
+        // Only a developer release may run a member from this host's image store.
+        let admitted = if developer {
+            package.admits(values[key])
+        } else {
+            package.published(values[key])
+        };
+        if !admitted {
             return Err("an installed Local component image is invalid".into());
         }
     }
@@ -312,6 +341,10 @@ pub(crate) fn write_environment(
         )
         .expect("String writes are infallible");
     }
+    if let Some(baseline) = &release.metadata.baseline {
+        writeln!(document, "SHIMPZ_LOCAL_RELEASE_BASELINE={baseline}")
+            .expect("String writes are infallible");
+    }
     write_private(&paths.environment, &document)
 }
 
@@ -376,7 +409,7 @@ pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result
         .strip_prefix("release=")
         .and_then(|value| value.strip_suffix('\n'))
         .filter(|value| !value.contains('\n'))
-        .filter(|value| super::release::valid_release_ref(value))
+        .filter(|value| release::valid_release_ref(value))
         .ok_or_else(|| "the failed Local release record is malformed".to_owned())?;
     Ok(recorded == release_ref)
 }
@@ -493,18 +526,6 @@ fn valid_space_id(value: &str) -> bool {
     })
 }
 
-fn valid_digest_ref(value: &str, repository: &str) -> bool {
-    value
-        .strip_prefix(repository)
-        .and_then(|suffix| suffix.strip_prefix("@sha256:"))
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-}
-
 fn valid_cpuset(value: &str) -> bool {
     if value == "0" {
         return true;
@@ -542,7 +563,87 @@ mod tests {
                 team: format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{HEX}"),
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
+                baseline: None,
             },
+        }
+    }
+
+    /// A developer release over `release()` that rebuilt Team.
+    fn developer_release() -> ResolvedRelease {
+        let published = release();
+        let mut metadata = published.metadata;
+        metadata.team = format!("localhost/shimpz-team-local@sha256:{}", "c".repeat(64));
+        metadata.baseline = Some(published.reference);
+        ResolvedRelease {
+            reference: format!(
+                "{}@sha256:{}",
+                crate::space::release::DEVELOPER_RELEASE_REPOSITORY,
+                "d".repeat(64)
+            ),
+            metadata,
+        }
+    }
+
+    fn write_linux(paths: &Paths, release: &ResolvedRelease) {
+        write_environment(
+            paths,
+            &Environment {
+                release,
+                profile: HostProfile::Linux,
+                space_id: "space-0123456789abcdef01234567",
+                port: 7777,
+                docker_gid: 998,
+                docker_socket: Path::new("/var/run/docker.sock"),
+                cpuset: "0-3",
+                secure_root: &paths.pool_mount,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn records_a_developer_release_only_with_its_exact_published_baseline() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let developer = developer_release();
+        write_linux(&paths, &developer);
+        let installed = read_installed(&paths, HostProfile::Linux).unwrap();
+        assert_eq!(installed.release_ref, developer.reference);
+        assert_eq!(installed.baseline, developer.metadata.baseline);
+        assert_eq!(installed.published_ref(), release().reference);
+        assert!(read_installed(&paths, HostProfile::MacOs).is_err());
+        let valid = fs::read_to_string(&paths.environment).unwrap();
+        let baseline_line = format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", release().reference);
+        for invalid in [
+            valid.replace(&baseline_line, ""),
+            valid.replace(
+                &baseline_line,
+                &format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", developer.reference),
+            ),
+            format!("{valid}{baseline_line}"),
+        ] {
+            fs::write(&paths.environment, invalid).unwrap();
+            assert!(read_installed(&paths, HostProfile::Linux).is_err());
+        }
+
+        // A published release carries neither the baseline field nor a member from this host's image store.
+        write_linux(&paths, &release());
+        let published = fs::read_to_string(&paths.environment).unwrap();
+        assert!(!published.contains("SHIMPZ_LOCAL_RELEASE_BASELINE"));
+        assert_eq!(
+            read_installed(&paths, HostProfile::Linux).unwrap().baseline,
+            None
+        );
+        for invalid in [
+            format!("{published}{baseline_line}"),
+            published.replace(
+                "ghcr.io/theshimpz/shimpz-team-local@",
+                "localhost/shimpz-team-local@",
+            ),
+        ] {
+            fs::write(&paths.environment, invalid).unwrap();
+            assert!(read_installed(&paths, HostProfile::Linux).is_err());
         }
     }
 
@@ -559,6 +660,7 @@ mod tests {
                 admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
                 ordinal: 1,
                 port: 7777,
+                baseline: None,
             })),
             Ok(7777)
         );

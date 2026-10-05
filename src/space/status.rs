@@ -227,9 +227,9 @@ pub(crate) fn render(
                 "\nConfiguration: will reconcile on start".into()
             };
             return Ok(format!(
-                "Shimpz Space is stopped.\nServices: {SERVICE_COUNT} stopped\n{}\nRelease: ordinal {}{configuration}\nNext: shimpz start",
+                "Shimpz Space is stopped.\nServices: {SERVICE_COUNT} stopped\n{}\nRelease: {}{configuration}\nNext: shimpz start",
                 assistant_summary(stopped_assistants, assistants.len(), "stopped"),
-                installed.ordinal,
+                release_label(installed),
             ));
         }
         let next = if stop_requires_reconciliation(observations, assistants) {
@@ -238,9 +238,9 @@ pub(crate) fn render(
             "shimpz stop"
         };
         return Ok(format!(
-            "Shimpz Space needs attention.\nServices: {stopped_services} of {SERVICE_COUNT} stopped\n{}\nRelease: ordinal {}\nProblem: the requested stop is incomplete.\nNext: {next}",
+            "Shimpz Space needs attention.\nServices: {stopped_services} of {SERVICE_COUNT} stopped\n{}\nRelease: {}\nProblem: the requested stop is incomplete.\nNext: {next}",
             assistant_summary(stopped_assistants, assistants.len(), "stopped"),
-            installed.ordinal,
+            release_label(installed),
         ));
     }
 
@@ -272,8 +272,9 @@ pub(crate) fn render(
     let assistant_summary = assistant_summary(running_assistants, assistants.len(), "running");
     if problems.is_empty() {
         return Ok(format!(
-            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:{}\nServices: {healthy} healthy\n{assistant_summary}\nRelease: ordinal {}",
-            installed.port, installed.ordinal
+            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:{}\nServices: {healthy} healthy\n{assistant_summary}\nRelease: {}",
+            installed.port,
+            release_label(installed)
         ));
     }
     let admin = if matches!(observations[0].runtime, Runtime::Running(Health::Healthy)) {
@@ -282,8 +283,8 @@ pub(crate) fn render(
         "unavailable".into()
     };
     Ok(format!(
-        "Shimpz Space needs attention.\nAdmin: {admin}\nServices: {healthy} of {SERVICE_COUNT} healthy\n{assistant_summary}\nRelease: ordinal {}\nProblems:\n  - {}\nNext: shimpz start",
-        installed.ordinal,
+        "Shimpz Space needs attention.\nAdmin: {admin}\nServices: {healthy} of {SERVICE_COUNT} healthy\n{assistant_summary}\nRelease: {}\nProblems:\n  - {}\nNext: shimpz start",
+        release_label(installed),
         problems.join("\n  - ")
     ))
 }
@@ -385,6 +386,15 @@ fn init_problem(observation: Observation) -> Option<String> {
     })
 }
 
+/// A developer release names itself, so it is never mistaken for the published release it was built on.
+fn release_label(installed: &Installed) -> String {
+    if installed.baseline.is_some() {
+        format!("developer build on ordinal {}", installed.ordinal)
+    } else {
+        format!("ordinal {}", installed.ordinal)
+    }
+}
+
 fn malformed(component: Component) -> String {
     format!(
         "Docker returned malformed status for {}",
@@ -406,7 +416,18 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "b".repeat(64)),
             ordinal: 42,
             port: 7777,
+            baseline: None,
         }
+    }
+
+    #[test]
+    fn a_developer_release_is_labeled_as_such() {
+        assert_eq!(release_label(&installed()), "ordinal 42");
+        let developer = Installed {
+            baseline: Some(installed().release_ref),
+            ..installed()
+        };
+        assert_eq!(release_label(&developer), "developer build on ordinal 42");
     }
 
     fn healthy_observations() -> Vec<Observation> {

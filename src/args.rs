@@ -218,6 +218,15 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
             return Ok(Invocation::Help(Topic::Start));
         }
         [option] if option == "--scheduled" => (true, None, false),
+        // The owner's explicit apply of one developer release from this host's image store (ADR-0099).
+        [option, release]
+            if option == "--local-release" && valid_developer_release_ref(release) =>
+        {
+            (false, Some(release.clone()), false)
+        }
+        [option, _] if option == "--local-release" => {
+            return Err("the developer release reference is invalid".into());
+        }
         [release_option, release, candidate_option]
             if release_option == "--release"
                 && candidate_option == "--candidate"
@@ -270,6 +279,16 @@ fn parse_no_options(
 
 fn valid_release_ref(value: &str) -> bool {
     const PREFIX: &str = "ghcr.io/theshimpz/shimpz-local-release@sha256:";
+    value.strip_prefix(PREFIX).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_developer_release_ref(value: &str) -> bool {
+    const PREFIX: &str = "localhost/shimpz-local-release@sha256:";
     value.strip_prefix(PREFIX).is_some_and(|digest| {
         digest.len() == 64
             && digest
@@ -1118,8 +1137,37 @@ mod tests {
             parse(strings(&["install", "--candidate"])),
             Err("install accepts no public options".into())
         );
+        let developer = format!("localhost/shimpz-local-release@sha256:{}", "b".repeat(64));
+        assert_eq!(
+            parse(strings(&["start", "--local-release", &developer])),
+            Ok(Invocation::Execute(Command::Start(SpaceStart {
+                scheduled: false,
+                release: Some(developer.clone()),
+                candidate: false,
+            })))
+        );
+        let published = format!(
+            "ghcr.io/theshimpz/shimpz-local-release@sha256:{}",
+            "a".repeat(64)
+        );
+        for invalid in [
+            &["start", "--local-release", &published][..],
+            &["start", "--release", &developer, "--candidate"][..],
+            &["install", "--release", &developer][..],
+            &["start", "--local-release", &developer, "--candidate"][..],
+            &["start", "--scheduled", "--local-release", &developer][..],
+            &["start", "--local-release"][..],
+        ] {
+            assert!(parse(strings(invalid)).is_err(), "accepted: {invalid:?}");
+        }
         for topic in Topic::ALL {
-            for hidden in ["--scheduled", "--candidate", "--print-graph", "--release"] {
+            for hidden in [
+                "--scheduled",
+                "--candidate",
+                "--print-graph",
+                "--release",
+                "--local-release",
+            ] {
                 assert!(!topic.text().contains(hidden));
             }
         }

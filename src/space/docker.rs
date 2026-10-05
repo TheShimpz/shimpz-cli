@@ -15,7 +15,9 @@ use super::host::HostProfile;
 use super::paths::Paths;
 #[cfg(unix)]
 use super::poll::{self, TeamActivity};
-use super::release::{self, RELEASE_REPOSITORY, Release};
+use super::release::{
+    self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, Package, RELEASE_REPOSITORY, Release,
+};
 
 const RELEASE_CHANNEL: &str = "stable";
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
@@ -102,7 +104,12 @@ impl Engine {
             Some(_) => return Err("the internal Local release reference is invalid".into()),
             None => format!("{RELEASE_REPOSITORY}:{RELEASE_CHANNEL}"),
         };
-        self.pull(&selector)?;
+        // A developer release set exists only in this host's image store and is never pulled.
+        if release::valid_developer_release_ref(&selector) {
+            self.require_present(&selector, DEVELOPER_RELEASE_REPOSITORY)?;
+        } else {
+            self.pull(&selector)?;
+        }
         let reference = if exact.is_some() {
             selector
         } else {
@@ -132,9 +139,10 @@ impl Engine {
             .map_err(|error| format!("could not read Local release metadata: {error}"))?;
         fs::remove_file(metadata_path)
             .map_err(|error| format!("could not remove temporary release metadata: {error}"))?;
+        let metadata = release::parse(&reference, &document)?;
         Ok(ResolvedRelease {
             reference,
-            metadata: release::parse(&document)?,
+            metadata,
         })
     }
 
@@ -144,7 +152,7 @@ impl Engine {
         profile: HostProfile,
         target: &Path,
     ) -> Result<(), String> {
-        if !release::valid_release_ref(release_ref) {
+        if !release::valid_published_release_ref(release_ref) {
             return Err("the Local release reference is invalid".into());
         }
         let member = match profile {
@@ -170,10 +178,17 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) fn pull_exact(&self, reference: &str, repository: &str) -> Result<(), String> {
-        if !valid_image_ref(reference, repository) {
+    /// Make one release member available by its exact digest: a published member is pulled, a developer member
+    /// must already be in this host's image store and is never pulled.
+    pub(crate) fn pull_exact(&self, reference: &str, package: Package) -> Result<(), String> {
+        if package.developer(reference) {
+            let repository = reference.split_once('@').map_or("", |(name, _)| name);
+            return self.require_present(reference, repository);
+        }
+        if !package.published(reference) {
             return Err("a release component image reference is invalid".into());
         }
+        let repository = reference.split_once('@').map_or("", |(name, _)| name);
         self.pull(reference)?;
         let actual = self.unique_repo_digest(reference, repository)?;
         if actual == reference {
@@ -181,6 +196,29 @@ impl Engine {
         } else {
             Err("Docker did not preserve the pinned component digest".into())
         }
+    }
+
+    /// Admit a `localhost/` image only when this daemon's store already holds exactly that manifest digest for
+    /// this Space's platform. Absence fails closed; nothing is pulled.
+    fn require_present(&self, reference: &str, repository: &str) -> Result<(), String> {
+        let missing = || {
+            format!(
+                "the developer release image {reference} is not in the local Docker image store; rebuild it with .scripts/local-release/developer-release.sh, or return to the published release with shimpz update"
+            )
+        };
+        let document = self
+            .run_output([
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}|{{.Os}}/{{.Architecture}}",
+                reference,
+            ])
+            .map_err(|_| missing())?;
+        if !developer_image_present(&document, reference, repository, self.platform) {
+            return Err(missing());
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -210,7 +248,7 @@ impl Engine {
     }
 
     pub(crate) fn admin_authentication_state(&self, admin_image: &str) -> Result<String, String> {
-        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") {
+        if !ADMIN.admits(admin_image) {
             return Err("the selected Admin image reference is invalid".into());
         }
         self.validate_admin_authentication_volume()?;
@@ -388,8 +426,7 @@ impl Engine {
         admin_image: &str,
         document: &[u8],
     ) -> Result<(), String> {
-        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") || document.len() > 1_024
-        {
+        if !ADMIN.admits(admin_image) || document.len() > 1_024 {
             return Err("the Local release status projection is invalid".into());
         }
         let volume = "shimpz-space_release_status";
@@ -434,10 +471,7 @@ impl Engine {
         admin_image: &str,
         document: &[u8],
     ) -> Result<(), String> {
-        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin")
-            || document.is_empty()
-            || document.len() > 1_024
-        {
+        if !ADMIN.admits(admin_image) || document.is_empty() || document.len() > 1_024 {
             return Err("the Local reset capability projection is invalid".into());
         }
         self.validate_reset_capability_volume()?;
@@ -476,7 +510,7 @@ impl Engine {
     }
 
     pub(crate) fn clear_reset_capability(&self, admin_image: &str) -> Result<(), String> {
-        if !valid_image_ref(admin_image, "ghcr.io/theshimpz/shimpz-admin") {
+        if !ADMIN.admits(admin_image) {
             return Err("the Local reset capability cleanup is invalid".into());
         }
         self.validate_reset_capability_volume()?;
@@ -581,7 +615,7 @@ impl Engine {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        // The image was resolved just before; a create must never fetch it.
+        // The image was resolved or admitted just before; a create must never fetch it.
         let mut arguments = vec![
             OsString::from("create"),
             OsString::from("--pull"),
@@ -1131,6 +1165,24 @@ fn one_line(value: &str, label: &str) -> Result<String, String> {
     Ok(line.expect("checked").to_owned())
 }
 
+/// The inspected image holds exactly `reference` among its repository digests and runs on `platform`.
+fn developer_image_present(
+    document: &str,
+    reference: &str,
+    repository: &str,
+    platform: &str,
+) -> bool {
+    let Some((digests, image_platform)) = document.trim_end().rsplit_once('|') else {
+        return false;
+    };
+    let Ok(digests) = serde_json::from_str::<Vec<String>>(digests) else {
+        return false;
+    };
+    valid_image_ref(reference, repository)
+        && image_platform == platform
+        && digests.iter().any(|value| value == reference)
+}
+
 fn valid_image_ref(value: &str, repository: &str) -> bool {
     value
         .strip_prefix(repository)
@@ -1548,6 +1600,45 @@ mod tests {
         assert!(rendered.len() <= MAX_DOCKER_DIAGNOSTIC_BYTES);
         assert!(rendered.ends_with(TRUNCATED_DIAGNOSTIC));
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn a_developer_image_is_admitted_only_by_its_exact_local_digest_and_platform() {
+        let reference = format!("localhost/shimpz-admin@sha256:{DIGEST}");
+        let present = format!(
+            "[\"{reference}\",\"localhost/shimpz-admin@sha256:{}\"]|linux/amd64\n",
+            "c".repeat(64)
+        );
+        assert!(developer_image_present(
+            &present,
+            &reference,
+            "localhost/shimpz-admin",
+            "linux/amd64"
+        ));
+        for (document, platform) in [
+            (present.as_str(), "linux/arm64"),
+            ("[]|linux/amd64", "linux/amd64"),
+            ("null|linux/amd64", "linux/amd64"),
+            ("not json|linux/amd64", "linux/amd64"),
+            (
+                &format!("[\"{reference}x\"]|linux/amd64") as &str,
+                "linux/amd64",
+            ),
+            (&format!("[\"{reference}\"]") as &str, "linux/amd64"),
+        ] {
+            assert!(!developer_image_present(
+                document,
+                &reference,
+                "localhost/shimpz-admin",
+                platform
+            ));
+        }
+        assert!(!developer_image_present(
+            &format!("[\"{reference}\"]|linux/amd64"),
+            &reference,
+            "localhost/shimpz-brain",
+            "linux/amd64"
+        ));
     }
 
     #[test]

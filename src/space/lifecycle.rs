@@ -21,16 +21,13 @@ use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::paths::Paths;
 use super::poll;
+use super::release;
 use super::resources::{self, Inventory};
 use super::scheduler;
 use super::state::{self, Environment, Installed, Lock};
 use super::status as status_report;
 use super::storage::linux;
 
-const ADMIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-admin";
-const TEAM_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-team-local";
-const BRAIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-brain";
-const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
 // Admin bounds its authoritative Team reset call at 180 seconds; the client must outlast it.
 const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 const ADMIN_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -308,9 +305,7 @@ impl Context {
             }
             None
         };
-        let release = self
-            .engine
-            .resolve_release(exact_release, &self.paths.home)?;
+        let release = self.resolve(exact_release)?;
         validate_forward_release(&release, installed.as_ref())?;
         if exact_release.is_some() && !candidate {
             // The acquisition bootstrap runs its verified CLI from outside the Space; that CLI becomes the managed
@@ -336,6 +331,23 @@ impl Context {
         self.apply(&release, installed.as_ref(), false, false)
     }
 
+    /// Resolve the `stable` channel or one exact release. A developer release is admitted only from this host's
+    /// image store, only on the amd64 Linux profiles, and only bound to the exact published baseline it names.
+    fn resolve(&self, exact: Option<&str>) -> Result<ResolvedRelease, String> {
+        let release = self.engine.resolve_release(exact, &self.paths.home)?;
+        let Some(baseline) = &release.metadata.baseline else {
+            return Ok(release);
+        };
+        if self.profile == HostProfile::MacOs {
+            return Err("a developer release applies only to an amd64 Linux Space".into());
+        }
+        let published = self
+            .engine
+            .resolve_release(Some(baseline), &self.paths.home)?;
+        release::bind_developer(&release.metadata, &published.metadata)?;
+        Ok(release)
+    }
+
     fn validate_installation_storage(&self, installed: Installed) -> Result<Installed, String> {
         if self.profile == HostProfile::Linux
             && (!self.paths.security.exists() || linux::incomplete(&self.paths)?)
@@ -355,18 +367,21 @@ impl Context {
         if options.scheduled && stopped {
             return Ok(SCHEDULED_STOPPED.into());
         }
-        let mut release = self
-            .engine
-            .resolve_release(options.release.as_deref(), &self.paths.home)?;
+        let mut release = self.resolve(options.release.as_deref())?;
         validate_forward_release(&release, Some(&installed))?;
+        if keeps_developer_release(options.release.is_none(), &installed, &release) {
+            // `stable` still names the baseline of the installed developer release: keep and reconcile that
+            // release, before failed-release memory or a CLI handoff is considered (ADR-0099).
+            let developer = self.resolve(Some(&installed.release_ref))?;
+            validate_forward_release(&developer, Some(&installed))?;
+            return self.apply(&developer, Some(&installed), options.scheduled, true);
+        }
         let selected_failed = options.release.is_none()
             && state::failed_release_matches(&self.paths, &release.reference)?;
         let preserve_failed_release = match failed_release_decision(stopped, selected_failed) {
             FailedReleaseDecision::UseSelected => false,
             FailedReleaseDecision::ResumeInstalled => {
-                release = self
-                    .engine
-                    .resolve_release(Some(&installed.release_ref), &self.paths.home)?;
+                release = self.resolve(Some(&installed.release_ref))?;
                 true
             }
             FailedReleaseDecision::KeepRunning => {
@@ -398,7 +413,7 @@ impl Context {
         Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let stopped = state::stopped(&self.paths)?;
         output::progress(UPDATE_PROGRESS);
-        let release = self.engine.resolve_release(None, &self.paths.home)?;
+        let release = self.resolve(None)?;
         validate_forward_release(&release, Some(&installed))?;
         let selected_failed = state::failed_release_matches(&self.paths, &release.reference)?;
         let decision = update_decision(&installed, &release, stopped, selected_failed);
@@ -634,7 +649,7 @@ impl Context {
     ) -> Result<(), String> {
         output::progress("Downloading Shimpz Space (1/4): Admin...");
         self.engine
-            .pull_exact(&release.metadata.admin, ADMIN_REPOSITORY)?;
+            .pull_exact(&release.metadata.admin, release::ADMIN)?;
         if installed.is_some() {
             output::progress("Checking existing Supervisor authentication...");
             let authentication_state = admin_authentication_state_probe_response(
@@ -652,13 +667,13 @@ impl Context {
         }
         output::progress("Downloading Shimpz Space (2/4): Team...");
         self.engine
-            .pull_exact(&release.metadata.team, TEAM_REPOSITORY)?;
+            .pull_exact(&release.metadata.team, release::TEAM)?;
         output::progress("Downloading Shimpz Space (3/4): Brain...");
         self.engine
-            .pull_exact(&release.metadata.brain, BRAIN_REPOSITORY)?;
+            .pull_exact(&release.metadata.brain, release::BRAIN)?;
         output::progress("Downloading Shimpz Space (4/4): network boundaries...");
         self.engine
-            .pull_exact(&release.metadata.egress, EGRESS_REPOSITORY)?;
+            .pull_exact(&release.metadata.egress, release::EGRESS)?;
         Ok(())
     }
 
@@ -1944,19 +1959,50 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
     }
 }
 
+/// Admit only forward moves (ADR-0041), extended for developer releases (ADR-0099): a developer release applies
+/// only over exactly the published release it names as its baseline, or over a developer release of that same
+/// baseline; a published release replaces a developer release when it is newer than the baseline or is exactly it.
 fn validate_forward_release(
     release: &ResolvedRelease,
     installed: Option<&Installed>,
 ) -> Result<(), String> {
+    let refused = || Err("the Local release channel moved backward or became ambiguous".into());
     let Some(installed) = installed else {
-        return Ok(());
+        return if release.metadata.baseline.is_some() {
+            Err("a developer release applies only over its installed published baseline".into())
+        } else {
+            Ok(())
+        };
     };
+    if let Some(baseline) = &release.metadata.baseline {
+        return if *baseline == installed.published_ref()
+            && release.metadata.ordinal == installed.ordinal
+        {
+            Ok(())
+        } else {
+            Err("a developer release applies only over its installed published baseline; run shimpz update and rebuild it".into())
+        };
+    }
+    if let Some(baseline) = &installed.baseline {
+        let returns =
+            release.reference == *baseline && release.metadata.ordinal == installed.ordinal;
+        return if returns || release.metadata.ordinal > installed.ordinal {
+            Ok(())
+        } else {
+            refused()
+        };
+    }
     let same_reference = release.reference == installed.release_ref;
     let same_ordinal = release.metadata.ordinal == installed.ordinal;
     if release.metadata.ordinal < installed.ordinal || same_reference != same_ordinal {
-        return Err("the Local release channel moved backward or became ambiguous".into());
+        return refused();
     }
     Ok(())
+}
+
+/// A channel resolution that still names the installed developer release's baseline keeps that developer release.
+fn keeps_developer_release(channel: bool, installed: &Installed, stable: &ResolvedRelease) -> bool {
+    channel && installed.baseline.as_deref() == Some(stable.reference.as_str())
 }
 
 fn admit_before_handoff<T>(
@@ -2521,8 +2567,187 @@ mod tests {
                 team: format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{HEX}"),
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
+                baseline: None,
             },
         }
+    }
+
+    /// A developer release over `release(ordinal, baseline)` with a rebuilt Admin, identified by `digest`.
+    fn developer(ordinal: u64, baseline: char, digest: char) -> ResolvedRelease {
+        let published = release(ordinal, baseline);
+        let mut metadata = published.metadata;
+        metadata.admin = format!("localhost/shimpz-admin@sha256:{}", "e".repeat(64));
+        metadata.baseline = Some(published.reference);
+        ResolvedRelease {
+            reference: format!(
+                "localhost/shimpz-local-release@sha256:{}",
+                digest.to_string().repeat(64)
+            ),
+            metadata,
+        }
+    }
+
+    fn installed_from(release: &ResolvedRelease) -> Installed {
+        Installed {
+            space_id: "space-0123456789abcdef01234567".into(),
+            release_ref: release.reference.clone(),
+            admin_image: release.metadata.admin.clone(),
+            ordinal: release.metadata.ordinal,
+            port: 7777,
+            baseline: release.metadata.baseline.clone(),
+        }
+    }
+
+    #[test]
+    fn a_developer_release_moves_only_over_its_exact_baseline_and_yields_to_publications() {
+        let baseline = installed_from(&release(2, 'b'));
+        // Over its exact installed baseline, and over a sibling of the same baseline.
+        assert!(validate_forward_release(&developer(2, 'b', '1'), Some(&baseline)).is_ok());
+        let installed = installed_from(&developer(2, 'b', '1'));
+        assert!(validate_forward_release(&developer(2, 'b', '1'), Some(&installed)).is_ok());
+        assert!(validate_forward_release(&developer(2, 'b', '2'), Some(&installed)).is_ok());
+        // Never as a fresh install, over another publication, or over a developer release of another baseline.
+        assert!(validate_forward_release(&developer(2, 'b', '1'), None).is_err());
+        assert!(
+            validate_forward_release(
+                &developer(2, 'b', '1'),
+                Some(&installed_from(&release(3, 'c')))
+            )
+            .is_err()
+        );
+        assert!(validate_forward_release(&developer(1, 'a', '1'), Some(&baseline)).is_err());
+        assert!(validate_forward_release(&developer(3, 'c', '1'), Some(&baseline)).is_err());
+        assert!(validate_forward_release(&developer(3, 'c', '2'), Some(&installed)).is_err());
+        // A published release replaces it when newer than the baseline or exactly the baseline (the way back).
+        assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
+        assert!(validate_forward_release(&release(2, 'b'), Some(&installed)).is_ok());
+        assert!(validate_forward_release(&release(2, 'c'), Some(&installed)).is_err());
+        assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_err());
+        // `start` and the scheduler keep it while `stable` names its baseline; an exact release never does.
+        assert!(keeps_developer_release(true, &installed, &release(2, 'b')));
+        assert!(!keeps_developer_release(
+            false,
+            &installed,
+            &release(2, 'b')
+        ));
+        assert!(!keeps_developer_release(true, &installed, &release(3, 'c')));
+        assert!(!keeps_developer_release(true, &baseline, &release(2, 'b')));
+        // While running, an explicit update returns to the baseline; a stopped Space only reports it.
+        assert_eq!(
+            update_decision(&installed, &release(2, 'b'), false, false),
+            UpdateDecision::Apply
+        );
+        assert_eq!(
+            update_decision(&installed, &release(2, 'b'), true, false),
+            UpdateDecision::Available
+        );
+    }
+
+    /// The release.env document of a resolved release, as a release set image carries it.
+    fn release_document(release: &ResolvedRelease) -> String {
+        let metadata = &release.metadata;
+        let (schema, baseline) = match &metadata.baseline {
+            Some(baseline) => ("local-dev-v1", format!("baseline={baseline}\n")),
+            None => ("local-v2", String::new()),
+        };
+        format!(
+            "schema={schema}\nordinal={}\numbrella_revision={}\ncli_revision={}\ncli_linux_amd64_sha256={}\ncli_macos_arm64_sha256={}\nadmin={}\nteam={}\nbrain={}\negress={}\n{baseline}",
+            metadata.ordinal,
+            metadata.umbrella_revision,
+            metadata.cli_revision,
+            metadata.cli_linux_amd64_sha256,
+            metadata.cli_macos_arm64_sha256,
+            metadata.admin,
+            metadata.team,
+            metadata.brain,
+            metadata.egress,
+        )
+    }
+
+    /// A Docker stand-in holding one developer release and its published baseline. It logs every call, serves
+    /// `localhost/` images only from its "store", and lets a published reference be pulled.
+    #[cfg(unix)]
+    fn developer_docker(
+        directory: &Path,
+        published: &ResolvedRelease,
+        developer: &ResolvedRelease,
+    ) -> PathBuf {
+        let published_document = directory.join("published.env");
+        let developer_document = directory.join("developer.env");
+        fs::write(&published_document, release_document(published)).unwrap();
+        fs::write(&developer_document, release_document(developer)).unwrap();
+        let log = directory.join("docker.log");
+        let docker = directory.join("docker");
+        fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;;\n  create) case \"$6\" in localhost/*) echo developer ;; *) echo published ;; esac ;;\n  cp) case \"$2\" in developer:*) cat '{developer}' > \"$3\" ;; *) cat '{published}' > \"$3\" ;; esac ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                log = log.display(),
+                developer = developer_document.display(),
+                published = published_document.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        docker
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_developer_release_resolves_from_the_local_store_bound_to_its_baseline() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let published = release(2, 'b');
+        let developer_release = developer(2, 'b', '1');
+        let docker = developer_docker(home.path(), &published, &developer_release);
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+        };
+        let resolved = context.resolve(Some(&developer_release.reference)).unwrap();
+        assert_eq!(resolved.reference, developer_release.reference);
+        assert_eq!(resolved.metadata, developer_release.metadata);
+        context
+            .engine
+            .pull_exact(&resolved.metadata.admin, release::ADMIN)
+            .unwrap();
+        let log = fs::read_to_string(home.path().join("docker.log")).unwrap();
+        assert!(log.contains(&format!(
+            "pull --quiet --platform linux/amd64 {}",
+            published.reference
+        )));
+        assert!(log.contains(&format!(
+            "create --pull never --platform linux/amd64 {}",
+            developer_release.reference
+        )));
+        for line in log.lines() {
+            assert!(
+                !(line.starts_with("pull") && line.contains("localhost/")),
+                "pulled: {line}"
+            );
+        }
+
+        // The same set on macOS, or bound to a baseline whose members differ, is refused.
+        let macos = Context {
+            profile: HostProfile::MacOs,
+            ..context
+        };
+        assert!(macos.resolve(Some(&developer_release.reference)).is_err());
+        let mut drifted = release(2, 'b');
+        drifted.metadata.team = format!(
+            "ghcr.io/theshimpz/shimpz-team-local@sha256:{}",
+            "f".repeat(64)
+        );
+        let docker = developer_docker(home.path(), &drifted, &developer_release);
+        let context = Context {
+            engine: Engine::with_docker(docker),
+            profile: HostProfile::Linux,
+            ..macos
+        };
+        assert!(context.resolve(Some(&developer_release.reference)).is_err());
     }
 
     #[test]
@@ -2640,6 +2865,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
         assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&release(2, 'b'), Some(&installed)).is_ok());
@@ -2657,6 +2883,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
         for invalid in [release(1, 'a'), release(2, 'c'), release(3, 'b')] {
             let mut called = false;
@@ -2679,6 +2906,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
         assert_eq!(release_outcome(&current, Some(&installed)), "current");
         assert_eq!(
@@ -2698,6 +2926,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
 
         for stopped in [false, true] {
@@ -2730,6 +2959,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
         let passive = [
             update_decision(&installed, &current, false, false),
@@ -2771,6 +3001,7 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
+            baseline: None,
         };
         let outcomes = [
             current_release_outcome(&installed, false),

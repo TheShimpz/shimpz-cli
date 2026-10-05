@@ -237,7 +237,8 @@ pub(crate) fn scheduled_gate(
     now: u64,
     probe: impl FnOnce() -> Probe,
 ) -> Result<Option<&'static str>, String> {
-    let Some(installed_digest) = release_digest(&installed.release_ref) else {
+    // An installed developer release follows its published baseline: only a different `stable` is news.
+    let Some(installed_digest) = release_digest(installed.published_ref()) else {
         return Ok(None);
     };
     let mut state = read_state(paths, now);
@@ -474,6 +475,7 @@ mod tests {
             admin_image: "admin".into(),
             ordinal: 7,
             port: 7777,
+            baseline: None,
         }
     }
 
@@ -500,6 +502,43 @@ mod tests {
 
     fn gate(paths: &Paths, now: u64, probe: Probe) -> Option<&'static str> {
         scheduled_gate(paths, &installed(), now, || probe).expect("gate")
+    }
+
+    #[test]
+    fn an_installed_developer_release_follows_its_baseline_and_needs_its_own_repair_evidence() {
+        let (_home, paths) = gate_paths();
+        let developer = Installed {
+            release_ref: format!(
+                "{}@sha256:{}",
+                super::super::release::DEVELOPER_RELEASE_REPOSITORY,
+                "d".repeat(64)
+            ),
+            baseline: Some(format!("{RELEASE_REPOSITORY}@{INSTALLED}")),
+            ..installed()
+        };
+        let developer_gate =
+            |now, probe| scheduled_gate(&paths, &developer, now, || probe).unwrap();
+        // Evidence for the baseline is not evidence for the developer release: the repair is due.
+        record_repair(&paths, 1_000);
+        assert_eq!(developer_gate(1_060, digest(INSTALLED)), None);
+        state::write_private(
+            &paths.status,
+            &status(&developer.release_ref, developer.ordinal, 1_100, "current"),
+        )
+        .unwrap();
+        // `stable` still names the baseline: nothing is news until the repair is due.
+        assert_eq!(developer_gate(1_160, digest(INSTALLED)), Some(CURRENT));
+        assert_eq!(
+            developer_gate(1_100 + FULL_REPAIR_SECONDS, digest(INSTALLED)),
+            None
+        );
+        // A newer publication reconciles at once.
+        state::write_private(
+            &paths.status,
+            &status(&developer.release_ref, developer.ordinal, 5_000, "current"),
+        )
+        .unwrap();
+        assert_eq!(developer_gate(5_060, digest(NEWER)), None);
     }
 
     #[test]
