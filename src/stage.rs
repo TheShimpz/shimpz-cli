@@ -806,19 +806,6 @@ fn unsafe_dependencies() -> String {
     "Local snapshots accept only index-resolved Python dependencies".into()
 }
 
-/// Wait until a freshly written fake executable can run: a parallel test's fork can briefly hold it open for writing.
-#[cfg(all(test, unix))]
-pub(crate) fn await_executable(path: &Path) {
-    for _ in 0..200 {
-        match Command::new(path).output() {
-            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            _ => return,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,7 +919,6 @@ mod tests {
     /// A fake Docker CLI that also serves created containers and their exported final files.
     #[cfg(unix)]
     fn fake_docker(directory: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         if !directory.join("contract.tar").exists() {
             export_archives(
                 directory,
@@ -948,11 +934,7 @@ mod tests {
             dir = directory.display()
         );
         let executable = directory.join("docker-proof");
-        fs::write(&executable, format!("#!/bin/sh\n{export}{body}\nexit 2\n"))
-            .expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        await_executable(&executable);
+        crate::fake_tool::write(&executable, format!("#!/bin/sh\n{export}{body}\nexit 2\n"));
         executable
     }
 
@@ -1405,9 +1387,8 @@ mod tests {
     /// A fake Docker whose `cp` runs `export` in place of the shell and records the process it became.
     #[cfg(unix)]
     fn exporting_docker(directory: &Path, export: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let executable = directory.join("docker-export");
-        fs::write(
+        crate::fake_tool::write(
             &executable,
             format!(
                 "#!/bin/sh\n\
@@ -1417,11 +1398,7 @@ mod tests {
                  exit 2\n",
                 dir = directory.display()
             ),
-        )
-        .expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        await_executable(&executable);
+        );
         executable
     }
 

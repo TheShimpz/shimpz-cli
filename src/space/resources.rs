@@ -567,13 +567,11 @@ mod tests {
     /// lines start with that identifier's full identity.
     #[cfg(unix)]
     fn fake_docker(map: &str) -> (tempfile::TempDir, Engine) {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
         std::fs::write(root.join("map"), map).unwrap();
         let command = root.join("docker");
-        std::fs::write(
+        crate::fake_tool::write(
             &command,
             format!(
                 "#!/bin/sh\nprintf 'call\\n' >> '{calls}'\nseen=0\nfor argument in \"$@\"; do\n  \
@@ -583,13 +581,7 @@ mod tests {
                 calls = root.join("calls").display(),
                 map = root.join("map").display(),
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // A parallel test's fork can briefly hold the fresh script open for writing (ETXTBSY); wait until it runs,
-        // then forget that probe call so each test counts only its own.
-        crate::stage::await_executable(&command);
-        let _ = std::fs::remove_file(root.join("calls"));
+        );
         (temporary, Engine::with_docker(command))
     }
 

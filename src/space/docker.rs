@@ -1273,14 +1273,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn team_activity_runs_the_team_client_and_maps_every_failure_to_unknown() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let command = temporary.path().join("docker");
         let calls = temporary.path().join("calls");
         let answer = temporary.path().join("answer");
         let status = temporary.path().join("status");
-        fs::write(
+        crate::fake_tool::write(
             &command,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat '{}'\nexit $(cat '{}')\n",
@@ -1288,10 +1286,7 @@ mod tests {
                 answer.display(),
                 status.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&command);
+        );
         let _ = fs::remove_file(&calls);
         let engine = Engine {
             docker: command,
@@ -1322,21 +1317,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn macos_controller_uses_the_desktop_vm_socket_identity() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let command = temporary.path().join("docker");
         let calls = temporary.path().join("calls");
-        fs::write(
+        crate::fake_tool::write(
             &command,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'print(metadata.st_gid)'*) printf '0\\n' ;; esac\n",
                 calls.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&command);
+        );
         let _ = fs::remove_file(&calls);
         let engine = Engine {
             docker: command,
@@ -1385,13 +1375,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn macos_controller_rejects_a_malformed_socket_group() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let command = temporary.path().join("docker");
-        fs::write(&command, "#!/bin/sh\nprintf 'not-a-group\\n'\n").unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&command);
+        crate::fake_tool::write(&command, "#!/bin/sh\nprintf 'not-a-group\\n'\n");
         let engine = Engine {
             docker: command,
             platform: "linux/arm64",

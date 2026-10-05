@@ -4073,17 +4073,14 @@ mod tests {
         )
         .unwrap();
         target.metadata.cli_macos_arm64_sha256 = hash_file(&child).unwrap();
-        fs::write(
+        crate::fake_tool::write(
             &docker,
             format!(
                 "#!/bin/sh\ncase \"$1\" in\n  create) printf '%s\\n' {} ;;\n  cp) cp '{}' \"$3\" ;;\n  *) exit 0 ;;\nesac\n",
                 "c".repeat(64),
                 child.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&docker);
+        );
         fs::create_dir_all(context.paths.managed_cli.parent().unwrap()).unwrap();
         private_file(&context.paths.managed_cli, "previous CLI", 0o700);
         (context, target, root)
@@ -4539,16 +4536,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let docker = home.path().join("docker");
         let projected = home.path().join("projected");
-        fs::write(
+        crate::fake_tool::write(
             &docker,
             format!(
                 "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
                 projected.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&docker);
+        );
         let (context, backup) = installed_space(home.path(), docker);
         let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
         // The local status staging path cannot be replaced, so recording the rollback status fails.
@@ -4573,7 +4567,7 @@ mod tests {
     #[cfg(unix)]
     fn stopped_space_docker(root: &Path) -> PathBuf {
         let command = root.join("docker");
-        fs::write(
+        crate::fake_tool::write(
             &command,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n\
@@ -4586,10 +4580,7 @@ mod tests {
                 team = format_args!("{:0<64}", "c001"),
                 admin = format_args!("{:0<64}", "c002"),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&command);
+        );
         command
     }
 
@@ -4663,7 +4654,7 @@ mod tests {
         let root = temporary.path();
         fs::write(root.join("map"), map).unwrap();
         let command = root.join("docker");
-        fs::write(
+        crate::fake_tool::write(
             &command,
             format!(
                 "#!/bin/sh\nprintf 'call\\n' >> '{calls}'\nseen=0\nfor argument in \"$@\"; do\n  \
@@ -4673,11 +4664,7 @@ mod tests {
                 calls = root.join("calls").display(),
                 map = root.join("map").display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
-        crate::stage::await_executable(&command);
-        let _ = fs::remove_file(root.join("calls"));
+        );
         (temporary, Engine::with_docker(command))
     }
 

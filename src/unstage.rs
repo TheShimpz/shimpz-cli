@@ -241,7 +241,6 @@ mod tests {
     #[test]
     fn validates_before_removal_and_attempts_every_image_without_force() {
         use std::fs;
-        use std::os::unix::fs::PermissionsExt;
 
         use super::{remove_images, staged_images, validate_images};
 
@@ -259,10 +258,7 @@ mod tests {
             log.display(),
             log.display()
         );
-        fs::write(&executable, script).expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        crate::stage::await_executable(&executable);
+        crate::fake_tool::write(&executable, script);
 
         let images = staged_images(&executable, "proof-assistant").expect("inventory");
         assert_eq!(images, vec![first, second]);
@@ -286,9 +282,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_image_collected_during_removal_counts_as_removed() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-
         use super::remove_images;
 
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -302,10 +295,7 @@ mod tests {
              if [ \"$2\" = \"inspect\" ]; then printf '%s\\n' \"$5\"; exit 0; fi\n\
              exit 2\n"
         );
-        fs::write(&executable, script).expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        crate::stage::await_executable(&executable);
+        crate::fake_tool::write(&executable, script);
 
         assert_eq!(
             remove_images(
@@ -329,7 +319,6 @@ mod tests {
     #[test]
     fn removes_more_than_one_batch_and_confirms_final_absence() {
         use std::fs;
-        use std::os::unix::fs::PermissionsExt;
 
         use super::{MAX_BATCH, remove_all};
 
@@ -355,10 +344,7 @@ mod tests {
             inventory.display(),
             removed.display(),
         );
-        fs::write(&executable, script).expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        crate::stage::await_executable(&executable);
+        crate::fake_tool::write(&executable, script);
 
         assert_eq!(
             remove_all(&executable, "proof-assistant"),
@@ -383,9 +369,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_docker_success_that_does_not_converge() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-
         use super::remove_all;
 
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -398,10 +381,7 @@ mod tests {
              if [ \"$2\" = \"rm\" ]; then exit 0; fi\n\
              exit 2\n"
         );
-        fs::write(&executable, script).expect("fake Docker");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
-            .expect("executable fake Docker");
-        crate::stage::await_executable(&executable);
+        crate::fake_tool::write(&executable, script);
 
         let failure = remove_all(&executable, "proof-assistant").unwrap_err();
 
