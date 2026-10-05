@@ -16,6 +16,7 @@ use super::evidence::{
     MIN_CRYPTSETUP_VERSION, cryptsetup_version, cryptsetup_version_supported, luks_dump_valid,
     luks_unlock_credentials_valid,
 };
+use crate::private_file;
 use crate::space::command::{self, Tool};
 use crate::space::id;
 use crate::space::paths::{Paths, STORAGE_MARKER};
@@ -1244,20 +1245,7 @@ fn exact_regular_file(path: &Path) -> Result<(), String> {
 }
 
 fn write_private(path: &Path, value: &str) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    if temporary.exists() {
-        exact_regular_file(&temporary)?;
-        fs::remove_file(&temporary).map_err(io_error)?;
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(io_error)?;
-    file.write_all(value.as_bytes()).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    fs::rename(temporary, path).map_err(io_error)
+    private_file::replace(path, value.as_bytes()).map_err(io_error)
 }
 
 fn one_line<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {

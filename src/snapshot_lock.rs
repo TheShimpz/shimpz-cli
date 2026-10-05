@@ -5,7 +5,8 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::config_dir::{self, Refusal};
+use crate::config_dir;
+use crate::private_file::{self, Refusal};
 
 /// Holds one Assistant's snapshot lock until dropped.
 pub(crate) struct SnapshotLock {
@@ -28,7 +29,7 @@ fn acquire_in(configuration: &Path, assistant_id: &str) -> Result<SnapshotLock, 
         .map_err(|_| "Local snapshot lock directory cannot be secured".to_owned())?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
-    config_dir::private_open(&mut options);
+    private_file::private_open(&mut options);
     let file = options
         .open(directory.join(format!("{assistant_id}.lock")))
         .map_err(|_| "Local snapshot lock cannot be opened".to_owned())?;
@@ -45,7 +46,7 @@ fn require_private_file(file: &File) -> Result<(), String> {
     let metadata = file
         .metadata()
         .map_err(|_| "Local snapshot lock metadata is unavailable".to_owned())?;
-    config_dir::admit(&metadata).map_err(|refusal| match refusal {
+    private_file::admit(&metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => "Local snapshot lock path is not a regular file".into(),
         Refusal::NotPrivate => "Local snapshot lock ownership or permissions are unsafe".into(),
     })

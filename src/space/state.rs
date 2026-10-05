@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -12,6 +12,7 @@ use super::host::HostProfile;
 use super::id;
 use super::paths::{MARKER, Paths};
 use super::release;
+use crate::private_file;
 
 const STOPPED: &str = "shimpz-space-stopped-v1\n";
 const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
@@ -488,19 +489,7 @@ pub(crate) fn selected_port(installed: Option<&Installed>) -> Result<u16, String
 }
 
 pub(crate) fn write_private(path: &Path, value: &str) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    if temporary.exists() {
-        fs::remove_file(&temporary).map_err(io_error)?;
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(io_error)?;
-    file.write_all(value.as_bytes()).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    fs::rename(temporary, path).map_err(io_error)
+    private_file::replace(path, value.as_bytes()).map_err(io_error)
 }
 
 fn unix_timestamp() -> Result<u64, String> {

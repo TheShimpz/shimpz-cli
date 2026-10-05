@@ -14,7 +14,8 @@ use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::config_dir::{self, Refusal};
+use crate::config_dir;
+use crate::private_file::{self, Refusal};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
@@ -118,7 +119,7 @@ pub(crate) fn lock() -> Result<CredentialLock, String> {
     let path = directory.join(CREDENTIALS_LOCK_FILE);
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
-    config_dir::private_open(&mut options);
+    private_file::private_open(&mut options);
     let file = options
         .open(path)
         .map_err(|_| "CLI credential lock cannot be opened".to_owned())?;
@@ -149,7 +150,7 @@ fn credentials_path() -> Result<PathBuf, String> {
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
     let mut options = OpenOptions::new();
     options.read(true);
-    config_dir::private_open(&mut options);
+    private_file::private_open(&mut options);
     let file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -208,7 +209,7 @@ fn clear_at(path: &Path) -> Result<(), String> {
 }
 
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
-    config_dir::admit(metadata).map_err(|refusal| match refusal {
+    private_file::admit(metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => "CLI credential path is not a regular file".into(),
         Refusal::NotPrivate => "CLI credential file ownership or permissions are unsafe".into(),
     })

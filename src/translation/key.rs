@@ -12,7 +12,8 @@ use std::os::unix::fs::OpenOptionsExt;
 
 use zeroize::Zeroizing;
 
-use crate::config_dir::{self, Refusal};
+use crate::config_dir;
+use crate::private_file::{self, Refusal};
 
 /// The key file's name inside the CLI's `shimpz` configuration directory.
 pub(crate) const FILE_NAME: &str = "openai-api-key";
@@ -40,7 +41,7 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
     let metadata = file
         .metadata()
         .map_err(|_| unusable("cannot be inspected"))?;
-    config_dir::admit(&metadata).map_err(|refusal| match refusal {
+    private_file::admit(&metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => unusable("is not a regular file"),
         Refusal::NotPrivate => unusable(
             "must be owned by you, readable only by you (mode 0600), and have a single link",

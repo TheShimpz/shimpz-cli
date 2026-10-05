@@ -17,6 +17,7 @@ mod language_pack;
 mod manifest;
 mod new_assistant;
 mod output;
+mod private_file;
 mod publish;
 mod python;
 mod snapshot_files;
