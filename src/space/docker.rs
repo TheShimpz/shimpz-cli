@@ -18,10 +18,13 @@ use super::poll::{self, TeamActivity};
 use super::release::{
     self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, Package, RELEASE_REPOSITORY, Release,
 };
+use crate::capture::{self, Drained};
 use crate::digest;
 
 const RELEASE_CHANNEL: &str = "stable";
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
+/// The most output one captured Docker command may return on either stream before it is stopped.
+const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
 const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space_data";
 const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
@@ -1072,54 +1075,17 @@ fn execute_bounded_stdout(
     }
 }
 
-fn drain_bounded_stdout(mut stdout: ChildStdout) -> Result<CapturedProbeOutput, String> {
-    let mut bytes = Vec::with_capacity(ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1);
-    let mut truncated = false;
-    let mut buffer = [0_u8; 256];
-    loop {
-        let count = stdout
-            .read(&mut buffer)
-            .map_err(|_| "Docker authentication-state output could not be read".to_owned())?;
-        if count == 0 {
-            break;
-        }
-        let retained =
-            count.min((ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1).saturating_sub(bytes.len()));
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < count;
-    }
-    Ok(CapturedProbeOutput { bytes, truncated })
+fn drain_bounded_stdout(stdout: ChildStdout) -> Result<Drained, String> {
+    capture::drain(stdout, ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1)
+        .map_err(|_| "Docker authentication-state output could not be read".to_owned())
 }
 
-struct CapturedProbeOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
+fn drain_diagnostic(reader: impl Read) -> Result<Drained, String> {
+    capture::drain(reader, MAX_DOCKER_DIAGNOSTIC_BYTES)
+        .map_err(|_| "Docker diagnostic output could not be read".to_owned())
 }
 
-struct CapturedDiagnostic {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-fn drain_diagnostic(mut reader: impl Read) -> Result<CapturedDiagnostic, String> {
-    let mut bytes = Vec::with_capacity(MAX_DOCKER_DIAGNOSTIC_BYTES);
-    let mut truncated = false;
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|_| "Docker diagnostic output could not be read".to_owned())?;
-        if count == 0 {
-            break;
-        }
-        let retained = count.min(MAX_DOCKER_DIAGNOSTIC_BYTES.saturating_sub(bytes.len()));
-        bytes.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < count;
-    }
-    Ok(CapturedDiagnostic { bytes, truncated })
-}
-
-fn render_diagnostic(captured: &CapturedDiagnostic) -> String {
+fn render_diagnostic(captured: &Drained) -> String {
     let decoded = String::from_utf8_lossy(&captured.bytes);
     let sanitized = crate::output::sanitize(decoded.trim());
     let content_limit = MAX_DOCKER_DIAGNOSTIC_BYTES - TRUNCATED_DIAGNOSTIC.len();
@@ -1143,11 +1109,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+    let result = capture::bounded(
+        Command::new(program).args(arguments),
+        MAX_DOCKER_OUTPUT_BYTES,
+        MAX_DOCKER_OUTPUT_BYTES,
+    )
+    .map_err(|failure| match failure {
+        capture::Failure::Unavailable(error) => format!("could not execute Docker: {error}"),
+        capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
+    })?;
     if !result.status.success() {
         return Err(format!(
             "Docker operation failed; Docker returned {}",
@@ -1208,6 +1178,23 @@ fn version_at_least(value: &str, minimum: (u64, u64, u64)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured Docker output was once read without any bound; it now stops Docker one byte past its bound.
+    #[cfg(unix)]
+    #[test]
+    fn captured_docker_output_is_bounded() {
+        let shell = Path::new("/bin/sh");
+        let exact = format!("head -c {MAX_DOCKER_OUTPUT_BYTES} /dev/zero");
+        assert_eq!(
+            output(shell, ["-c", &exact]).unwrap().len(),
+            MAX_DOCKER_OUTPUT_BYTES
+        );
+        let excessive = format!("head -c {} /dev/zero", MAX_DOCKER_OUTPUT_BYTES + 1);
+        assert_eq!(
+            output(shell, ["-c", &excessive]),
+            Err("Docker returned excessive output".into())
+        );
+    }
 
     const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

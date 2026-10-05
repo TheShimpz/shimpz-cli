@@ -6,6 +6,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 
+use crate::capture;
+
+/// The most output a fixed host tool may return on either stream before it is stopped.
+const MAX_HOST_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Tool {
     Chown,
@@ -175,11 +180,7 @@ where
     S: AsRef<OsStr>,
 {
     let program = tool.resolve()?;
-    let result = Command::new(&program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    let result = bounded(&program, Command::new(&program).args(arguments))?;
     if !result.status.success() {
         return Err(format!("host command failed: {}", program.display()));
     }
@@ -193,11 +194,24 @@ where
     S: AsRef<OsStr>,
 {
     let program = tool.resolve()?;
-    Command::new(&program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))
+    bounded(&program, Command::new(&program).args(arguments))
+}
+
+/// Capture at most `MAX_HOST_OUTPUT_BYTES` of each stream from one host tool.
+fn bounded(program: &Path, command: &mut Command) -> Result<Output, String> {
+    capture::bounded(command, MAX_HOST_OUTPUT_BYTES, MAX_HOST_OUTPUT_BYTES).map_err(|failure| {
+        match failure {
+            capture::Failure::Unavailable(error) => {
+                format!("could not execute {}: {error}", program.display())
+            }
+            capture::Failure::Excessive => {
+                format!(
+                    "host command output exceeded its bound: {}",
+                    program.display()
+                )
+            }
+        }
+    })
 }
 
 pub(crate) fn status<I, S>(tool: Tool, arguments: I) -> Result<ExitStatus, String>
@@ -281,11 +295,7 @@ where
     S: AsRef<OsStr>,
 {
     let (program, mut command) = privileged_command(tool)?;
-    let result = command
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    let result = bounded(&program, command.args(arguments))?;
     if !result.status.success() {
         return Err(format!(
             "privileged host command failed: {}",
@@ -322,6 +332,24 @@ fn effective_root() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Host tool output was once read without any bound; each stream now stops the tool one byte past its bound.
+    #[cfg(unix)]
+    #[test]
+    fn host_tool_output_is_bounded_on_each_stream() {
+        let shell = Path::new("/bin/sh");
+        let run = |script: String| bounded(shell, Command::new(shell).args(["-c", &script]));
+        let exact = run(format!("head -c {MAX_HOST_OUTPUT_BYTES} /dev/zero")).unwrap();
+        assert_eq!(exact.stdout.len(), MAX_HOST_OUTPUT_BYTES);
+        for redirect in ["", " >&2"] {
+            let error = run(format!(
+                "head -c {} /dev/zero{redirect}",
+                MAX_HOST_OUTPUT_BYTES + 1
+            ))
+            .unwrap_err();
+            assert_eq!(error, "host command output exceeded its bound: /bin/sh");
+        }
+    }
 
     #[test]
     fn production_tools_have_only_absolute_fixed_candidates() {

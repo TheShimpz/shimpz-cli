@@ -4,11 +4,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
-use std::sync::mpsc;
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -19,7 +16,8 @@ use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
 use crate::{
-    digest, output, python, snapshot_files, snapshot_lock, source_package, toolchain, translation,
+    capture, digest, output, python, snapshot_files, snapshot_lock, source_package, toolchain,
+    translation,
 };
 
 const PYTHON_VERSION: &str = "3.14";
@@ -711,66 +709,16 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    const UNAVAILABLE: &str = "Docker could not execute the Local snapshot operation";
-    let mut child = Command::new(docker)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| UNAVAILABLE)?;
-    let (sender, receiver) = mpsc::channel();
-    let streams: [(Option<Box<dyn Read + Send>>, usize); 2] = [
-        (
-            child.stdout.take().map(|stream| Box::new(stream) as _),
-            limit,
-        ),
-        (
-            child.stderr.take().map(|stream| Box::new(stream) as _),
-            MAX_DOCKER_OUTPUT_BYTES,
-        ),
-    ];
-    for (index, (stream, bound)) in streams.into_iter().enumerate() {
-        let sender = sender.clone();
-        // A reader is never joined: after a kill, a process Docker started may still hold its pipe open.
-        thread::spawn(move || {
-            let _ = sender.send((
-                index,
-                stream.map_or(Ok(Some(Vec::new())), |stream| bounded(stream, bound)),
-            ));
-        });
-    }
-    drop(sender);
-    let mut captured = [Vec::new(), Vec::new()];
-    for _ in 0..captured.len() {
-        let failure = match receiver.recv() {
-            Ok((index, Ok(Some(bytes)))) => {
-                captured[index] = bytes;
-                continue;
-            }
-            Ok((_, Ok(None))) => "Docker returned excessive Local snapshot output",
-            Ok((_, Err(_))) | Err(_) => UNAVAILABLE,
-        };
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(failure.into());
-    }
-    let status = child.wait().map_err(|_| UNAVAILABLE)?;
-    let [stdout, stderr] = captured;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
+    capture::bounded(
+        Command::new(docker).args(arguments),
+        limit,
+        MAX_DOCKER_OUTPUT_BYTES,
+    )
+    .map_err(|error| match error {
+        capture::Failure::Excessive => "Docker returned excessive Local snapshot output",
+        capture::Failure::Unavailable(_) => "Docker could not execute the Local snapshot operation",
     })
-}
-
-/// Read a stream to its end, or stop as soon as it exceeds `limit` bytes (`None`).
-fn bounded(stream: impl Read, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
-    let mut bytes = Vec::new();
-    stream
-        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    Ok((bytes.len() <= limit).then_some(bytes))
+    .map_err(Into::into)
 }
 
 fn require_docker_success<I, S>(docker: &Path, arguments: I, message: &str) -> Result<(), String>
@@ -1480,8 +1428,8 @@ mod tests {
     /// Verify through `docker`, failing instead of hanging if the export is never cut off.
     #[cfg(unix)]
     fn verify_within_deadline(docker: PathBuf) -> Result<(), String> {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let result = with_expected(&image('b'), |expected| {
                 verify_language_files(&docker, &image('a'), expected)
             });

@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 
 use crate::manifest::PublicationIdentity;
-use crate::{digest, output, snapshot_lock, source_package, stage};
+use crate::{capture, digest, output, snapshot_lock, source_package, stage};
 
 const MAX_BATCH: usize = 50;
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -182,19 +182,16 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = Command::new(docker)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|_| "Docker could not execute the Local snapshot removal")?;
-    if result.stdout.len() > MAX_DOCKER_OUTPUT_BYTES
-        || result.stderr.len() > MAX_DOCKER_OUTPUT_BYTES
-    {
-        return Err("Docker returned excessive Local snapshot removal output".into());
-    }
-    Ok(result)
+    capture::bounded(
+        Command::new(docker).args(arguments),
+        MAX_DOCKER_OUTPUT_BYTES,
+        MAX_DOCKER_OUTPUT_BYTES,
+    )
+    .map_err(|error| match error {
+        capture::Failure::Excessive => "Docker returned excessive Local snapshot removal output",
+        capture::Failure::Unavailable(_) => "Docker could not execute the Local snapshot removal",
+    })
+    .map_err(Into::into)
 }
 
 fn output_text(result: &Output) -> Result<&str, String> {
