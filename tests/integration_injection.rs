@@ -2,8 +2,10 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -47,8 +49,7 @@ exit 1
         capture.display(),
         fail_invocation
     );
-    fs::write(&shim, script).unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    fake_tool::write(&shim, script);
     (shim, capture)
 }
 

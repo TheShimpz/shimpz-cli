@@ -2,6 +2,9 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -88,8 +91,7 @@ impl Workspace {
             ),
         );
         let uv = root.join("uv");
-        fs::write(&uv, script).unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_tool::write(&uv, script);
         Self {
             root,
             uv,

@@ -2,8 +2,10 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -86,7 +88,7 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
     fs::write(project.join("shimpz/__init__.py"), &shadow).unwrap();
     fs::write(project.join("shimpz/_bridge.py"), &shadow).unwrap();
     let uv = root.join("uv");
-    fs::write(
+    fake_tool::write(
         &uv,
         format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'uv 0.11.32'; exit 0; fi\n\
@@ -94,9 +96,7 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
              [ \"$#\" -gt 0 ] || exit 1\nshift\nexec '{}' \"$@\"\n",
             python.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     // Run from inside the project, where a non-isolated `python -m` would import ./shimpz first.
     let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))

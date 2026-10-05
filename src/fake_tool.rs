@@ -4,7 +4,7 @@
 //! A file this process writes can be executed only after every descriptor writing it is closed. A `fork` on another
 //! test thread while the file is still open inherits that descriptor until its own `exec`, and executing the file
 //! in that window fails with `ETXTBSY`. A separate shell writes and closes the file instead, so no descriptor of the
-//! test process can keep it busy once this returns.
+//! test process can keep it busy once this returns. Integration test crates include this same file by path.
 
 use std::io::Write;
 use std::path::Path;

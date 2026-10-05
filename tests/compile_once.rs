@@ -2,8 +2,10 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
@@ -38,8 +40,7 @@ if [ "$1" = "run" ]; then
 fi
 exit 1
 "#;
-    fs::write(&shim, script).unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    fake_tool::write(&shim, script);
     let project = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/assistant");
 
     let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))

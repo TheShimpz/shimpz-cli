@@ -2,8 +2,10 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -45,8 +47,7 @@ exit 1
 "#,
             root = root.display(),
         );
-        fs::write(root.join("uv"), script).unwrap();
-        fs::set_permissions(root.join("uv"), fs::Permissions::from_mode(0o755)).unwrap();
+        fake_tool::write(&root.join("uv"), script);
         Self { root }
     }
 

@@ -2,8 +2,10 @@
 
 #![cfg(unix)]
 
+#[path = "../src/fake_tool.rs"]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -22,8 +24,7 @@ fn action_subprocess_cannot_read_integration_or_ambient_secrets() {
         "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in shimpz._bridge) export -p > \"{}\"; echo '{{}}' ;; esac; done\nexit 0\n",
         dump.display()
     );
-    fs::write(&fake_uv, script).unwrap();
-    fs::set_permissions(&fake_uv, fs::Permissions::from_mode(0o755)).unwrap();
+    fake_tool::write(&fake_uv, script);
     let fixture = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/assistant"
