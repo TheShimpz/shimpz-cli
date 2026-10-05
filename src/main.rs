@@ -9,6 +9,8 @@ mod credentials;
 mod develop;
 mod developers_client;
 mod digest;
+#[cfg(all(test, unix))]
+mod fake_tool;
 mod help;
 mod human_request;
 mod install;

@@ -2703,7 +2703,7 @@ mod tests {
         fs::write(&developer_document, release_document(developer)).unwrap();
         let log = directory.join("docker.log");
         let docker = directory.join("docker");
-        fs::write(
+        crate::fake_tool::write(
             &docker,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;;\n  create) case \"$6\" in localhost/*) echo developer ;; *) echo published ;; esac ;;\n  cp) case \"$2\" in developer:*) cat '{developer}' > \"$3\" ;; *) cat '{published}' > \"$3\" ;; esac ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
@@ -2711,9 +2711,7 @@ mod tests {
                 developer = developer_document.display(),
                 published = published_document.display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         docker
     }
 
@@ -2791,16 +2789,14 @@ mod tests {
             .unwrap();
         }
         let docker = directory.join("channel-docker");
-        fs::write(
+        crate::fake_tool::write(
             &docker,
             format!(
                 "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 stable = stable.reference,
                 directory = directory.display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         docker
     }
 
