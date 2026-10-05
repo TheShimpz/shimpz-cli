@@ -17,6 +17,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
+use icu_normalizer::ComposingNormalizerBorrowed;
+use icu_properties::CodePointSetData;
+use icu_properties::props::BidiControl;
 use serde_json::json;
 
 use crate::language_pack::{self, Catalog, LOCALES, Pack};
@@ -120,11 +123,42 @@ pub(crate) fn key_hint() -> String {
     )
 }
 
+/// One message every attempt failed to translate, with why its last provider answer was refused.
+#[derive(Debug, Eq, PartialEq)]
+struct Refusal {
+    id: String,
+    template: String,
+    reason: String,
+}
+
+/// Why an exchange whose answer lacked exactly the requested string fields was refused.
+const MALFORMED: &str = "OpenAI returned no complete structured answer";
+/// Characters of a refused English template quoted in a failure message.
+const QUOTED_CHARACTERS: usize = 60;
+
+impl Refusal {
+    fn describe(&self) -> String {
+        let mut quoted = self
+            .template
+            .chars()
+            .take(QUOTED_CHARACTERS)
+            .collect::<String>();
+        if self.template.chars().count() > QUOTED_CHARACTERS {
+            quoted.push_str("...");
+        }
+        format!(
+            "message {} ({quoted:?}): {}",
+            &self.id[..self.id.len().min(12)],
+            self.reason
+        )
+    }
+}
+
 /// Why a translated pack could not be made.
 #[derive(Debug, Eq, PartialEq)]
 enum Failure {
     Provider(ProviderError),
-    Refused(usize),
+    Refused(Vec<Refusal>),
     Memory(String),
     Invalid(&'static str),
     Verify(String),
@@ -144,8 +178,14 @@ impl Failure {
             Self::Provider(ProviderError::Unavailable | ProviderError::Refused) => {
                 format!("OpenAI translation is unavailable; stage again later, {remedy}")
             }
-            Self::Refused(count) => format!(
-                "OpenAI could not translate {count} message(s) into every interface language in {ATTEMPTS} attempts; simplify or shorten that shimpz.text copy and stage again, {remedy}"
+            Self::Refused(refusals) => format!(
+                "OpenAI could not translate {} message(s) into every interface language in {ATTEMPTS} attempts: {}; simplify or shorten that shimpz.text copy and stage again, {remedy}",
+                refusals.len(),
+                refusals
+                    .iter()
+                    .map(Refusal::describe)
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
             Self::Memory(message) | Self::Verify(message) => message.clone(),
             Self::Invalid(code) => format!("the translated language pack is invalid ({code})"),
@@ -155,17 +195,41 @@ impl Failure {
 
 /// Whether remembered or provider texts are admissible for the current declaration of message `id`.
 fn admissible(catalog: &Catalog, id: &str, texts: &BTreeMap<String, String>) -> bool {
-    texts.keys().map(String::as_str).eq(LOCALES)
-        && texts
-            .values()
-            .all(|text| catalog.translation_error(id, text).is_none())
+    refusal_reason(catalog, id, texts).is_none()
+}
+
+/// Why `texts` are inadmissible for message `id`: each refused locale with its protocol code, never the text.
+fn refusal_reason(catalog: &Catalog, id: &str, texts: &BTreeMap<String, String>) -> Option<String> {
+    if !texts.keys().map(String::as_str).eq(LOCALES) {
+        return Some("the answer does not have exactly one text per interface language".to_owned());
+    }
+    let refused = texts
+        .iter()
+        .filter_map(|(locale, text)| {
+            catalog
+                .translation_error(id, text)
+                .map(|code| format!("{locale} {}", explain(code)))
+        })
+        .collect::<Vec<_>>();
+    (!refused.is_empty()).then(|| refused.join(", "))
+}
+
+/// A protocol refusal code with what it means for the Creator's copy.
+fn explain(code: &str) -> String {
+    let meaning = match code {
+        "public_text" => "is not trimmed, printable NFC text",
+        "translation_placeholders" => "does not keep exactly the message's placeholders",
+        "translation_budget" => "exceeds the field's length budget",
+        _ => "is refused",
+    };
+    format!("{meaning} ({code})")
 }
 
 /// One message's outcome: its admitted texts, every attempt refused, cancelled by another failure, or a provider
 /// failure.
 enum Outcome {
     Translated(Texts),
-    Refused,
+    Refused(String),
     Cancelled,
     Failed(ProviderError),
 }
@@ -230,7 +294,7 @@ fn translate_pending<'a>(
 ) -> Result<Vec<(&'a str, Texts)>, Failure> {
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    let refused = AtomicUsize::new(0);
+    let refused = Mutex::new(Vec::new());
     let failure = Mutex::new(None);
     let translated = Mutex::new(Vec::new());
     thread::scope(|scope| {
@@ -246,9 +310,16 @@ fn translate_pending<'a>(
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .push((id, message)),
-                        Outcome::Refused => {
-                            refused.fetch_add(1, Ordering::SeqCst);
+                        Outcome::Refused(reason) => {
                             stop.store(true, Ordering::SeqCst);
+                            refused
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(Refusal {
+                                    id: id.to_owned(),
+                                    template: template.to_owned(),
+                                    reason,
+                                });
                         }
                         Outcome::Cancelled => break,
                         Outcome::Failed(error) => {
@@ -269,12 +340,38 @@ fn translate_pending<'a>(
     {
         return Err(error);
     }
-    match refused.into_inner() {
-        0 => Ok(translated
+    let mut refused = refused
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if refused.is_empty() {
+        return Ok(translated
             .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)),
-        count => Err(Failure::Refused(count)),
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
     }
+    refused.sort_by(|left, right| left.id.cmp(&right.id));
+    Err(Failure::Refused(refused))
+}
+
+/// Every candidate without directional formatting marks and in Unicode NFC, before the unchanged admission rules.
+///
+/// The model often writes an Arabic right-to-left mark before a placeholder, which the instructions already forbid,
+/// and canonically equivalent combining marks in another order, such as a shadda before its vowel sign; the
+/// `public_text` rule refuses both. Removing only `Bidi_Control` characters, which are invisible, and composing
+/// keep every visible character, so the producer repairs them here instead of discarding the answer.
+fn composed(texts: Texts) -> Texts {
+    let bidi_controls = CodePointSetData::new::<BidiControl>();
+    let nfc = ComposingNormalizerBorrowed::new_nfc();
+    texts
+        .into_iter()
+        .map(|(locale, text)| {
+            let visible = text
+                .chars()
+                .filter(|character| !bidi_controls.contains(*character))
+                .collect::<String>();
+            let text = nfc.normalize(&visible).into_owned();
+            (locale, text)
+        })
+        .collect()
 }
 
 /// Up to `ATTEMPTS` provider answers for one message, never starting an attempt once `stop` is set.
@@ -285,17 +382,21 @@ fn translate_message(
     translator: &dyn Translator,
     stop: &AtomicBool,
 ) -> Outcome {
+    let mut reason = None;
     for _ in 0..ATTEMPTS {
         if stop.load(Ordering::SeqCst) {
             return Outcome::Cancelled;
         }
-        match translator.translate(template) {
-            Ok(texts) if admissible(catalog, id, &texts) => return Outcome::Translated(texts),
-            Ok(_) | Err(ProviderError::Refused) => {}
+        reason = match translator.translate(template).map(composed) {
+            Ok(texts) => match refusal_reason(catalog, id, &texts) {
+                None => return Outcome::Translated(texts),
+                refused => refused,
+            },
+            Err(ProviderError::Refused) => Some(MALFORMED.to_owned()),
             Err(error) => return Outcome::Failed(error),
-        }
+        };
     }
-    Outcome::Refused
+    Outcome::Refused(reason.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -437,25 +538,23 @@ mod tests {
     fn fails_after_three_refused_answers_and_remembers_nothing() {
         let directory = tempfile::tempdir().unwrap();
         let catalog = catalog();
-        let refused = catalog
+        let (refused_id, refused) = catalog
             .templates()
             .find(|(_, template)| template.contains('{'))
-            .unwrap()
-            .1
-            .to_owned();
-        let fake = Fake::new(|template, _| {
-            if template == refused {
-                // A candidate that drops the placeholders, then a malformed answer, are both refused.
+            .map(|(id, template)| (id.to_owned(), template.to_owned()))
+            .unwrap();
+        let fake = Fake::new(|template, call| {
+            if template != refused {
+                Ok(tagged(template))
+            } else if call % 2 == 0 {
+                // A candidate that drops the placeholders and a malformed answer are both refused.
                 Ok(tagged("no placeholders"))
             } else {
-                Ok(tagged(template))
+                Err(ProviderError::Refused)
             }
         });
         let memory = memory(directory.path());
-        assert_eq!(
-            translate(&catalog, POLICY, &memory, &fake, 1, &accept).unwrap_err(),
-            Failure::Refused(1)
-        );
+        let failure = translate(&catalog, POLICY, &memory, &fake, 1, &accept).unwrap_err();
         let attempted = catalog
             .templates()
             .take_while(|(_, template)| *template != refused)
@@ -464,11 +563,110 @@ mod tests {
         for (id, _) in catalog.templates() {
             assert!(memory.get(id).is_none());
         }
-        let message = Failure::Refused(1).message(Path::new("/k"));
+        // The diagnostic names the message and why its last answer was refused in each locale, never the answer.
+        let last_answer_was_malformed = (attempted + ATTEMPTS - 1) % 2 == 1;
+        let reason = if last_answer_was_malformed {
+            MALFORMED.to_owned()
+        } else {
+            LOCALES
+                .iter()
+                .map(|locale| format!("{locale} {}", explain("translation_placeholders")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        assert_eq!(
+            failure,
+            Failure::Refused(vec![Refusal {
+                id: refused_id.clone(),
+                template: refused.clone(),
+                reason: reason.clone(),
+            }])
+        );
+        let message = failure.message(Path::new("/k"));
         assert!(
-            message.contains("1 message(s)") && message.contains("remove /k"),
+            message.contains("1 message(s)")
+                && message.contains(&format!(
+                    "message {} ({refused:?}): {reason};",
+                    &refused_id[..12]
+                ))
+                && message.contains("remove /k")
+                && !message.contains("no placeholders"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn names_every_refused_locale_and_quotes_at_most_sixty_characters() {
+        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let (id, _) = catalog.templates().next().unwrap();
+        let mut texts = tagged("Greets people.");
+        texts.insert("ar".into(), "\u{200b}x".into());
+        texts.insert("ja".into(), "y".repeat(161));
+        assert_eq!(
+            refusal_reason(&catalog, id, &texts).unwrap(),
+            "ar is not trimmed, printable NFC text (public_text), ja exceeds the field's length budget \
+             (translation_budget)"
+        );
+        texts.remove("zh");
+        assert_eq!(
+            refusal_reason(&catalog, id, &texts).unwrap(),
+            "the answer does not have exactly one text per interface language"
+        );
+        let long = Refusal {
+            id: "a".repeat(64),
+            template: "\u{e9}".repeat(61),
+            reason: "r".into(),
+        };
+        assert_eq!(
+            long.describe(),
+            format!(
+                "message {} ({:?}): r",
+                "a".repeat(12),
+                format!("{}...", "\u{e9}".repeat(60))
+            )
+        );
+    }
+
+    #[test]
+    fn removes_directional_marks_and_composes_before_the_unchanged_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = catalog();
+        let (id, template) = catalog
+            .templates()
+            .find(|(_, template)| template.contains('{'))
+            .unwrap();
+        // A right-to-left mark before each placeholder, and a shadda written before its fatha (not NFC).
+        let answered = "\u{64a}\u{651}\u{64e} \u{200f}{name}: \u{2067}{count}\u{2069}.";
+        let repaired = "\u{64a}\u{64e}\u{651} {name}: {count}.";
+        for text in [
+            answered,
+            "\u{64a}\u{651}\u{64e} {name}: {count}.",
+            "\u{200f}{name}: {count}.",
+        ] {
+            assert_eq!(catalog.translation_error(id, text), Some("public_text"));
+        }
+        let fake = Fake::new(|template, _| {
+            let mut texts = tagged(template);
+            if template.contains('{') {
+                texts.insert("ar".into(), answered.into());
+            }
+            Ok(texts)
+        });
+        let memory = memory(directory.path());
+        let pack = translate(&catalog, POLICY, &memory, &fake, 1, &accept).unwrap();
+        let value: Value = serde_json::from_slice(pack.bytes()).unwrap();
+        assert_eq!(value["locales"]["ar"][id], repaired);
+        assert_eq!(memory.get(id).unwrap()["ar"], repaired);
+
+        // Every other invisible or unprintable character is still refused, never removed.
+        for invisible in ["\u{200b}", "\u{200d}", "\u{feff}", "\u{a0}"] {
+            let mut texts = tagged(template);
+            texts.insert("ar".into(), format!("{invisible}{{name}}: {{count}}."));
+            assert_eq!(
+                refusal_reason(&catalog, id, &composed(texts)).unwrap(),
+                format!("ar {}", explain("public_text"))
+            );
+        }
     }
 
     #[test]

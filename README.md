@@ -52,14 +52,15 @@ answers with the canonical request fingerprint and option values.
 `shimpz assistant stage` builds an unpublished Local snapshot without any Shimpz Account, sign-in, or service, and
 embeds the language pack of its messages. When an OpenAI API key is saved in the owner-only file
 `~/.config/shimpz/openai-api-key` (`$XDG_CONFIG_HOME/shimpz/openai-api-key`, or `%APPDATA%\shimpz\openai-api-key` on
-Windows, where the CLI does not check file permissions), the CLI sends each English message without a valid
-remembered translation, and nothing else, to OpenAI (`gpt-6-luna`) for every interface language. It admits each
-answer with the protocol's reference rules and, once the pinned SDK's validator admits the complete pack, remembers
-it per message in its cache, so an unchanged message is not translated again while that entry stays valid. Without
-that file the
-pack shows the English text in every interface language and staging says so. A key file that is unsafe, unreadable,
-or malformed, a provider failure, or a message refused three times fails staging instead of silently falling back.
-Neither pack claims a Developers translation: publication builds and translates its own pack in Developers.
+Windows, where the CLI does not check file permissions), the CLI sends each English message without a valid remembered
+translation, and nothing else, to OpenAI (`gpt-6-luna`) for every interface language. It removes invisible directional
+marks from each answer, composes it in Unicode NFC, admits it with the protocol's reference rules, and, once the pinned
+SDK's validator admits the complete pack, remembers it per message in its cache, so an unchanged message is not
+translated again while that entry stays valid. Without that file the pack shows the English text in every interface
+language and staging says so. A key file that is unsafe, unreadable, or malformed, a provider failure, or a message
+refused three times fails staging instead of silently falling back; a refused message is named with the reason each
+language was refused. Neither pack claims a Developers translation: publication builds and translates its own pack in
+Developers.
 
 `shimpz assistant run` mints one logical `operation_id` per run and repeats it on every human-request replay, as Team
 does for one logical operation. A handled Action failure arrives as one sanitized failure frame: the CLI shows its real
