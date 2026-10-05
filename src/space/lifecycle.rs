@@ -2750,6 +2750,38 @@ mod tests {
         assert!(context.resolve(Some(&developer_release.reference)).is_err());
     }
 
+    /// Opt-in: admit a developer release built by .scripts/local-release/developer-release.sh from this host's
+    /// Docker store, bound to the public baseline it names. Only reads images and creates temporary containers.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs SHIMPZ_DEVELOPER_RELEASE, this host's Docker store, and the public stable release"]
+    fn live_developer_release_resolves_from_this_hosts_store() {
+        let reference =
+            std::env::var("SHIMPZ_DEVELOPER_RELEASE").expect("SHIMPZ_DEVELOPER_RELEASE");
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(PathBuf::from("docker")),
+            scheduled: false,
+        };
+        let release = context.resolve(Some(&reference)).unwrap();
+        assert!(release.metadata.baseline.is_some());
+        let metadata = &release.metadata;
+        for (member, package) in [
+            (&metadata.admin, release::ADMIN),
+            (&metadata.team, release::TEAM),
+            (&metadata.brain, release::BRAIN),
+            (&metadata.egress, release::EGRESS),
+        ] {
+            context.engine.pull_exact(member, package).unwrap();
+        }
+        let missing = format!("localhost/shimpz-local-release@sha256:{}", "0".repeat(64));
+        assert!(context.resolve(Some(&missing)).is_err());
+    }
+
     #[test]
     fn rollback_backup_replaces_a_stale_graph_with_the_current_contract() {
         let home = tempfile::tempdir().unwrap();
