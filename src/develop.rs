@@ -7,9 +7,9 @@ use std::{
     time::Duration,
 };
 
-use ureq::{Agent, Body, http::Response};
+use ureq::{Body, http::Response};
 
-use crate::{args::DeveloperAgent, output};
+use crate::{args::DeveloperAgent, developers_client, output};
 
 const GUIDE_URL: &str = "https://developers.shimpz.com/assistant.md";
 const GUIDE_MARKER: &str = "<!-- shimpz-assistant-guide:v1 -->";
@@ -42,12 +42,7 @@ fn project_directory(project: &Path) -> Result<PathBuf, String> {
 }
 
 fn fetch_guide(url: &str) -> Result<String, String> {
-    let config = Agent::config_builder()
-        .timeout_global(Some(REQUEST_TIMEOUT))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let mut response = Agent::new_with_config(config)
+    let mut response = developers_client::agent(REQUEST_TIMEOUT)
         .get(url)
         .header("Accept", "text/markdown")
         .call()

@@ -8,9 +8,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
-use zeroize::Zeroizing;
 
-use crate::{args::PublicationVisibility, auth, digest, manifest, output, python, source_package};
+use crate::{
+    args::PublicationVisibility,
+    auth,
+    developers_client::{self, unavailable},
+    digest, manifest, output, python, source_package,
+};
 
 const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publication-consents";
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
@@ -73,13 +77,8 @@ struct Api {
 
 impl Api {
     fn new() -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: config.into(),
+            agent: developers_client::agent(REQUEST_TIMEOUT),
         }
     }
 
@@ -89,7 +88,7 @@ impl Api {
         identity: &manifest::PublicationIdentity,
         source_digest: &str,
     ) -> Result<(), String> {
-        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let authorization = developers_client::bearer(credentials.access_token());
         let request = CreatorConsentRequest {
             assistant_id: &identity.id,
             version: &identity.version,
@@ -117,7 +116,7 @@ impl Api {
         package: &source_package::SourcePackage,
         visibility: PublicationVisibility,
     ) -> Result<Publication, String> {
-        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let authorization = developers_client::bearer(credentials.access_token());
         let mut response = self
             .agent
             .post(PUBLICATIONS_URL)
@@ -141,7 +140,7 @@ impl Api {
         source_digest: &str,
         visibility: PublicationVisibility,
     ) -> Result<Publication, PublicationStatusError> {
-        let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
+        let authorization = developers_client::bearer(credentials.access_token());
         let url = format!("{PUBLICATIONS_URL}/{source_digest}");
         let mut response = self
             .agent
@@ -246,20 +245,11 @@ impl CreatorConsent {
 }
 
 fn read_consent(response: &mut Response<Body>) -> Result<CreatorConsent, String> {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return Err("Developers returned an invalid Creator consent response".into());
-    }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json()
-        .map_err(|_| "Developers returned an invalid Creator consent response".to_owned())
+    developers_client::read_json(
+        response,
+        MAX_RESPONSE_BYTES,
+        "Developers returned an invalid Creator consent response",
+    )
 }
 
 fn read_publication(
@@ -267,26 +257,17 @@ fn read_publication(
     expected_digest: &str,
     expected_visibility: &str,
 ) -> Result<Publication, String> {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return Err("Developers returned an invalid publication response".into());
-    }
-    let publication: Publication = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json()
-        .map_err(|_| "Developers returned an invalid publication response".to_owned())?;
+    let publication: Publication = developers_client::read_json(
+        response,
+        MAX_RESPONSE_BYTES,
+        "Developers returned an invalid publication response",
+    )?;
     publication.validate(expected_digest, expected_visibility)?;
     Ok(publication)
 }
 
 /// Describe a refused Developers request from its safe error envelope and any bounded rate-limit interval.
-pub(crate) fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
+fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
     let retry_after = match validate_retry_after(
         response.status().as_u16(),
         response
@@ -297,30 +278,10 @@ pub(crate) fn status_error(response: &mut Response<Body>, fallback: &'static str
         Ok(value) => value,
         Err(message) => return message,
     };
-    let message = api_error(response).map_or_else(|| fallback.into(), |error| error.message);
+    let message = developers_client::error_message(response, MAX_RESPONSE_BYTES, fallback);
     retry_after.map_or(message.clone(), |seconds| {
         format!("{message}; retry after {seconds} seconds")
     })
-}
-
-/// Read Developers' closed JSON error envelope, if the response carries a valid one.
-pub(crate) fn api_error(response: &mut Response<Body>) -> Option<ApiError> {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return None;
-    }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json::<ErrorEnvelope>()
-        .ok()
-        .map(|envelope| envelope.error)
-        .filter(ApiError::valid)
 }
 
 fn validate_retry_after(status: u16, value: Option<&str>) -> Result<Option<u64>, String> {
@@ -591,45 +552,6 @@ impl Publication {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ErrorEnvelope {
-    error: ApiError,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ApiError {
-    pub(crate) code: String,
-    pub(crate) message: String,
-    request_id: String,
-}
-
-impl ApiError {
-    fn valid(&self) -> bool {
-        valid_error_code(&self.code)
-            && !self.message.is_empty()
-            && self.message.len() <= 200
-            && self
-                .message
-                .bytes()
-                .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
-            && self.request_id.len() == 32
-            && self
-                .request_id
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    }
-}
-
-fn valid_error_code(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 fn valid_build_error(value: &str) -> bool {
     matches!(
         value,
@@ -654,10 +576,6 @@ fn valid_trust_reference(value: &str) -> bool {
     value
         .strip_prefix("ghcr.io/theshimpz/shimpz-assistant-trust@")
         .is_some_and(digest::is_sha256)
-}
-
-pub(crate) fn unavailable() -> String {
-    "Developers is unavailable; try again shortly".into()
 }
 
 #[cfg(test)]

@@ -8,10 +8,10 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::{Agent, Body, http::Response};
-use zeroize::Zeroizing;
 
 use crate::{
     credentials::{self, Credentials},
+    developers_client::{self, unavailable},
     digest, output,
 };
 
@@ -138,13 +138,8 @@ struct Api {
 
 impl Api {
     fn new() -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: config.into(),
+            agent: developers_client::agent(REQUEST_TIMEOUT),
         }
     }
 
@@ -191,7 +186,7 @@ impl Api {
     }
 
     fn session(&self, access_token: &str) -> Result<Option<AuthSession>, String> {
-        let authorization = Zeroizing::new(format!("Bearer {access_token}"));
+        let authorization = developers_client::bearer(access_token);
         let mut response = self
             .agent
             .get(SESSION_URL)
@@ -232,7 +227,7 @@ impl Api {
     }
 
     fn revoke(&self, refresh_token: &str) -> Result<(), String> {
-        let authorization = Zeroizing::new(format!("Bearer {refresh_token}"));
+        let authorization = developers_client::bearer(refresh_token);
         let mut response = self
             .agent
             .delete(SESSION_URL)
@@ -272,39 +267,15 @@ fn token_credentials(response: &mut Response<Body>) -> Result<Credentials, Strin
 }
 
 fn read_json<T: DeserializeOwned>(response: &mut Response<Body>) -> Result<T, String> {
-    if response
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        != Some("application/json")
-    {
-        return Err("Developers returned an invalid response".into());
-    }
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_json()
-        .map_err(|_| "Developers returned an invalid response".into())
+    developers_client::read_json(
+        response,
+        MAX_RESPONSE_BYTES,
+        "Developers returned an invalid response",
+    )
 }
 
 fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String {
-    read_json::<ErrorEnvelope>(response)
-        .ok()
-        .filter(|envelope| envelope.error.valid())
-        .map_or_else(|| fallback.into(), |envelope| envelope.error.message)
-}
-
-fn valid_error_code(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn unavailable() -> String {
-    "Developers is unavailable; try again shortly".into()
+    developers_client::error_message(response, MAX_RESPONSE_BYTES, fallback)
 }
 
 fn now_unix() -> Result<u64, String> {
@@ -463,37 +434,6 @@ impl AuthSession {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ErrorEnvelope {
-    error: ApiError,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApiError {
-    code: String,
-    message: String,
-    request_id: String,
-}
-
-impl ApiError {
-    fn valid(&self) -> bool {
-        valid_error_code(&self.code)
-            && !self.message.is_empty()
-            && self.message.len() <= 200
-            && self
-                .message
-                .bytes()
-                .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
-            && self.request_id.len() == 32
-            && self
-                .request_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    }
-}
-
 fn valid_handle(value: &str) -> bool {
     value.len() == 22 && base64url(value)
 }
@@ -523,7 +463,7 @@ fn valid_user_code(value: &str) -> bool {
 mod tests {
     use super::{
         ASSISTANT_PUBLISH_SCOPE, AuthSession, DeviceAuthorization, SecretInput, TokenResponse,
-        cumulative_scopes, valid_error_code, valid_user_code,
+        cumulative_scopes, valid_user_code,
     };
 
     #[test]
@@ -568,8 +508,6 @@ mod tests {
     fn rejects_malformed_protocol_values() {
         assert!(valid_user_code("BCDF-GHJK"));
         assert!(!valid_user_code("ABCD-EFGH"));
-        assert!(valid_error_code("step_up_required"));
-        assert!(!valid_error_code("Step Up"));
         let invalid_session = AuthSession {
             authenticated: true,
             account_id: "A".repeat(32),
