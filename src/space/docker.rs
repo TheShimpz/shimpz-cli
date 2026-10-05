@@ -581,8 +581,11 @@ impl Engine {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        // The image was resolved just before; a create must never fetch it.
         let mut arguments = vec![
             OsString::from("create"),
+            OsString::from("--pull"),
+            OsString::from("never"),
             OsString::from("--platform"),
             OsString::from(self.platform),
             OsString::from(reference),
