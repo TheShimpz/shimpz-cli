@@ -363,7 +363,7 @@ fn systemd_service(paths: &Paths) -> Result<String, String> {
 }
 
 fn systemd_timer() -> &'static str {
-    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=2m\nOnUnitActiveSec=2m\nRandomizedDelaySec=30s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n"
+    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=30s\nOnUnitActiveSec=30s\nRandomizedDelaySec=5s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n"
 }
 
 fn launch_agent(paths: &Paths) -> Result<String, String> {
@@ -374,7 +374,7 @@ fn launch_agent(paths: &Paths) -> Result<String, String> {
             .ok_or_else(|| "the managed CLI path is not UTF-8".to_owned())?,
     );
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LAUNCHD_LABEL}</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>120</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {MARKER} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LAUNCHD_LABEL}</string>\n<key>ProgramArguments</key><array><string>{cli}</string><string>start</string><string>--scheduled</string></array>\n<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>30</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n"
     ))
 }
 
@@ -703,9 +703,9 @@ mod tests {
         );
         assert!(!service.contains("sh -c"));
         let timer = systemd_timer();
-        assert!(timer.contains("OnActiveSec=2m"));
-        assert!(timer.contains("OnUnitActiveSec=2m"));
-        assert!(timer.contains("RandomizedDelaySec=30s"));
+        assert!(timer.contains("OnActiveSec=30s"));
+        assert!(timer.contains("OnUnitActiveSec=30s"));
+        assert!(timer.contains("RandomizedDelaySec=5s"));
         assert!(timer.contains("AccuracySec=1s"));
         assert!(timer.contains("WantedBy=timers.target"));
         assert!(!timer.contains("OnBootSec="));
@@ -713,6 +713,31 @@ mod tests {
         let plist = launch_agent(&paths).unwrap();
         assert!(plist.contains("<string>/home/Ada Space/.shimpz/bin/shimpz</string>"));
         assert!(plist.contains("<string>--scheduled</string>"));
+        assert!(plist.contains("<key>StartInterval</key><integer>30</integer>"));
+    }
+
+    #[test]
+    fn a_marked_timer_with_another_cadence_is_owned_and_replaced_by_the_current_one() {
+        let current = systemd_timer();
+        let other = current.replace("OnUnitActiveSec=30s", "OnUnitActiveSec=5m");
+        assert_ne!(other, current);
+        let facts = EntryFacts {
+            regular: true,
+            symlink: false,
+            uid: rustix::process::getuid().as_raw(),
+            mode: 0o100_600,
+            len: other.len() as u64,
+        };
+        let marker = format!("# {MARKER}");
+        assert_eq!(
+            classify_entry(
+                facts,
+                other.as_bytes(),
+                current.as_bytes(),
+                marker.as_bytes()
+            ),
+            EntryState::OwnedCorrupt
+        );
     }
 
     #[test]
