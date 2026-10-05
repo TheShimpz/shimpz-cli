@@ -613,34 +613,25 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_failure_cancels_the_retries_of_other_workers() {
-        let directory = tempfile::tempdir().unwrap();
-        let catalog = catalog_of(&[("Greets people.", 160), ("Fails at once.", 160)]);
-        let failed = AtomicBool::new(false);
-        let fake = Fake::new(|template, _| {
-            if template == "Fails at once." {
-                failed.store(true, Ordering::SeqCst);
-                return Err(ProviderError::Key);
-            }
-            // Answer inadmissibly only after the other worker failed, which would otherwise earn two retries.
-            while !failed.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(1));
-            }
-            thread::sleep(Duration::from_millis(50));
+    fn a_terminal_failure_elsewhere_cancels_every_further_attempt() {
+        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let (id, template) = catalog.templates().next().unwrap();
+        let stop = AtomicBool::new(false);
+        // Another worker fails while this inadmissible answer is in flight, which would otherwise earn two retries.
+        let fake = Fake::new(|_, _| {
+            stop.store(true, Ordering::SeqCst);
             Ok(tagged("no placeholders {x}"))
         });
-        assert_eq!(
-            translate(
-                &catalog,
-                POLICY,
-                &memory(directory.path()),
-                &fake,
-                2,
-                &accept
-            )
-            .unwrap_err(),
-            Failure::Provider(ProviderError::Key)
-        );
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            translate_message(&catalog, id, template, &fake, &stop),
+            Outcome::Cancelled
+        ));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        // Nothing starts once cancelled.
+        assert!(matches!(
+            translate_message(&catalog, id, template, &fake, &stop),
+            Outcome::Cancelled
+        ));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
 }
