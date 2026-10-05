@@ -153,14 +153,13 @@ mod tests {
         assert!(load(&link).unwrap_err().contains("regular file"));
 
         let fifo = directory.path().join("fifo");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RWXU,
-            0,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         // A FIFO is refused at once instead of blocking for a writer.
         assert!(load(&fifo).unwrap_err().contains("not a regular file"));
 

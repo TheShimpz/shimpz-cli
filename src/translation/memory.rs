@@ -125,14 +125,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let memory = Memory::new(directory.path().to_owned());
         let fifo = directory.path().join("fifo");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RWXU,
-            0,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let fifo_entry = directory.path().join(format!("{}.json", "f".repeat(64)));
         fs::rename(&fifo, &fifo_entry).unwrap();
         assert!(memory.get(&"f".repeat(64)).is_none());
