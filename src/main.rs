@@ -13,7 +13,6 @@ mod language_pack;
 mod manifest;
 mod new_assistant;
 mod output;
-mod prepare;
 mod publish;
 mod python;
 mod snapshot_files;
@@ -22,6 +21,7 @@ mod source_package;
 mod space;
 mod stage;
 mod toolchain;
+mod translation;
 mod unstage;
 mod upgrade;
 mod ustar;
@@ -74,9 +74,6 @@ fn run(command: &Command) -> ExitCode {
             action,
             input,
         }) => (invoke::run(project, action, input), Presentation::Data),
-        Command::Assistant(AssistantCommand::Prepare { project }) => {
-            (prepare::run(project), Presentation::Success)
-        }
         Command::Assistant(AssistantCommand::Stage { project }) => {
             (stage::run(project), Presentation::Success)
         }

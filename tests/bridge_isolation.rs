@@ -114,6 +114,10 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
     let _ = fs::remove_dir_all(&root);
     assert!(!executed, "the project's shimpz/ package ran: {stderr}");
     assert!(!bytecode, "the bridge wrote bytecode into the project");
-    // The trusted bridge answered with a valid catalog, so staging reached its prepared-pack requirement.
-    assert!(stderr.contains("no language pack is prepared"), "{stderr}");
+    // The trusted bridge answered with a valid catalog, so staging built its language pack and asked the same
+    // trusted bridge, which answers every command with that catalog, to verify it.
+    assert!(
+        stderr.contains("invalid language pack acknowledgement"),
+        "{stderr}"
+    );
 }

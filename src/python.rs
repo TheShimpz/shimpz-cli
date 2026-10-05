@@ -86,11 +86,7 @@ pub(crate) fn verify_pack(project: &Path, catalog_digest: &str, pack: &[u8]) -> 
             withheld: None,
         }),
     )
-    .map_err(|reason| {
-        format!(
-            "the Python SDK refuses the language pack ({reason}); run 'shimpz assistant prepare' again"
-        )
-    })?;
+    .map_err(|reason| format!("the Python SDK refuses the language pack ({reason})"))?;
     let expected = serde_json::json!({
         "catalog": catalog_digest,
         "pack": language_pack::digest(pack),

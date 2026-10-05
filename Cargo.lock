@@ -1661,6 +1661,8 @@ dependencies = [
  "crc32fast",
  "flate2",
  "getrandom 0.3.4",
+ "icu_normalizer",
+ "icu_properties",
  "libc",
  "memsafe",
  "nix",

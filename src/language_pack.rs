@@ -1,19 +1,17 @@
-//! Static Assistant message catalogs and the language packs prepared for them (ADR-0091).
+//! Static Assistant message catalogs and the language packs staged with them (ADR-0091).
 //!
-//! The CLI checks exactly what staging relies on: the canonical bytes, the catalog digest, and one admissible
-//! translation of every message in every interface language. Team remains the admission authority and repeats the
-//! complete Unicode text rules when it installs a Local snapshot.
+//! The CLI applies the protocol reference rules a Local snapshot relies on: the canonical bytes, the catalog digest,
+//! and one admissible text of every message in every interface language, including the Unicode text and placeholder
+//! rules. The pinned SDK's reference validator and Team admission repeat them.
 
-use std::collections::BTreeSet;
-use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
 
+use icu_normalizer::ComposingNormalizerBorrowed;
+use icu_properties::CodePointMapData;
+use icu_properties::props::GeneralCategory;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-
-use crate::toolchain;
 
 /// Every interface language other than English, which is the catalog itself.
 pub(crate) const LOCALES: [&str; 7] = ["ar", "de", "es", "fr", "ja", "pt", "zh"];
@@ -29,7 +27,6 @@ const FIELD_BOUNDS: [usize; 4] = [80, 120, 160, 500];
 
 /// One extracted English catalog and its canonical digest.
 pub(crate) struct Catalog {
-    messages: Value,
     canonical: Vec<u8>,
     entries: Vec<Message>,
     digest: String,
@@ -56,8 +53,6 @@ struct Param {
 #[derive(Debug)]
 pub(crate) struct Pack {
     bytes: Vec<u8>,
-    digest: String,
-    policy: String,
 }
 
 impl Catalog {
@@ -84,7 +79,6 @@ impl Catalog {
             return Err(invalid());
         }
         Ok(Self {
-            messages,
             entries,
             digest: digest(&canonical),
             canonical,
@@ -100,12 +94,47 @@ impl Catalog {
         &self.canonical
     }
 
-    pub(crate) fn messages(&self) -> &Value {
-        &self.messages
+    /// Every message as its id and English template, in catalog order.
+    pub(crate) fn templates(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries
+            .iter()
+            .map(|message| (message.id.as_str(), message.msgid.as_str()))
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+    /// The first reason `text` is not an admissible translation of message `id`, mirroring the protocol codes.
+    pub(crate) fn translation_error(&self, id: &str, text: &str) -> Option<&'static str> {
+        self.entries
+            .iter()
+            .find(|message| message.id == id)
+            .map_or(Some("pack_incomplete"), |message| {
+                message.template_error(text)
+            })
+    }
+
+    /// The canonical pack of this catalog under `policy`, with exactly one admissible text per message and locale.
+    pub(crate) fn pack(
+        &self,
+        policy: &str,
+        locales: &BTreeMap<&str, BTreeMap<&str, &str>>,
+    ) -> Result<Pack, &'static str> {
+        let bytes = serde_json::to_vec(&json!({
+            "catalog": self.digest,
+            "format": PACK_FORMAT,
+            "locales": locales,
+            "policy": policy,
+        }))
+        .map_err(|_| "pack_encoding")?;
+        verify(bytes, self)
+    }
+
+    /// The pack that shows each English template unchanged in every interface language.
+    pub(crate) fn source_text_pack(&self, policy: &str) -> Result<Pack, &'static str> {
+        let english = self.templates().collect::<BTreeMap<_, _>>();
+        let locales = LOCALES
+            .iter()
+            .map(|locale| (*locale, english.clone()))
+            .collect();
+        self.pack(policy, &locales)
     }
 }
 
@@ -138,7 +167,7 @@ impl Message {
             .iter()
             .map(|param| param.name.as_str())
             .collect::<BTreeSet<_>>();
-        if unique.len() != names.len() || unique != declared {
+        if unique.len() != names.len() || unique != declared || mark_follows_field(template) {
             return Some("translation_placeholders");
         }
         let fields = names.iter().map(|name| name.len() + 2).sum::<usize>();
@@ -168,14 +197,6 @@ impl Pack {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
-    }
-
-    pub(crate) fn policy(&self) -> &str {
-        &self.policy
-    }
 }
 
 /// Verify exact pack bytes for `catalog`, returning the protocol error code of the first violation.
@@ -200,7 +221,7 @@ pub(crate) fn verify(bytes: Vec<u8>, catalog: &Catalog) -> Result<Pack, &'static
     let policy = pack["policy"]
         .as_str()
         .filter(|policy| valid_digest(policy));
-    let (Some(policy), Some(PACK_FORMAT), Some(pack_catalog)) = (
+    let (Some(_), Some(PACK_FORMAT), Some(pack_catalog)) = (
         policy,
         pack["format"].as_str(),
         pack["catalog"].as_str().filter(|value| valid_digest(value)),
@@ -227,61 +248,7 @@ pub(crate) fn verify(bytes: Vec<u8>, catalog: &Catalog) -> Result<Pack, &'static
             }
         }
     }
-    let policy = policy.to_owned();
-    Ok(Pack {
-        digest: digest(&bytes),
-        bytes,
-        policy,
-    })
-}
-
-/// The CLI cache directory that holds prepared packs outside every authored project.
-pub(crate) fn cache_directory() -> Result<PathBuf, String> {
-    toolchain::cache_directory().map(|directory| directory.join("language-packs"))
-}
-
-/// Load and re-verify the pack prepared for exactly this catalog, if one exists.
-pub(crate) fn load(directory: &Path, catalog: &Catalog) -> Result<Option<Pack>, String> {
-    let file = match File::open(cache_file(directory, catalog)) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("the prepared language pack cannot be read".into()),
-    };
-    let mut bytes = Vec::new();
-    file.take(u64::try_from(MAX_PACK_BYTES).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "the prepared language pack cannot be read".to_owned())?;
-    verify(bytes, catalog).map(Some).map_err(|code| {
-        format!(
-            "the prepared language pack is invalid ({code}); run 'shimpz assistant prepare' again"
-        )
-    })
-}
-
-/// Atomically keep a verified pack under its catalog digest.
-pub(crate) fn store(directory: &Path, catalog: &Catalog, pack: &Pack) -> Result<(), String> {
-    fs::create_dir_all(directory)
-        .map_err(|_| "the language pack cache cannot be created".to_owned())?;
-    let mut file = atomic_write_file::AtomicWriteFile::open(cache_file(directory, catalog))
-        .map_err(|_| "the language pack cannot be stored".to_owned())?;
-    file.write_all(&pack.bytes)
-        .and_then(|()| file.commit())
-        .map_err(|_| "the language pack cannot be stored".into())
-}
-
-/// The pack staging needs; staging never contacts Developers, so a missing pack names the command that makes it.
-pub(crate) fn prepared(catalog: &Catalog) -> Result<Pack, String> {
-    load(&cache_directory()?, catalog)?.ok_or_else(|| {
-        "no language pack is prepared for this Assistant's current messages; run 'shimpz assistant prepare', then stage again".into()
-    })
-}
-
-fn cache_file(directory: &Path, catalog: &Catalog) -> PathBuf {
-    let name = catalog
-        .digest
-        .strip_prefix("sha256:")
-        .unwrap_or(&catalog.digest);
-    directory.join(format!("{name}.json"))
+    Ok(Pack { bytes })
 }
 
 /// Return the named fields in order, or `None` for any other brace syntax.
@@ -310,14 +277,43 @@ fn valid_param_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-/// Trimmed, bounded text without control characters or any whitespace other than a space.
+/// Trimmed, bounded, printable NFC text: the protocol's `public_text`, where printable excludes every Other (`C*`)
+/// and Separator (`Z*`) character except the ASCII space, exactly like Python's `str.isprintable`.
 fn public_text(value: &str, maximum: usize) -> bool {
+    let categories = CodePointMapData::<GeneralCategory>::new();
     !value.is_empty()
         && value.trim() == value
         && value.chars().count() <= maximum
         && value.chars().all(|character| {
-            !character.is_control() && (character == ' ' || !character.is_whitespace())
+            character == ' '
+                || !matches!(
+                    categories.get(character),
+                    GeneralCategory::Control
+                        | GeneralCategory::Format
+                        | GeneralCategory::Surrogate
+                        | GeneralCategory::PrivateUse
+                        | GeneralCategory::Unassigned
+                        | GeneralCategory::SpaceSeparator
+                        | GeneralCategory::LineSeparator
+                        | GeneralCategory::ParagraphSeparator
+                )
         })
+        && ComposingNormalizerBorrowed::new_nfc().is_normalized(value)
+}
+
+/// Whether a combining mark directly follows a placeholder, which could denormalize an NFC rendering.
+fn mark_follows_field(template: &str) -> bool {
+    let categories = CodePointMapData::<GeneralCategory>::new();
+    template.split('}').skip(1).any(|rest| {
+        rest.chars().next().is_some_and(|character| {
+            matches!(
+                categories.get(character),
+                GeneralCategory::NonspacingMark
+                    | GeneralCategory::SpacingMark
+                    | GeneralCategory::EnclosingMark
+            )
+        })
+    })
 }
 
 pub(crate) fn valid_digest(value: &str) -> bool {
@@ -373,6 +369,17 @@ pub(crate) mod tests {
         Catalog::from_document(&catalog_document()).expect("valid catalog")
     }
 
+    /// A catalog of parameterless messages with their field bounds; the first one is the summary.
+    pub(crate) fn catalog_of(messages: &[(&str, usize)]) -> Catalog {
+        let mut entries = messages
+            .iter()
+            .map(|(msgid, max_length)| message(msgid, *max_length, &json!([])))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+        Catalog::from_document(&json!({"messages": entries, "summary": messages[0].0}).to_string())
+            .expect("valid catalog")
+    }
+
     pub(crate) fn pack_value(catalog: &Catalog) -> Value {
         let translations = catalog
             .entries
@@ -418,7 +425,7 @@ pub(crate) mod tests {
 
     #[test]
     fn admits_only_the_sdk_catalog_document() {
-        assert_eq!(catalog().len(), 3);
+        assert_eq!(catalog().templates().count(), 3);
         let document: Value = serde_json::from_str(&catalog_document()).unwrap();
         for invalid in [
             json!({"messages": document["messages"]}),
@@ -479,8 +486,7 @@ pub(crate) mod tests {
     fn verifies_exact_canonical_complete_packs() {
         let catalog = catalog();
         let pack = verify(pack_bytes(&catalog), &catalog).expect("valid pack");
-        assert_eq!(pack.digest(), digest(&pack_bytes(&catalog)));
-        assert_eq!(pack.policy(), format!("sha256:{}", "c".repeat(64)));
+        assert_eq!(pack.bytes(), pack_bytes(&catalog).as_slice());
 
         let spaced = serde_json::to_string_pretty(&pack_value(&catalog)).unwrap();
         assert_eq!(
@@ -535,27 +541,73 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn keeps_prepared_packs_by_catalog_and_reverifies_them() {
-        let directory = tempfile::tempdir().unwrap();
+    fn applies_the_reference_unicode_text_rules_to_every_translation() {
         let catalog = catalog();
-        assert!(load(directory.path(), &catalog).unwrap().is_none());
-        let pack = verify(pack_bytes(&catalog), &catalog).unwrap();
-        store(directory.path(), &catalog, &pack).unwrap();
-        let loaded = load(directory.path(), &catalog)
-            .unwrap()
-            .expect("stored pack");
-        assert_eq!(loaded.digest(), pack.digest());
+        let description = hex_sha256(DESCRIPTION.as_bytes());
+        for (expected, text) in [
+            // Decomposed "é" is not NFC.
+            ("public_text", "Cumprimente {name}: {count}. Olá e\u{301}."),
+            // Zero-width space (Cf), no-break space (Zs), private use (Co), and an unassigned code point (Cn).
+            ("public_text", "Cumprimente\u{200b} {name}: {count}."),
+            ("public_text", "Cumprimente\u{a0}{name}: {count}."),
+            ("public_text", "Cumprimente {name}: {count}.\u{e000}"),
+            ("public_text", "Cumprimente {name}: {count}.\u{378}"),
+            ("public_text", " Cumprimente {name}: {count}."),
+            // A combining mark directly after a placeholder.
+            (
+                "translation_placeholders",
+                "Cumprimente {name}\u{301}: {count}.",
+            ),
+        ] {
+            assert_eq!(
+                catalog.translation_error(&description, text),
+                Some(expected),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            catalog.translation_error(&description, "Begrüße {name}: {count}. 你好"),
+            None
+        );
+        assert_eq!(
+            catalog.translation_error(&"0".repeat(64), "x"),
+            Some("pack_incomplete")
+        );
+    }
 
-        // A changed catalog has another digest, so the earlier pack is never selected for it.
-        let mut changed: Value = serde_json::from_str(&catalog_document()).unwrap();
-        let summary = message("Greets people again.", 160, &json!([]));
-        changed["messages"] = json!([summary]);
-        changed["summary"] = json!("Greets people again.");
-        let changed = Catalog::from_document(&changed.to_string()).unwrap();
-        assert!(load(directory.path(), &changed).unwrap().is_none());
-
-        fs::write(cache_file(directory.path(), &catalog), b"{}").unwrap();
-        let error = load(directory.path(), &catalog).unwrap_err();
-        assert!(error.contains("shimpz assistant prepare"), "{error}");
+    #[test]
+    fn builds_canonical_source_text_and_assembled_packs() {
+        let catalog = catalog();
+        let policy = format!("sha256:{}", "a".repeat(64));
+        let source = catalog.source_text_pack(&policy).expect("source-text pack");
+        let value: Value = serde_json::from_slice(source.bytes()).unwrap();
+        assert_eq!(value["policy"], policy);
+        for locale in LOCALES {
+            for (id, msgid) in catalog.templates() {
+                assert_eq!(value["locales"][locale][id], msgid);
+            }
+        }
+        // The assembled pack is byte-identical to the canonical pack a reference producer writes.
+        let expected = pack_bytes(&catalog);
+        let translated: Value = serde_json::from_slice(&expected).unwrap();
+        let locales = LOCALES
+            .iter()
+            .map(|locale| {
+                let texts = translated["locales"][locale]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, text)| (id.as_str(), text.as_str().unwrap()))
+                    .collect();
+                (*locale, texts)
+            })
+            .collect();
+        let assembled = catalog
+            .pack(&format!("sha256:{}", "c".repeat(64)), &locales)
+            .expect("assembled pack");
+        assert_eq!(assembled.bytes(), expected.as_slice());
+        let mut missing = locales.clone();
+        missing.remove("ja");
+        assert_eq!(catalog.pack(&policy, &missing).unwrap_err(), "pack_shape");
     }
 }

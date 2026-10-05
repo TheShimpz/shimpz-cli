@@ -18,7 +18,9 @@ use crate::language_pack::{self, Catalog, Pack};
 use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
-use crate::{output, python, snapshot_files, snapshot_lock, source_package, toolchain};
+use crate::{
+    output, python, snapshot_files, snapshot_lock, source_package, toolchain, translation,
+};
 
 const PYTHON_VERSION: &str = "3.14";
 pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
@@ -65,7 +67,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 "#;
 
-const PACK_MISMATCH: &str = "the staged image's generated catalog does not match the prepared language pack; pin the CLI's Python SDK in pyproject.toml, run 'shimpz assistant prepare', then stage again";
+const PACK_MISMATCH: &str = "the staged image's generated catalog does not match the language pack staged for it; pin the CLI's Python SDK in pyproject.toml, then stage again";
 const CONTRACT_PATH: &str = "/opt/shimpz/shimpz.contract.json";
 const PACK_PATH: &str = "/opt/shimpz/shimpz.pack.json";
 const MAX_CONTRACT_BYTES: usize = 524_288;
@@ -108,7 +110,7 @@ COPY --from=build /usr/local/lib/libpython3.14.so.1.0 /usr/local/lib/libpython3.
 COPY --from=build /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 COPY --from=build /opt/shimpz/ /opt/shimpz/
 COPY --from=build /usr/local/bin/shimpz-action /usr/local/bin/shimpz-action
-# The prepared pack enters only here, after the stage that ran Creator code. The CLI verifies the final files from
+# The language pack enters only here, after the stage that ran Creator code. The CLI verifies the final files from
 # outside the image, because that stage could have changed the interpreter and standard library copied here.
 COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json
 
@@ -131,7 +133,10 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     validate_dependency_sources(&package.pyproject)?;
     output::progress("Extracting the static message catalog...");
     let catalog = Catalog::from_document(&python::catalog(project)?)?;
-    let pack = language_pack::prepared(&catalog)?;
+    let (pack, language) = translation::pack(&catalog)?;
+    if language == translation::Language::SourceText {
+        output::warning(&translation::key_hint());
+    }
     let sdk_verify = |bytes: &[u8]| python::verify_pack(project, catalog.digest(), bytes);
     sdk_verify(pack.bytes())?;
     let context = tempfile::tempdir().map_err(|_| "Local snapshot workspace cannot be created")?;
@@ -160,8 +165,11 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
         output::warning(&message);
     }
     Ok(format!(
-        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nEarlier snapshots of this Assistant are removed by the Local Space once no Team uses them.\nNext: ask a Local Team for work that needs this Assistant. Chat installs a fresh binding automatically; existing bindings still require an explicit replacement in Admin.",
-        identity.id, identity.version, image_id
+        "Local Assistant snapshot staged.\nAssistant: {} {}\nImage: {}\nLanguage: {}\nEarlier snapshots of this Assistant are removed by the Local Space once no Team uses them.\nNext: ask a Local Team for work that needs this Assistant. Chat installs a fresh binding automatically; existing bindings still require an explicit replacement in Admin.",
+        identity.id,
+        identity.version,
+        image_id,
+        language.describe()
     ))
 }
 
@@ -258,7 +266,7 @@ fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Resul
     let reference = expected.reference;
     let identity = expected.identity;
     let current = current_image(docker, reference, &identity.id)?;
-    // The build digest covers the prepared pack, so a changed pack never reuses an image that carries another one.
+    // The build digest covers the staged pack, so a changed pack never reuses an image that carries another one.
     if let Some(current) = current
         .as_ref()
         .filter(|current| current.build_digest == expected.build_digest)
@@ -303,7 +311,7 @@ struct ExpectedImage<'a> {
     discovery: &'a DiscoveryProjection,
     /// The canonical catalog the trusted host SDK extracted: the anchor the image's contract must carry.
     catalog: &'a [u8],
-    /// The exact prepared pack bytes.
+    /// The exact staged pack bytes.
     pack: &'a [u8],
     /// The SDK reference validator, applied again to the pack exported from the final image.
     verify_pack: &'a dyn Fn(&[u8]) -> Result<(), String>,
@@ -501,7 +509,7 @@ fn stage_nonce() -> String {
 }
 
 /// Export the final contract and pack from a created, never-started container and compare them on the host with
-/// the trusted anchor and the prepared pack; nothing inside the image runs.
+/// the trusted anchor and the staged pack; nothing inside the image runs.
 fn verify_language_files(
     docker: &Path,
     image_id: &str,
@@ -525,7 +533,7 @@ fn verify_language_files(
         exported_file(docker, &container, CONTRACT_PATH, MAX_CONTRACT_BYTES).and_then(|contract| {
             let pack = exported_file(docker, &container, PACK_PATH, language_pack::MAX_PACK_BYTES)?;
             if pack != expected.pack {
-                return Err("the staged image does not carry the prepared language pack".to_owned());
+                return Err("the staged image does not carry the staged language pack".to_owned());
             }
             let catalog = serde_json::from_slice::<serde_json::Value>(&contract)
                 .ok()
@@ -1374,11 +1382,20 @@ mod tests {
         assert!(!implementation.contains("lifecycle::"));
         assert!(!implementation.contains("credentials"));
         assert!(!implementation.contains("ureq"));
-        assert!(!implementation.contains("prepare::"));
+        // The language pack is made without any Shimpz sign-in or service.
+        for source in [
+            include_str!("translation/mod.rs"),
+            include_str!("translation/key.rs"),
+            include_str!("translation/memory.rs"),
+            include_str!("translation/provider.rs"),
+        ] {
+            assert!(!source.contains("auth::"));
+            assert!(!source.contains("shimpz.com"));
+        }
     }
 
     #[test]
-    fn the_prepared_pack_enters_the_final_image_after_creator_code_and_nothing_in_it_verifies() {
+    fn the_staged_pack_enters_the_final_image_after_creator_code_and_nothing_in_it_verifies() {
         let (build, last) = DOCKERFILE
             .split_once("\nFROM gcr.io/distroless")
             .expect("final stage");
@@ -1416,7 +1433,7 @@ mod tests {
         assert!(
             verify(contract, br#"{"pack":"other"}"#, 0o444)
                 .unwrap_err()
-                .contains("does not carry the prepared language pack")
+                .contains("does not carry the staged language pack")
         );
         assert!(
             verify(contract, PROOF_PACK, 0o644)

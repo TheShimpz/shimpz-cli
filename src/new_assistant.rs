@@ -167,17 +167,17 @@ shimpz assistant run hello-world --input '{{\"name\":\"World\"}}'
 ```
 
 The Action asks for approval before it greets. Write every request message in English with `shimpz.text`;
-parameters such as `identifier(...)` are inserted unchanged, and Shimpz translates each distinct message once.
+parameters such as `identifier(...)` are inserted unchanged.
 
 ## Local Space
 
 ```console
-shimpz assistant prepare
 shimpz assistant stage
 ```
 
-`prepare` uses your Creator sign-in to translate the current messages and keeps the language pack outside this
-project. `stage` then builds the Local snapshot offline; run `prepare` again after changing any message.
+`stage` builds the Local snapshot without any Shimpz sign-in. With an OpenAI API key saved in
+`~/.config/shimpz/openai-api-key` (readable only by you), it translates each new or changed message into every
+interface language once; without that file, every language shows your English text.
 "
     )
 }
@@ -274,7 +274,8 @@ mod tests {
         assert!(action.contains("@action(human_requests=[\"approval\"])"));
         assert!(action.contains("title=text(\"Send a greeting\")"));
         assert!(action.contains("name=identifier(name, max_length=80)"));
-        assert!(readme.contains("shimpz assistant prepare"));
+        assert!(readme.contains("shimpz assistant stage"));
+        assert!(!readme.contains("shimpz assistant prepare"));
     }
 
     #[test]

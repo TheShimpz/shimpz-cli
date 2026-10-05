@@ -146,13 +146,15 @@ fn credentials_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "OS configuration directory is unavailable".into())
 }
 
+/// The per-user OS configuration root that holds the CLI's private `shimpz` directory.
 #[cfg(windows)]
-fn config_root() -> Option<PathBuf> {
+pub(crate) fn config_root() -> Option<PathBuf> {
     env::var_os("APPDATA").map(PathBuf::from)
 }
 
+/// The per-user OS configuration root that holds the CLI's private `shimpz` directory.
 #[cfg(not(windows))]
-fn config_root() -> Option<PathBuf> {
+pub(crate) fn config_root() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| {

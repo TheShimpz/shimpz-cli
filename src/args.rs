@@ -82,9 +82,6 @@ pub(crate) enum AssistantCommand {
         action: String,
         input: Input,
     },
-    Prepare {
-        project: PathBuf,
-    },
     Stage {
         project: PathBuf,
     },
@@ -291,7 +288,6 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
         "develop" => parse_assistant_develop(rest),
         "check" => parse_assistant_check(rest),
         "run" => parse_assistant_run(rest),
-        "prepare" => parse_assistant_prepare(rest),
         "stage" => parse_assistant_stage(rest),
         "unstage" => parse_assistant_unstage(rest),
         "publish" => parse_assistant_publish(rest),
@@ -410,16 +406,6 @@ fn parse_assistant_check(arguments: &[String]) -> Result<Invocation, String> {
     let project = project_option(arguments, "check")?;
     Ok(Invocation::Execute(Command::Assistant(
         AssistantCommand::Check { project },
-    )))
-}
-
-fn parse_assistant_prepare(arguments: &[String]) -> Result<Invocation, String> {
-    if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help(Topic::AssistantPrepare));
-    }
-    let project = project_option(arguments, "prepare")?;
-    Ok(Invocation::Execute(Command::Assistant(
-        AssistantCommand::Prepare { project },
     )))
 }
 
@@ -638,27 +624,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_language_pack_preparation_with_an_optional_project() {
-        assert_eq!(
-            parse(strings(&["assistant", "prepare"])),
-            Ok(Invocation::Execute(Command::Assistant(
-                AssistantCommand::Prepare {
-                    project: PathBuf::from(".")
-                }
-            )))
-        );
-        assert_eq!(
-            parse(strings(&["assistant", "prepare", "--project", "whatsapp"])),
-            Ok(Invocation::Execute(Command::Assistant(
-                AssistantCommand::Prepare {
-                    project: PathBuf::from("whatsapp")
-                }
-            )))
-        );
-        assert_eq!(
-            parse(strings(&["assistant", "prepare", "--locale", "pt"])),
-            Err("assistant prepare accepts only --project <path>".into())
-        );
+    fn refuses_the_retired_language_pack_preparation() {
+        for arguments in [
+            &["assistant", "prepare"][..],
+            &["assistant", "prepare", "--project", "whatsapp"][..],
+            &["assistant", "prepare", "--help"][..],
+        ] {
+            assert_eq!(
+                parse(strings(arguments)),
+                Err("unknown assistant operation".into())
+            );
+        }
     }
 
     #[test]
@@ -1156,7 +1132,6 @@ mod tests {
             "shimpz assistant develop",
             "shimpz assistant check",
             "shimpz assistant run",
-            "shimpz assistant prepare",
             "shimpz assistant stage",
             "shimpz assistant unstage",
             "shimpz assistant publish",
@@ -1171,6 +1146,7 @@ mod tests {
             "shimpz test",
             "shimpz publish",
             "shimpz install assistant",
+            "shimpz assistant prepare",
         ] {
             for topic in Topic::ALL {
                 assert!(!topic.text().contains(retired));
@@ -1200,10 +1176,6 @@ mod tests {
             ),
             (&["assistant", "check", "--help"][..], Topic::AssistantCheck),
             (&["assistant", "run", "--help"][..], Topic::AssistantRun),
-            (
-                &["assistant", "prepare", "--help"][..],
-                Topic::AssistantPrepare,
-            ),
             (&["assistant", "stage", "--help"][..], Topic::AssistantStage),
             (
                 &["assistant", "unstage", "--help"][..],

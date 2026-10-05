@@ -1,4 +1,4 @@
-//! Proves that Local staging uses only an already prepared language pack and never contacts Developers.
+//! Proves that Local staging makes its language pack without any Shimpz sign-in or service (ADR-0091).
 
 #![cfg(unix)]
 
@@ -25,9 +25,13 @@ fn catalog_digest() -> String {
     hex(&serde_json::to_vec(&messages()).unwrap())
 }
 
-fn pack() -> Vec<u8> {
-    let translations =
-        Map::from_iter([(hex(SUMMARY.as_bytes()), json!("Verifica a execução local."))]);
+/// The pinned policy of packs translated from the workstation and of packs that show the English text.
+const TRANSLATED_POLICY: &str = "a155c476af22c11e8ca76522ce00a8c15fc0cb04d664cb7c0de661e4d3403747";
+const SOURCE_TEXT_POLICY: &str = "52855d44158b34c730d32bdc597e690db42f0af37c26839d507f1f87210145ff";
+
+/// The canonical pack showing `text` for the summary in every interface language under `policy`.
+fn pack(text: &str, policy: &str) -> Vec<u8> {
+    let translations = Map::from_iter([(hex(SUMMARY.as_bytes()), json!(text))]);
     let locales = LOCALES
         .iter()
         .map(|locale| ((*locale).to_owned(), Value::Object(translations.clone())))
@@ -36,7 +40,7 @@ fn pack() -> Vec<u8> {
         "catalog": format!("sha256:{}", catalog_digest()),
         "format": "assistant-language-pack-v1",
         "locales": locales,
-        "policy": format!("sha256:{}", "c".repeat(64)),
+        "policy": format!("sha256:{policy}"),
     }))
     .unwrap()
 }
@@ -45,6 +49,7 @@ struct Workspace {
     root: PathBuf,
     uv: PathBuf,
     log: PathBuf,
+    verified: PathBuf,
 }
 
 impl Workspace {
@@ -60,6 +65,7 @@ impl Workspace {
         fs::create_dir_all(root.join("cache")).unwrap();
         fs::create_dir_all(root.join("config")).unwrap();
         let log = root.join("uv.log");
+        let verified = root.join("verified.json");
         let catalog = json!({"messages": messages(), "summary": SUMMARY}).to_string();
         let script = format!(
             "#!/bin/sh\n\
@@ -73,7 +79,9 @@ impl Workspace {
             log = log.display(),
             verify = refusal.map_or_else(
                 || format!(
-                    "pack=$(sha256sum | cut -d' ' -f1); printf '{{\"catalog\":\"sha256:{}\",\"pack\":\"sha256:%s\"}}\\n' \"$pack\"; exit 0",
+                    "cat > '{}'; pack=$(sha256sum < '{}' | cut -d' ' -f1); printf '{{\"catalog\":\"sha256:{}\",\"pack\":\"sha256:%s\"}}\\n' \"$pack\"; exit 0",
+                    verified.display(),
+                    verified.display(),
                     catalog_digest()
                 ),
                 |code| format!("cat >/dev/null; printf 'shimpz: {code}\\n' >&2; exit 1"),
@@ -82,7 +90,12 @@ impl Workspace {
         let uv = root.join("uv");
         fs::write(&uv, script).unwrap();
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
-        Self { root, uv, log }
+        Self {
+            root,
+            uv,
+            log,
+            verified,
+        }
     }
 
     fn stage(&self) -> Output {
@@ -111,64 +124,86 @@ impl Drop for Workspace {
     }
 }
 
-#[test]
-fn refuses_to_stage_without_a_prepared_pack() {
-    let workspace = Workspace::new("missing");
+/// Run `stage` and require that it reached dependency resolution, which this fake toolchain refuses before any Docker
+/// work; return its standard error and the exact pack the SDK reference validator received.
+fn staged_pack(workspace: &Workspace) -> (String, Vec<u8>) {
     let output = workspace.stage();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success());
-    assert!(
-        stderr.contains("run 'shimpz assistant prepare', then stage again"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("Local snapshot dependencies"), "{stderr}");
     let calls = workspace.calls();
-    assert!(calls.contains("shimpz._bridge catalog"), "{calls}");
-    assert!(!calls.contains("pip compile"), "{calls}");
+    assert!(calls.contains("shimpz._bridge verify-pack"), "{calls}");
+    assert!(calls.contains("pip compile"), "{calls}");
+    (stderr, fs::read(&workspace.verified).unwrap())
+}
+
+fn key_file(workspace: &Workspace, mode: u32) -> PathBuf {
+    let directory = workspace.root.join("config/shimpz");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("openai-api-key");
+    fs::write(&path, "sk-test-not-a-real-key\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    path
 }
 
 #[test]
-fn refuses_a_tampered_prepared_pack() {
-    let workspace = Workspace::new("tampered");
-    let directory = workspace.root.join("cache/language-packs");
-    fs::create_dir_all(&directory).unwrap();
-    let mut tampered = pack();
-    tampered.push(b'\n');
-    fs::write(
-        directory.join(format!("{}.json", catalog_digest())),
-        tampered,
-    )
-    .unwrap();
-    let output = workspace.stage();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+fn stages_english_source_text_without_a_key_or_any_sign_in() {
+    let workspace = Workspace::new("source-text");
+    let (stderr, staged) = staged_pack(&workspace);
+    assert_eq!(staged, pack(SUMMARY, SOURCE_TEXT_POLICY));
     assert!(
-        stderr.contains("prepared language pack is invalid (pack_encoding)"),
+        stderr.contains("Assistant messages stay in English in every interface language"),
         "{stderr}"
     );
+    assert!(stderr.contains("openai-api-key"), "{stderr}");
+    assert!(!stderr.contains("shimpz auth"), "{stderr}");
+    assert!(!workspace.root.join("cache/translations").exists());
+}
+
+#[test]
+fn stages_remembered_translations_with_a_key_without_contacting_the_provider() {
+    let workspace = Workspace::new("remembered");
+    key_file(&workspace, 0o600);
+    let memory = workspace
+        .root
+        .join("cache/translations")
+        .join(TRANSLATED_POLICY);
+    fs::create_dir_all(&memory).unwrap();
+    let texts = LOCALES
+        .iter()
+        .map(|locale| ((*locale).to_owned(), json!("Verifica a execução local.")))
+        .collect::<Map<_, _>>();
+    fs::write(
+        memory.join(format!("{}.json", hex(SUMMARY.as_bytes()))),
+        serde_json::to_vec(&texts).unwrap(),
+    )
+    .unwrap();
+    let (stderr, staged) = staged_pack(&workspace);
+    assert_eq!(
+        staged,
+        pack("Verifica a execução local.", TRANSLATED_POLICY)
+    );
+    assert!(!stderr.contains("Translating"), "{stderr}");
+    assert!(!stderr.contains("stay in English"), "{stderr}");
+    assert!(!stderr.contains("sk-test"), "{stderr}");
+}
+
+#[test]
+fn refuses_an_unsafe_key_file_instead_of_staging_english_text() {
+    let workspace = Workspace::new("unsafe-key");
+    let path = key_file(&workspace, 0o644);
+    let output = workspace.stage();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+    assert!(stderr.contains("mode 0600"), "{stderr}");
+    assert!(!stderr.contains("sk-test"), "{stderr}");
     assert!(!workspace.calls().contains("pip compile"));
 }
 
 #[test]
-fn stages_offline_with_the_pack_prepared_for_the_current_catalog() {
-    let workspace = Workspace::new("prepared");
-    let directory = workspace.root.join("cache/language-packs");
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join(format!("{}.json", catalog_digest())), pack()).unwrap();
-    let output = workspace.stage();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // The pack is admitted from the cache alone; staging continues to dependency resolution, which this fake
-    // toolchain refuses, before any Docker work. No Creator credential or Developers request exists on this path.
-    assert!(!output.status.success());
-    assert!(!stderr.contains("shimpz assistant prepare"), "{stderr}");
-    assert!(stderr.contains("Local snapshot dependencies"), "{stderr}");
-    assert!(workspace.calls().contains("pip compile"));
-}
-
-#[test]
-fn refuses_a_cached_pack_the_sdk_reference_validator_refuses() {
+fn refuses_a_pack_the_sdk_reference_validator_refuses() {
     let workspace = Workspace::with_validator("sdk-refused", Some("translation_placeholders"));
-    let directory = workspace.root.join("cache/language-packs");
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join(format!("{}.json", catalog_digest())), pack()).unwrap();
     let output = workspace.stage();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());

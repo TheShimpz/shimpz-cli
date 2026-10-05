@@ -21,6 +21,8 @@ atomic-write-file = "0.3.0"
 base64 = "0.22"
 crc32fast = "1"
 getrandom = "0.3"
+icu_normalizer = { version = "2.2", default-features = false, features = ["compiled_data"] }
+icu_properties = "2.2"
 memsafe = "=1.0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
