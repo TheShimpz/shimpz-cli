@@ -5,6 +5,7 @@ mod args;
 mod auth;
 mod credentials;
 mod develop;
+mod digest;
 mod help;
 mod human_request;
 mod install;

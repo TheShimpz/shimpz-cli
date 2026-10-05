@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::auth;
+use crate::{auth, digest};
 
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
@@ -227,8 +227,8 @@ impl Installed {
             || self.team_id != team_id
             || self.source_digest != source_digest
             || !valid_assistant_id(&self.assistant_id)
-            || !valid_digest(&self.oci_digest)
-            || !valid_digest(&self.binding_digest)
+            || !digest::is_sha256(&self.oci_digest)
+            || !digest::is_sha256(&self.binding_digest)
         {
             return Err("Developers returned an invalid installation response".into());
         }
@@ -294,14 +294,6 @@ fn valid_assistant_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && !value.ends_with('-')
         && !value.contains("--")
-}
-
-fn valid_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn unavailable() -> String {

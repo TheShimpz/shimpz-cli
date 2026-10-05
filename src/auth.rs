@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     credentials::{self, Credentials},
-    output,
+    digest, output,
 };
 
 const ORIGIN: &str = "https://developers.shimpz.com";
@@ -445,11 +445,7 @@ struct AuthSession {
 impl AuthSession {
     fn validate(&self) -> Result<(), String> {
         if !self.authenticated
-            || self.account_id.len() != 32
-            || !self
-                .account_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !digest::is_lower_hex(&self.account_id, 32)
             || self.scopes.is_empty()
             || self.scopes.len() > AVAILABLE_SCOPES.len()
             || self

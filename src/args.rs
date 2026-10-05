@@ -3,7 +3,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::digest;
 use crate::help::Topic;
+use crate::space::release::{valid_developer_release_ref, valid_published_release_ref};
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
@@ -183,7 +185,7 @@ fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
                 candidate: false,
             })))
         }
-        [option, release] if option == "--release" && valid_release_ref(release) => {
+        [option, release] if option == "--release" && valid_published_release_ref(release) => {
             Ok(Invocation::Execute(Command::Install(SpaceInstall {
                 release: Some(release.clone()),
                 print_graph: None,
@@ -193,7 +195,7 @@ fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
         [option, release, candidate]
             if option == "--release"
                 && candidate == "--candidate"
-                && valid_release_ref(release) =>
+                && valid_published_release_ref(release) =>
         {
             Ok(Invocation::Execute(Command::Install(SpaceInstall {
                 release: Some(release.clone()),
@@ -230,7 +232,7 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
         [release_option, release, candidate_option]
             if release_option == "--release"
                 && candidate_option == "--candidate"
-                && valid_release_ref(release) =>
+                && valid_published_release_ref(release) =>
         {
             (false, Some(release.clone()), true)
         }
@@ -238,7 +240,7 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
             if scheduled_option == "--scheduled"
                 && release_option == "--release"
                 && candidate_option == "--candidate"
-                && valid_release_ref(release) =>
+                && valid_published_release_ref(release) =>
         {
             (true, Some(release.clone()), true)
         }
@@ -275,26 +277,6 @@ fn parse_no_options(
         [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(help)),
         _ => Err(format!("{name} accepts no options")),
     }
-}
-
-fn valid_release_ref(value: &str) -> bool {
-    const PREFIX: &str = "ghcr.io/theshimpz/shimpz-local-release@sha256:";
-    value.strip_prefix(PREFIX).is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
-fn valid_developer_release_ref(value: &str) -> bool {
-    const PREFIX: &str = "localhost/shimpz-local-release@sha256:";
-    value.strip_prefix(PREFIX).is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
 }
 
 fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
@@ -551,7 +533,7 @@ fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
     let Some(source_digest) = arguments.first().filter(|value| !value.starts_with('-')) else {
         return Err("assistant install requires a source digest".into());
     };
-    if !valid_sha256_digest(source_digest) {
+    if !digest::is_sha256(source_digest) {
         return Err("Assistant source digest is invalid".into());
     }
     let team = match &arguments[1..] {
@@ -612,14 +594,6 @@ fn valid_team_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn valid_sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

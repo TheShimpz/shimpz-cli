@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 use zeroize::Zeroizing;
 
-use crate::{args::PublicationVisibility, auth, manifest, output, python, source_package};
+use crate::{args::PublicationVisibility, auth, digest, manifest, output, python, source_package};
 
 const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publication-consents";
 const PUBLICATIONS_URL: &str = "https://developers.shimpz.com/api/v1/publications";
@@ -478,13 +478,16 @@ impl Publication {
             return false;
         }
         let expected_image = format!("ghcr.io/theshimpz/shimpz-assistant@{oci_digest}");
-        valid_digest(oci_digest)
+        digest::is_sha256(oci_digest)
             && self.image_reference.as_deref() == Some(expected_image.as_str())
-            && self.manifest_digest.as_deref().is_some_and(valid_digest)
+            && self
+                .manifest_digest
+                .as_deref()
+                .is_some_and(digest::is_sha256)
             && self
                 .machine_contract_digest
                 .as_deref()
-                .is_some_and(valid_digest)
+                .is_some_and(digest::is_sha256)
             && self.signature_identity.as_deref()
                 == Some(
                     "https://github.com/TheShimpz/shimpz-developers/.github/workflows/build-assistant.yml@refs/heads/main",
@@ -497,8 +500,8 @@ impl Publication {
                 .provenance_reference
                 .as_deref()
                 .is_some_and(valid_trust_reference)
-            && self.sbom_digest.as_deref().is_some_and(valid_digest)
-            && self.scan_digest.as_deref().is_some_and(valid_digest)
+            && self.sbom_digest.as_deref().is_some_and(digest::is_sha256)
+            && self.scan_digest.as_deref().is_some_and(digest::is_sha256)
     }
 
     fn terminal_result(&self) -> Option<Result<String, String>> {
@@ -647,18 +650,10 @@ fn valid_printable_ascii(value: &str, max_length: usize) -> bool {
         && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
 }
 
-fn valid_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn valid_trust_reference(value: &str) -> bool {
     value
         .strip_prefix("ghcr.io/theshimpz/shimpz-assistant-trust@")
-        .is_some_and(valid_digest)
+        .is_some_and(digest::is_sha256)
 }
 
 pub(crate) fn unavailable() -> String {

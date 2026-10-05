@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use crate::manifest::PublicationIdentity;
-use crate::{output, snapshot_lock, source_package, stage};
+use crate::{digest, output, snapshot_lock, source_package, stage};
 
 const MAX_BATCH: usize = 50;
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -82,7 +82,7 @@ fn canonical_image_ids(output: &str) -> Result<Vec<String>, String> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if images.iter().any(|image| !stage::valid_image_id(image)) {
+    if images.iter().any(|image| !digest::is_sha256(image)) {
         return Err("Docker returned an invalid Local Assistant snapshot inventory".into());
     }
     Ok(images

@@ -314,10 +314,7 @@ fn checksum_for(document: &str, version: &str, archive: &str) -> Result<String, 
     let mut parsed = BTreeMap::new();
     for line in document.lines() {
         let (digest, name) = line.split_once("  ").ok_or_else(invalid_checksums)?;
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        if !crate::digest::is_sha256_hex(digest)
             || !expected_assets.iter().any(|expected| expected == name)
             || parsed.insert(name, digest.to_owned()).is_some()
         {

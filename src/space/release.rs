@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::digest;
+
 pub(crate) const RELEASE_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-local-release";
 pub(crate) const DEVELOPER_RELEASE_REPOSITORY: &str = "localhost/shimpz-local-release";
 const PUBLISHED_NAMESPACE: &str = "ghcr.io/theshimpz/";
@@ -124,12 +126,12 @@ pub(crate) fn parse(reference: &str, document: &str) -> Result<Release, String> 
         .filter(|value| *value > 0)
         .ok_or_else(|| "the Local release ordinal is invalid".to_owned())?;
     for key in ["umbrella_revision", "cli_revision"] {
-        if !valid_hex(values[key], 40) {
+        if !digest::is_lower_hex(values[key], 40) {
             return Err(format!("the Local release {key} is invalid"));
         }
     }
     for key in ["cli_linux_amd64_sha256", "cli_macos_arm64_sha256"] {
-        if !valid_hex(values[key], 64) {
+        if !digest::is_sha256_hex(values[key]) {
             return Err(format!("the Local release {key} is invalid"));
         }
     }
@@ -205,33 +207,17 @@ pub(crate) fn valid_release_ref(value: &str) -> bool {
 }
 
 pub(crate) fn valid_published_release_ref(value: &str) -> bool {
-    valid_digest_ref(value, RELEASE_REPOSITORY)
+    digest::is_pinned(value, RELEASE_REPOSITORY)
 }
 
 pub(crate) fn valid_developer_release_ref(value: &str) -> bool {
-    valid_digest_ref(value, DEVELOPER_RELEASE_REPOSITORY)
+    digest::is_pinned(value, DEVELOPER_RELEASE_REPOSITORY)
 }
 
 fn in_namespace(value: &str, namespace: &str, package: &str) -> bool {
     value
         .strip_prefix(namespace)
-        .and_then(|rest| rest.strip_prefix(package))
-        .and_then(|suffix| suffix.strip_prefix("@sha256:"))
-        .is_some_and(|digest| valid_hex(digest, 64))
-}
-
-fn valid_digest_ref(value: &str, repository: &str) -> bool {
-    value
-        .strip_prefix(repository)
-        .and_then(|suffix| suffix.strip_prefix("@sha256:"))
-        .is_some_and(|digest| valid_hex(digest, 64))
-}
-
-fn valid_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        .is_some_and(|rest| digest::is_pinned(rest, package))
 }
 
 #[cfg(test)]

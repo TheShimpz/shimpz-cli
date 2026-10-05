@@ -220,11 +220,13 @@ pub(crate) fn verify(bytes: Vec<u8>, catalog: &Catalog) -> Result<Pack, &'static
         .ok_or("pack_shape")?;
     let policy = pack["policy"]
         .as_str()
-        .filter(|policy| valid_digest(policy));
+        .filter(|policy| crate::digest::is_sha256(policy));
     let (Some(_), Some(PACK_FORMAT), Some(pack_catalog)) = (
         policy,
         pack["format"].as_str(),
-        pack["catalog"].as_str().filter(|value| valid_digest(value)),
+        pack["catalog"]
+            .as_str()
+            .filter(|value| crate::digest::is_sha256(value)),
     ) else {
         return Err("pack_shape");
     };
@@ -313,15 +315,6 @@ fn mark_follows_field(template: &str) -> bool {
                     | GeneralCategory::EnclosingMark
             )
         })
-    })
-}
-
-pub(crate) fn valid_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
 }
 

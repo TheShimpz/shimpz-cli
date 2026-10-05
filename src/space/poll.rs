@@ -14,6 +14,7 @@ use ureq::Agent;
 use super::paths::Paths;
 use super::release::RELEASE_REPOSITORY;
 use super::state::{self, Installed};
+use crate::digest;
 
 /// Full resolution and health repair still runs this often even when the release is unchanged.
 const FULL_REPAIR_SECONDS: u64 = 30 * 60;
@@ -76,20 +77,11 @@ fn backoff_seconds(failures: u32, retry_after: Option<u64>) -> u64 {
     })
 }
 
-pub(crate) fn valid_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    })
-}
-
 pub(crate) fn release_digest(release_ref: &str) -> Option<&str> {
     release_ref
         .strip_prefix(RELEASE_REPOSITORY)
         .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|digest| valid_digest(digest))
+        .filter(|value| digest::is_sha256(value))
 }
 
 /// Read one bounded private record owned by this user; anything else is treated as absent evidence.
@@ -117,7 +109,7 @@ fn parse_state(document: &str, now: u64) -> Option<PollState> {
         object
             .get(key)
             .and_then(Value::as_str)
-            .filter(|value| value.is_empty() || valid_digest(value))
+            .filter(|value| value.is_empty() || digest::is_sha256(value))
             .map(str::to_owned)
     };
     let parsed = PollState {
@@ -381,8 +373,8 @@ pub(crate) fn probe_stable() -> Probe {
         .get("docker-content-digest")
         .and_then(|value| value.to_str().ok())
     {
-        Some(digest) if response.status().as_u16() == 200 && valid_digest(digest) => {
-            Probe::Digest(digest.into())
+        Some(value) if response.status().as_u16() == 200 && digest::is_sha256(value) => {
+            Probe::Digest(value.into())
         }
         _ => Probe::Unavailable,
     }
@@ -689,7 +681,7 @@ mod tests {
 
     #[test]
     fn only_exact_release_digests_are_accepted() {
-        assert!(valid_digest(INSTALLED));
+        assert!(digest::is_sha256(INSTALLED));
         for invalid in [
             "",
             "sha256:",
@@ -697,7 +689,7 @@ mod tests {
             &INSTALLED.to_uppercase(),
             &format!("{INSTALLED}0"),
         ] {
-            assert!(!valid_digest(invalid), "{invalid}");
+            assert!(!digest::is_sha256(invalid), "{invalid}");
         }
         assert_eq!(
             release_digest(&format!("{RELEASE_REPOSITORY}@{INSTALLED}")),
@@ -764,7 +756,7 @@ mod tests {
     #[ignore = "reads the public GHCR release channel"]
     fn live_probe_reads_the_public_stable_release_digest() {
         match probe_stable() {
-            Probe::Digest(value) => assert!(valid_digest(&value)),
+            Probe::Digest(value) => assert!(digest::is_sha256(&value)),
             other => panic!("unexpected live probe outcome: {other:?}"),
         }
     }

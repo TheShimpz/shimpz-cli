@@ -18,6 +18,7 @@ use super::poll::{self, TeamActivity};
 use super::release::{
     self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, Package, RELEASE_REPOSITORY, Release,
 };
+use crate::digest;
 
 const RELEASE_CHANNEL: &str = "stable";
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
@@ -640,7 +641,7 @@ impl Engine {
             .map_err(|_| "Docker returned malformed image digests".to_owned())?;
         let mut matching = digests
             .into_iter()
-            .filter(|value| valid_image_ref(value, repository));
+            .filter(|value| digest::is_pinned(value, repository));
         let first = matching
             .next()
             .ok_or_else(|| "Docker returned no repository digest".to_owned())?;
@@ -1178,21 +1179,9 @@ fn developer_image_present(
     let Ok(digests) = serde_json::from_str::<Vec<String>>(digests) else {
         return false;
     };
-    valid_image_ref(reference, repository)
+    digest::is_pinned(reference, repository)
         && image_platform == platform
         && digests.iter().any(|value| value == reference)
-}
-
-fn valid_image_ref(value: &str, repository: &str) -> bool {
-    value
-        .strip_prefix(repository)
-        .and_then(|suffix| suffix.strip_prefix("@sha256:"))
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
 }
 
 fn version_at_least(value: &str, minimum: (u64, u64, u64)) -> bool {
@@ -1638,22 +1627,6 @@ mod tests {
             &reference,
             "localhost/shimpz-brain",
             "linux/amd64"
-        ));
-    }
-
-    #[test]
-    fn accepts_only_exact_repository_digest_references() {
-        assert!(valid_image_ref(
-            &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
-            "ghcr.io/theshimpz/shimpz-admin"
-        ));
-        assert!(!valid_image_ref(
-            &format!("example.invalid/admin@sha256:{DIGEST}"),
-            "ghcr.io/theshimpz/shimpz-admin"
-        ));
-        assert!(!valid_image_ref(
-            "ghcr.io/theshimpz/shimpz-admin:stable",
-            "ghcr.io/theshimpz/shimpz-admin"
         ));
     }
 

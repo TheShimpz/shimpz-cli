@@ -19,7 +19,7 @@ use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
 use crate::{
-    output, python, snapshot_files, snapshot_lock, source_package, toolchain, translation,
+    digest, output, python, snapshot_files, snapshot_lock, source_package, toolchain, translation,
 };
 
 const PYTHON_VERSION: &str = "3.14";
@@ -361,11 +361,11 @@ fn current_image(
             owner,
             build_digest,
             nonce,
-        ] if valid_image_id(image_id)
+        ] if digest::is_sha256(image_id)
             && local_digests_valid(digests, assistant_id, image_id)
             && *tags == expected_tags
             && *owner == assistant_id
-            && valid_image_id(build_digest) =>
+            && digest::is_sha256(build_digest) =>
         {
             Ok(Some(CurrentImage {
                 image_id: (*image_id).to_owned(),
@@ -488,7 +488,7 @@ fn build_image(
     let image_id = fs::read_to_string(image_file.path())
         .map_err(|_| "Docker did not return the Local snapshot image identity")?;
     let image_id = image_id.trim().to_owned();
-    if !valid_image_id(&image_id) {
+    if !digest::is_sha256(&image_id) {
         return Err("Docker returned an invalid Local snapshot image identity".into());
     }
     Ok(image_id)
@@ -800,15 +800,6 @@ fn docker_failure(result: &Output, fallback: &str) -> String {
     )
 }
 
-pub(crate) fn valid_image_id(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
 fn validate_dependency_sources(pyproject: &[u8]) -> Result<(), String> {
     let source = std::str::from_utf8(pyproject).map_err(|_| unsafe_dependencies())?;
     let document = toml::from_str::<Value>(source).map_err(|_| unsafe_dependencies())?;
@@ -883,13 +874,6 @@ pub(crate) fn await_executable(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn accepts_only_immutable_image_ids() {
-        assert!(valid_image_id(&format!("sha256:{}", "a".repeat(64))));
-        assert!(!valid_image_id(&format!("sha256:{}", "g".repeat(64))));
-        assert!(!valid_image_id("assistant:latest"));
-    }
 
     #[test]
     fn local_stage_labels_are_distinct_and_bounded() {

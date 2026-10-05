@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::action_failure::ActionFailure;
-use crate::output;
+use crate::{digest, output};
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
 const OPTION_FIELDS: [&str; 3] = ["description", "label", "value"];
@@ -187,7 +187,7 @@ fn parse_request(value: Option<&Value>) -> Result<HumanRequest, String> {
     let fingerprint = fields
         .get("fingerprint")
         .and_then(Value::as_str)
-        .filter(|value| valid_hex_digest(value))
+        .filter(|value| digest::is_sha256_hex(value))
         .ok_or_else(invalid)?
         .to_owned();
     // ADR-0038's canonical preimage is the whole request without its fingerprint, references included.
@@ -273,7 +273,9 @@ fn valid_reference(value: &Value) -> bool {
             .keys()
             .map(String::as_str)
             .eq(["message", "params"])
-            && reference["message"].as_str().is_some_and(valid_hex_digest)
+            && reference["message"]
+                .as_str()
+                .is_some_and(digest::is_sha256_hex)
             && reference["params"].is_object()
     })
 }
@@ -305,13 +307,6 @@ fn display_text(value: &Value) -> Option<&str> {
             && text.chars().count() <= MAX_DISPLAY_CHARACTERS
             && !text.chars().any(char::is_control)
     })
-}
-
-fn valid_hex_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_stored_input_id(value: &str) -> bool {
