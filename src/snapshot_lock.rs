@@ -48,6 +48,7 @@ fn require_private_file(file: &File) -> Result<(), String> {
         .map_err(|_| "Local snapshot lock metadata is unavailable".to_owned())?;
     private_file::admit(&metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => "Local snapshot lock path is not a regular file".into(),
+        #[cfg(unix)]
         Refusal::NotPrivate => "Local snapshot lock ownership or permissions are unsafe".into(),
     })
 }

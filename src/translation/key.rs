@@ -43,6 +43,7 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
         .map_err(|_| unusable("cannot be inspected"))?;
     private_file::admit(&metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => unusable("is not a regular file"),
+        #[cfg(unix)]
         Refusal::NotPrivate => unusable(
             "must be owned by you, readable only by you (mode 0600), and have a single link",
         ),

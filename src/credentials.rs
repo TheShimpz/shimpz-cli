@@ -211,6 +211,7 @@ fn clear_at(path: &Path) -> Result<(), String> {
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
     private_file::admit(metadata).map_err(|refusal| match refusal {
         Refusal::NotRegularFile => "CLI credential path is not a regular file".into(),
+        #[cfg(unix)]
         Refusal::NotPrivate => "CLI credential file ownership or permissions are unsafe".into(),
     })
 }

@@ -25,6 +25,7 @@ pub(crate) enum Refusal {
     /// The path names a directory, device, FIFO, or other non-regular file.
     NotRegularFile,
     /// The file is reachable by another user, owned by another user, or has another name.
+    #[cfg(unix)]
     NotPrivate,
 }
 
