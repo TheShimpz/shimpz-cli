@@ -253,6 +253,13 @@ enum FailedReleaseDecision {
     KeepRunning,
 }
 
+/// What a start applies; `None` in its place keeps the running Space because the selection previously failed health.
+struct StartSelection {
+    release: ResolvedRelease,
+    preserve_failed_release: bool,
+    may_hand_off: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UpdateDecision {
     Current,
@@ -367,31 +374,15 @@ impl Context {
         if options.scheduled && stopped {
             return Ok(SCHEDULED_STOPPED.into());
         }
-        let mut release = self.resolve(options.release.as_deref())?;
-        validate_forward_release(&release, Some(&installed))?;
-        if keeps_developer_release(options.release.is_none(), &installed, &release) {
-            // `stable` still names the baseline of the installed developer release: keep and reconcile that
-            // release, before failed-release memory or a CLI handoff is considered (ADR-0099).
-            let developer = self.resolve(Some(&installed.release_ref))?;
-            validate_forward_release(&developer, Some(&installed))?;
-            return self.apply(&developer, Some(&installed), options.scheduled, true);
-        }
-        let selected_failed = options.release.is_none()
-            && state::failed_release_matches(&self.paths, &release.reference)?;
-        let preserve_failed_release = match failed_release_decision(stopped, selected_failed) {
-            FailedReleaseDecision::UseSelected => false,
-            FailedReleaseDecision::ResumeInstalled => {
-                release = self.resolve(Some(&installed.release_ref))?;
-                true
-            }
-            FailedReleaseDecision::KeepRunning => {
-                return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
-            }
+        let Some(StartSelection {
+            release,
+            preserve_failed_release,
+            may_hand_off,
+        }) = self.select_start(options, &installed, stopped)?
+        else {
+            return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
         };
-        if options.release.is_none()
-            && !preserve_failed_release
-            && self.handoff_if_needed(&release, Some(&installed), options.scheduled)?
-        {
+        if may_hand_off && self.handoff_if_needed(&release, Some(&installed), options.scheduled)? {
             return self.handoff_outcome(&release);
         }
         if options.candidate && options.release.is_none() {
@@ -403,6 +394,40 @@ impl Context {
             options.scheduled,
             preserve_failed_release,
         )
+    }
+
+    /// Select what a start applies: the `stable` channel or the exact release it names. While `stable` still names
+    /// the baseline of the installed developer release, that developer release is the selection (ADR-0099); it then
+    /// meets failed-release memory like any other selection and never hands off.
+    fn select_start(
+        &self,
+        options: &SpaceStart,
+        installed: &Installed,
+        stopped: bool,
+    ) -> Result<Option<StartSelection>, String> {
+        let channel = options.release.is_none();
+        let mut release = self.resolve(options.release.as_deref())?;
+        validate_forward_release(&release, Some(installed))?;
+        let developer = keeps_developer_release(channel, installed, &release);
+        if developer {
+            release = self.resolve(Some(&installed.release_ref))?;
+            validate_forward_release(&release, Some(installed))?;
+        }
+        let selected_failed =
+            channel && state::failed_release_matches(&self.paths, &release.reference)?;
+        Ok(match failed_release_decision(stopped, selected_failed) {
+            FailedReleaseDecision::UseSelected => Some(StartSelection {
+                release,
+                preserve_failed_release: false,
+                may_hand_off: channel && !developer,
+            }),
+            FailedReleaseDecision::ResumeInstalled => Some(StartSelection {
+                release: self.resolve(Some(&installed.release_ref))?,
+                preserve_failed_release: true,
+                may_hand_off: false,
+            }),
+            FailedReleaseDecision::KeepRunning => None,
+        })
     }
 
     fn update(&self) -> Result<String, String> {
@@ -2748,6 +2773,129 @@ mod tests {
             ..macos
         };
         assert!(context.resolve(Some(&developer_release.reference)).is_err());
+    }
+
+    /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set.
+    #[cfg(unix)]
+    fn channel_docker(
+        directory: &Path,
+        stable: &ResolvedRelease,
+        sets: &[&ResolvedRelease],
+    ) -> PathBuf {
+        for set in sets {
+            let digest = set.reference.rsplit_once(':').unwrap().1;
+            fs::write(
+                directory.join(format!("{digest}.env")),
+                release_document(set),
+            )
+            .unwrap();
+        }
+        let docker = directory.join("channel-docker");
+        fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                stable = stable.reference,
+                directory = directory.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        docker
+    }
+
+    /// The release a start selects, whether it preserves failed-release memory, and whether it may hand off.
+    #[cfg(unix)]
+    fn selection(
+        home: &Path,
+        stable: &ResolvedRelease,
+        sets: &[&ResolvedRelease],
+        failed: Option<&str>,
+        exact: Option<&str>,
+        stopped: bool,
+    ) -> Result<Option<(String, bool, bool)>, String> {
+        let paths = Paths::under(home).unwrap();
+        if !paths.home.exists() {
+            fs::create_dir(&paths.home).unwrap();
+        }
+        if paths.failed_release.exists() {
+            fs::remove_file(&paths.failed_release).unwrap();
+        }
+        if let Some(record) = failed {
+            state::write_private(&paths.failed_release, record).unwrap();
+        }
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(channel_docker(home, stable, sets)),
+            scheduled: exact.is_none(),
+        };
+        let options = SpaceStart {
+            scheduled: exact.is_none(),
+            release: exact.map(str::to_owned),
+            candidate: false,
+        };
+        let installed = installed_from(&developer(2, 'b', '1'));
+        Ok(context
+            .select_start(&options, &installed, stopped)?
+            .map(|selected| {
+                (
+                    selected.release.reference,
+                    selected.preserve_failed_release,
+                    selected.may_hand_off,
+                )
+            }))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_developer_release_meets_failed_release_memory_and_never_hands_off() {
+        let home = tempfile::tempdir().unwrap();
+        let baseline = release(2, 'b');
+        let newer = release(3, 'c');
+        let installed = developer(2, 'b', '1');
+        let sibling = developer(2, 'b', '2');
+        let sets = [&baseline, &newer, &installed, &sibling];
+        let record = |release: &ResolvedRelease| format!("release={}\n", release.reference);
+        let select = |stable, failed: Option<&str>, exact, stopped| {
+            selection(home.path(), stable, &sets, failed, exact, stopped)
+        };
+        // `stable` names the baseline: the developer release is kept and repaired, never handed off.
+        assert_eq!(
+            select(&baseline, None, None, false),
+            Ok(Some((installed.reference.clone(), false, false)))
+        );
+        // A developer release that failed its repair is not applied again by the scheduler.
+        assert_eq!(
+            select(&baseline, Some(&record(&installed)), None, false),
+            Ok(None)
+        );
+        // A stopped Space resumes the installed developer release, preserving the memory.
+        assert_eq!(
+            select(&baseline, Some(&record(&installed)), None, true),
+            Ok(Some((installed.reference.clone(), true, false)))
+        );
+        assert!(select(&baseline, Some("malformed"), None, false).is_err());
+        // The owner's explicit apply retries a developer release whatever the memory says.
+        assert_eq!(
+            select(
+                &baseline,
+                Some(&record(&sibling)),
+                Some(&sibling.reference),
+                false
+            ),
+            Ok(Some((sibling.reference.clone(), false, false)))
+        );
+        // A newer publication replaces it and may hand off, unless that publication failed health.
+        assert_eq!(
+            select(&newer, None, None, false),
+            Ok(Some((newer.reference.clone(), false, true)))
+        );
+        assert_eq!(select(&newer, Some(&record(&newer)), None, false), Ok(None));
+        assert_eq!(
+            select(&newer, Some(&record(&newer)), None, true),
+            Ok(Some((installed.reference.clone(), true, false)))
+        );
     }
 
     /// Opt-in: admit a developer release built by .scripts/local-release/developer-release.sh from this host's
