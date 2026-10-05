@@ -1,10 +1,11 @@
 //! Serialize staging and unstaging of one Assistant's Local snapshots on this workstation.
 
-use std::env;
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+use crate::config_dir::{self, Refusal};
 
 /// Holds one Assistant's snapshot lock until dropped.
 pub(crate) struct SnapshotLock {
@@ -13,13 +14,13 @@ pub(crate) struct SnapshotLock {
 
 /// Wait for exclusive use of `assistant_id`'s Local snapshots; the id is already a validated manifest identity.
 pub(crate) fn acquire(assistant_id: &str) -> Result<SnapshotLock, String> {
-    let root =
-        config_root().ok_or_else(|| "OS configuration directory is unavailable".to_owned())?;
-    acquire_in(&root, assistant_id)
+    let configuration =
+        config_dir::path().ok_or_else(|| "OS configuration directory is unavailable".to_owned())?;
+    acquire_in(&configuration, assistant_id)
 }
 
-fn acquire_in(root: &Path, assistant_id: &str) -> Result<SnapshotLock, String> {
-    let directory = root.join("shimpz").join("snapshots");
+fn acquire_in(configuration: &Path, assistant_id: &str) -> Result<SnapshotLock, String> {
+    let directory = configuration.join("snapshots");
     fs::create_dir_all(&directory)
         .map_err(|_| "Local snapshot lock directory cannot be created".to_owned())?;
     #[cfg(unix)]
@@ -27,11 +28,7 @@ fn acquire_in(root: &Path, assistant_id: &str) -> Result<SnapshotLock, String> {
         .map_err(|_| "Local snapshot lock directory cannot be secured".to_owned())?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
-    // Like the CLI credential lock: never follow a planted link, and keep the file private to this user.
-    #[cfg(unix)]
-    options
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .mode(0o600);
+    config_dir::private_open(&mut options);
     let file = options
         .open(directory.join(format!("{assistant_id}.lock")))
         .map_err(|_| "Local snapshot lock cannot be opened".to_owned())?;
@@ -48,29 +45,10 @@ fn require_private_file(file: &File) -> Result<(), String> {
     let metadata = file
         .metadata()
         .map_err(|_| "Local snapshot lock metadata is unavailable".to_owned())?;
-    if !metadata.file_type().is_file() {
-        return Err("Local snapshot lock path is not a regular file".into());
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.nlink() != 1
-    {
-        return Err("Local snapshot lock ownership or permissions are unsafe".into());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn config_root() -> Option<PathBuf> {
-    env::var_os("APPDATA").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn config_root() -> Option<PathBuf> {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    config_dir::admit(&metadata).map_err(|refusal| match refusal {
+        Refusal::NotRegularFile => "Local snapshot lock path is not a regular file".into(),
+        Refusal::NotPrivate => "Local snapshot lock ownership or permissions are unsafe".into(),
+    })
 }
 
 #[cfg(test)]
@@ -104,7 +82,7 @@ mod tests {
         assert!(
             directory
                 .path()
-                .join("shimpz/snapshots/proof-assistant.lock")
+                .join("snapshots/proof-assistant.lock")
                 .is_file()
         );
     }
@@ -116,7 +94,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().expect("temporary directory");
-        let locks = directory.path().join("shimpz/snapshots");
+        let locks = directory.path().join("snapshots");
         fs::create_dir_all(&locks).expect("lock directory");
         let target = directory.path().join("elsewhere");
         fs::write(&target, "").expect("link target");

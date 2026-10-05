@@ -1,7 +1,6 @@
 //! Restricted local persistence for rotating CLI credentials.
 
 use std::{
-    env,
     fmt::{self, Debug, Formatter},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -9,11 +8,13 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
+
+use crate::config_dir::{self, Refusal};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
@@ -109,16 +110,15 @@ pub(crate) struct CredentialLock {
 }
 
 pub(crate) fn lock() -> Result<CredentialLock, String> {
-    let directory = config_root()
-        .map(|root| root.join("shimpz"))
-        .ok_or_else(|| "OS configuration directory is unavailable".to_owned())?;
+    let directory =
+        config_dir::path().ok_or_else(|| "OS configuration directory is unavailable".to_owned())?;
     fs::create_dir_all(&directory)
         .map_err(|_| "CLI configuration directory cannot be created".to_owned())?;
     secure_directory(&directory)?;
     let path = directory.join(CREDENTIALS_LOCK_FILE);
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
-    configure_secure_open(&mut options);
+    config_dir::private_open(&mut options);
     let file = options
         .open(path)
         .map_err(|_| "CLI credential lock cannot be opened".to_owned())?;
@@ -141,33 +141,15 @@ pub(crate) fn clear(_lock: &CredentialLock) -> Result<(), String> {
 }
 
 fn credentials_path() -> Result<PathBuf, String> {
-    config_root()
-        .map(|root| root.join("shimpz").join(CREDENTIALS_FILE))
+    config_dir::path()
+        .map(|directory| directory.join(CREDENTIALS_FILE))
         .ok_or_else(|| "OS configuration directory is unavailable".into())
-}
-
-/// The per-user OS configuration root that holds the CLI's private `shimpz` directory.
-#[cfg(windows)]
-pub(crate) fn config_root() -> Option<PathBuf> {
-    env::var_os("APPDATA").map(PathBuf::from)
-}
-
-/// The per-user OS configuration root that holds the CLI's private `shimpz` directory.
-#[cfg(not(windows))]
-pub(crate) fn config_root() -> Option<PathBuf> {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".config"))
-        })
 }
 
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
     let mut options = OpenOptions::new();
     options.read(true);
-    configure_no_follow(&mut options);
+    config_dir::private_open(&mut options);
     let file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -226,17 +208,10 @@ fn clear_at(path: &Path) -> Result<(), String> {
 }
 
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
-    if !metadata.file_type().is_file() {
-        return Err("CLI credential path is not a regular file".into());
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.nlink() != 1
-    {
-        return Err("CLI credential file ownership or permissions are unsafe".into());
-    }
-    Ok(())
+    config_dir::admit(metadata).map_err(|refusal| match refusal {
+        Refusal::NotRegularFile => "CLI credential path is not a regular file".into(),
+        Refusal::NotPrivate => "CLI credential file ownership or permissions are unsafe".into(),
+    })
 }
 
 fn secure_directory(path: &Path) -> Result<(), String> {
@@ -266,17 +241,6 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 const fn sync_directory(_: &Path) -> Result<(), String> {
     Ok(())
-}
-
-fn configure_no_follow(options: &mut OpenOptions) {
-    #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-}
-
-fn configure_secure_open(options: &mut OpenOptions) {
-    configure_no_follow(options);
-    #[cfg(unix)]
-    options.mode(0o600);
 }
 
 fn configure_atomic_secure_open(options: &mut AtomicOpenOptions) {

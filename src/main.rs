@@ -4,6 +4,7 @@ mod action_failure;
 mod args;
 mod auth;
 mod capture;
+mod config_dir;
 mod credentials;
 mod develop;
 mod developers_client;

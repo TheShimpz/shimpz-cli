@@ -8,11 +8,11 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 
 use zeroize::Zeroizing;
 
-use crate::credentials;
+use crate::config_dir::{self, Refusal};
 
 /// The key file's name inside the CLI's `shimpz` configuration directory.
 pub(crate) const FILE_NAME: &str = "openai-api-key";
@@ -21,7 +21,7 @@ const MAX_KEY_BYTES: usize = 4096;
 /// The fixed key path: `~/.config/shimpz/openai-api-key` (or `$XDG_CONFIG_HOME`), `%APPDATA%\shimpz\...` on Windows.
 /// Without an OS configuration directory no key file can exist.
 pub(crate) fn path() -> Option<PathBuf> {
-    credentials::config_root().map(|root| root.join("shimpz").join(FILE_NAME))
+    config_dir::path().map(|directory| directory.join(FILE_NAME))
 }
 
 /// Read the key at `path`, or `None` only when no file exists there.
@@ -40,18 +40,12 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
     let metadata = file
         .metadata()
         .map_err(|_| unusable("cannot be inspected"))?;
-    if !metadata.file_type().is_file() {
-        return Err(unusable("is not a regular file"));
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.nlink() != 1
-    {
-        return Err(unusable(
+    config_dir::admit(&metadata).map_err(|refusal| match refusal {
+        Refusal::NotRegularFile => unusable("is not a regular file"),
+        Refusal::NotPrivate => unusable(
             "must be owned by you, readable only by you (mode 0600), and have a single link",
-        ));
-    }
+        ),
+    })?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_KEY_BYTES + 2));
     file.take(u64::try_from(MAX_KEY_BYTES).unwrap_or(u64::MAX) + 1)
         .read_to_end(&mut bytes)
@@ -86,6 +80,8 @@ fn open(path: &Path) -> std::io::Result<File> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
