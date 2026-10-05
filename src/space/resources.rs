@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use super::docker::Engine;
 use super::graph::{StorageProfile, VOLUME_NAMES};
+use super::id;
 use super::paths::Paths;
 use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
 use crate::team_id;
@@ -261,7 +262,7 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
                 .lines()
                 .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="))
                 .collect();
-            if values.len() != 1 || !valid_space_id(values[0]) {
+            if values.len() != 1 || !id::valid(values[0]) {
                 return Err("the controller has an ambiguous Space identity".into());
             }
             Ok(Some(values[0].into()))
@@ -279,7 +280,7 @@ fn read_space_id(paths: &Paths) -> Result<Option<String>, String> {
         .lines()
         .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="))
         .collect();
-    if values.len() != 1 || !valid_space_id(values[0]) {
+    if values.len() != 1 || !id::valid(values[0]) {
         return Err("the Local Space identity is invalid".into());
     }
     Ok(Some(values[0].into()))
@@ -521,15 +522,6 @@ fn static_service(name: &str, service: &str) -> Option<Package> {
     }
 }
 
-fn valid_space_id(value: &str) -> bool {
-    value.strip_prefix("space-").is_some_and(|suffix| {
-        suffix.len() == 24
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
 fn valid_assistant(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 48
@@ -683,7 +675,6 @@ mod tests {
 
     #[test]
     fn validates_closed_dynamic_identifiers() {
-        assert!(valid_space_id("space-0123456789abcdef01234567"));
         assert!(valid_assistant("dns-manager"));
         assert!(!valid_assistant("DnsManager"));
         assert!(!valid_assistant("dns--manager"));

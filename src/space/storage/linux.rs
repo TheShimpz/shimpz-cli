@@ -17,6 +17,7 @@ use super::evidence::{
     luks_unlock_credentials_valid,
 };
 use crate::space::command::{self, Tool};
+use crate::space::id;
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
@@ -308,7 +309,7 @@ fn new_passphrase() -> Result<LockedPassphrase, String> {
 
 impl<'a> Pool<'a> {
     pub(crate) fn new(paths: &'a Paths, space_id: &'a str) -> Result<Self, String> {
-        if !valid_space_id(space_id) {
+        if !id::valid(space_id) {
             return Err("the Local Space identity is invalid".into());
         }
         Ok(Self { paths, space_id })
@@ -769,7 +770,7 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
     if !paths.security.exists() {
         return Ok(());
     }
-    if expected_space_id.is_some_and(|value| !valid_space_id(value)) {
+    if expected_space_id.is_some_and(|value| !id::valid(value)) {
         return Err("the Local Space identity is invalid".into());
     }
     validate_security_entries(paths)?;
@@ -810,7 +811,7 @@ pub(crate) fn preflight_reset(
     if !paths.security.exists() {
         return Ok(());
     }
-    if expected_space_id.is_some_and(|value| !valid_space_id(value)) {
+    if expected_space_id.is_some_and(|value| !id::valid(value)) {
         return Err("the Local Space identity is invalid".into());
     }
     validate_security_entries(paths)?;
@@ -1071,12 +1072,7 @@ fn validate_discovered_mapping(
     let name = one_line(&name_document, "device-mapper name")?;
     let suffix = name
         .strip_prefix("shimpz-")
-        .filter(|value| {
-            value.len() == 24
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        .filter(|value| id::valid_suffix(value))
         .ok_or_else(|| "the encrypted Local storage has a foreign mapping name".to_owned())?;
     let dm_uuid_document = fs::read_to_string(holder.join("dm/uuid"))
         .map_err(|_| "the encrypted Local storage mapping UUID is unavailable".to_owned())?;
@@ -1205,15 +1201,6 @@ fn mapping_device_identity(mapping: &fs::Metadata) -> String {
 #[cfg(not(target_os = "linux"))]
 fn mapping_device_identity(_mapping: &fs::Metadata) -> String {
     "unsupported".into()
-}
-
-fn valid_space_id(value: &str) -> bool {
-    value.strip_prefix("space-").is_some_and(|suffix| {
-        suffix.len() == 24
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    })
 }
 
 fn validate_security_entries(paths: &Paths) -> Result<(), String> {
@@ -1379,20 +1366,6 @@ mod tests {
             primary_group_admission(989, 1000).expect_err("a switched group must be refused");
         assert!(refused.contains("sg docker"));
         assert!(refused.contains("sign out and back in"));
-    }
-
-    #[test]
-    fn validates_only_exact_space_ids() {
-        assert!(valid_space_id("space-0123456789abcdef01234567"));
-        for invalid in [
-            "0123456789abcdef01234567",
-            "space-0123456789abcdef0123456",
-            "space-0123456789abcdef012345678",
-            "space-0123456789ABCDEF01234567",
-            "space-0123456789abcdef0123456g",
-        ] {
-            assert!(!valid_space_id(invalid));
-        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::path::Path;
 
 use super::docker::ResolvedRelease;
 use super::host::HostProfile;
+use super::id;
 use super::paths::{MARKER, Paths};
 use super::release;
 
@@ -224,7 +225,7 @@ fn validate_environment(
         return Err("the installed Local environment has unknown or missing fields".into());
     }
     let space_id = values["SHIMPZ_SPACE_ID"];
-    if !valid_space_id(space_id) {
+    if !id::valid(space_id) {
         return Err("the installed Local Space identity is invalid".into());
     }
     let release_ref = values["SHIMPZ_LOCAL_RELEASE_IMAGE"];
@@ -515,15 +516,6 @@ fn positive_u64(value: &str, label: &str) -> Result<u64, String> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("the installed {label} is invalid"))
-}
-
-fn valid_space_id(value: &str) -> bool {
-    value.strip_prefix("space-").is_some_and(|suffix| {
-        suffix.len() == 24
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
 }
 
 fn valid_cpuset(value: &str) -> bool {
