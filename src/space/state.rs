@@ -171,20 +171,32 @@ fn parse_installed(
 }
 
 fn parse_environment(document: &str) -> Result<BTreeMap<&str, &str>, String> {
-    if document.len() as u64 > MAX_ENVIRONMENT_BYTES || document.contains('\r') {
-        return Err("the installed Local environment is malformed".into());
+    key_values(
+        document,
+        MAX_ENVIRONMENT_BYTES,
+        "the installed Local environment is malformed",
+    )
+}
+
+/// Parse a bounded document of unique, non-empty `KEY=VALUE` lines without carriage returns; any other shape is
+/// `malformed`.
+pub(crate) fn key_values<'a>(
+    document: &'a str,
+    limit: u64,
+    malformed: &str,
+) -> Result<BTreeMap<&'a str, &'a str>, String> {
+    if document.len() as u64 > limit || document.contains('\r') {
+        return Err(malformed.into());
     }
     let mut values = BTreeMap::new();
     for line in document.lines() {
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| "the installed Local environment is malformed".to_owned())?;
+        let (key, value) = line.split_once('=').ok_or_else(|| malformed.to_owned())?;
         if key.is_empty()
             || value.is_empty()
             || value.contains('=')
             || values.insert(key, value).is_some()
         {
-            return Err("the installed Local environment is malformed".into());
+            return Err(malformed.into());
         }
     }
     Ok(values)
