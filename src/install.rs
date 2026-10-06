@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 
-use crate::{auth, developers_client, digest, team_id};
+use crate::{auth, developers_client, digest, manifest, team_id};
 
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
@@ -196,7 +196,7 @@ impl Installed {
             || self.status != "installed"
             || self.team_id != team_id
             || self.source_digest != source_digest
-            || !valid_assistant_id(&self.assistant_id)
+            || !manifest::valid_id(&self.assistant_id)
             || !digest::is_sha256(&self.oci_digest)
             || !digest::is_sha256(&self.binding_digest)
         {
@@ -216,17 +216,6 @@ impl Installed {
             self.binding_digest
         ))
     }
-}
-
-fn valid_assistant_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 40
-        && value.starts_with(|character: char| character.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.ends_with('-')
-        && !value.contains("--")
 }
 
 fn unavailable() -> String {
@@ -323,17 +312,34 @@ mod tests {
     #[test]
     fn installation_response_is_bound_to_the_request() {
         let digest = format!("sha256:{}", "a".repeat(64));
-        let installed = Installed {
+        let installed = |assistant_id: &str| Installed {
             version: 1,
             status: "installed".into(),
             team_id: "team_1".into(),
-            assistant_id: "hello-world".into(),
+            assistant_id: assistant_id.into(),
             source_digest: digest.clone(),
             oci_digest: format!("sha256:{}", "b".repeat(64)),
             binding_digest: format!("sha256:{}", "c".repeat(64)),
         };
 
-        assert!(installed.validate("team_1", &digest).is_ok());
-        assert!(installed.validate("team_2", &digest).is_err());
+        assert!(installed("hello-world").validate("team_1", &digest).is_ok());
+        assert!(
+            installed("hello-world")
+                .validate("team_2", &digest)
+                .is_err()
+        );
+        // Developers names the installed Assistant under the manifest grammar, which reserves platform names.
+        for assistant_id in [
+            "postgres",
+            "assistant-egress",
+            "shimpz-assistant-egress",
+            "a--b",
+            "Hello",
+        ] {
+            assert!(
+                installed(assistant_id).validate("team_1", &digest).is_err(),
+                "{assistant_id}"
+            );
+        }
     }
 }
