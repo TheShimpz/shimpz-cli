@@ -565,28 +565,35 @@ mod tests {
         }
     }
 
+    /// A temporary Local CLI home whose root directory exists; the guard owns its removal.
+    fn fresh_paths() -> (tempfile::TempDir, Paths) {
+        let home = tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        (home, paths)
+    }
+
+    /// The Linux environment every round-trip case starts from; cases override single fields.
+    fn linux_environment<'a>(paths: &'a Paths, release: &'a ResolvedRelease) -> Environment<'a> {
+        Environment {
+            release,
+            profile: HostProfile::Linux,
+            space_id: "space-0123456789abcdef01234567",
+            port: 7777,
+            docker_gid: 998,
+            docker_socket: Path::new("/var/run/docker.sock"),
+            cpuset: "0-3",
+            secure_root: &paths.pool_mount,
+        }
+    }
+
     fn write_linux(paths: &Paths, release: &ResolvedRelease) {
-        write_environment(
-            paths,
-            &Environment {
-                release,
-                profile: HostProfile::Linux,
-                space_id: "space-0123456789abcdef01234567",
-                port: 7777,
-                docker_gid: 998,
-                docker_socket: Path::new("/var/run/docker.sock"),
-                cpuset: "0-3",
-                secure_root: &paths.pool_mount,
-            },
-        )
-        .unwrap();
+        write_environment(paths, &linux_environment(paths, release)).unwrap();
     }
 
     #[test]
     fn records_a_developer_release_only_with_its_exact_published_baseline() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
         let developer = developer_release();
         write_linux(&paths, &developer);
         let installed = read_installed(&paths, HostProfile::Linux).unwrap();
@@ -664,24 +671,9 @@ mod tests {
 
     #[test]
     fn round_trips_only_the_exact_linux_environment() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
         let release = release();
-        write_environment(
-            &paths,
-            &Environment {
-                release: &release,
-                profile: HostProfile::Linux,
-                space_id: "space-0123456789abcdef01234567",
-                port: 7777,
-                docker_gid: 998,
-                docker_socket: Path::new("/var/run/docker.sock"),
-                cpuset: "0-3",
-                secure_root: &paths.pool_mount,
-            },
-        )
-        .unwrap();
+        write_linux(&paths, &release);
         let installed = read_installed(&paths, HostProfile::Linux).unwrap();
         assert_eq!(installed.space_id, "space-0123456789abcdef01234567");
         assert_eq!(installed.release_ref, release.reference);
@@ -691,21 +683,15 @@ mod tests {
 
     #[test]
     fn round_trips_only_the_desktop_vm_socket_on_macos() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
         let release = release();
         write_environment(
             &paths,
             &Environment {
-                release: &release,
                 profile: HostProfile::MacOs,
-                space_id: "space-0123456789abcdef01234567",
-                port: 7777,
                 docker_gid: 0,
                 docker_socket: Path::new("/var/run/docker.sock.raw"),
-                cpuset: "0-3",
-                secure_root: &paths.pool_mount,
+                ..linux_environment(&paths, &release)
             },
         )
         .unwrap();
@@ -720,21 +706,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_mismatched_and_unbounded_environment_state() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
         let release = release();
         write_environment(
             &paths,
             &Environment {
-                release: &release,
-                profile: HostProfile::Linux,
-                space_id: "space-0123456789abcdef01234567",
-                port: 7777,
-                docker_gid: 998,
-                docker_socket: Path::new("/var/run/docker.sock"),
                 cpuset: "0",
-                secure_root: &paths.pool_mount,
+                ..linux_environment(&paths, &release)
             },
         )
         .unwrap();
@@ -770,9 +748,7 @@ mod tests {
 
     #[test]
     fn remembers_only_one_private_failed_release_digest() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
         let release = release();
         assert!(!failed_release_matches(&paths, &release.reference).unwrap());
         remember_failed_release(&paths, &release).unwrap();
@@ -794,9 +770,7 @@ mod tests {
 
     #[test]
     fn round_trips_only_the_exact_private_stopped_state() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
 
         assert!(!stopped(&paths).unwrap());
         write_stopped(&paths).unwrap();
@@ -815,9 +789,7 @@ mod tests {
     fn refuses_unsafe_or_malformed_stopped_state() {
         use std::os::unix::fs::symlink;
 
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
+        let (_home, paths) = fresh_paths();
 
         fs::write(&paths.stopped, "wrong stopped record\n").unwrap();
         assert!(stopped(&paths).is_err());
