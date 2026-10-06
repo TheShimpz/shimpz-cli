@@ -351,23 +351,26 @@ mod tests {
         }
     }
 
+    /// Every production host tool.
+    const TOOLS: [Tool; 13] = [
+        Tool::Chown,
+        Tool::Docker,
+        Tool::Findmnt,
+        Tool::Install,
+        Tool::Launchctl,
+        Tool::Losetup,
+        Tool::Luks,
+        Tool::MkfsExt4,
+        Tool::Mount,
+        Tool::Mountpoint,
+        Tool::Sudo,
+        Tool::Systemctl,
+        Tool::Umount,
+    ];
+
     #[test]
     fn production_tools_have_only_absolute_fixed_candidates() {
-        for tool in [
-            Tool::Chown,
-            Tool::Docker,
-            Tool::Findmnt,
-            Tool::Install,
-            Tool::Launchctl,
-            Tool::Losetup,
-            Tool::Luks,
-            Tool::MkfsExt4,
-            Tool::Mount,
-            Tool::Mountpoint,
-            Tool::Sudo,
-            Tool::Systemctl,
-            Tool::Umount,
-        ] {
+        for tool in TOOLS {
             assert!(!tool.candidates().is_empty());
             assert!(tool.candidates().iter().all(|path| path.starts_with('/')));
             assert!(tool.candidates().iter().all(|path| !path.contains("..")));
@@ -417,20 +420,7 @@ mod tests {
 
     #[test]
     fn user_owned_executable_is_rejected_outside_macos_docker() {
-        for tool in [
-            Tool::Chown,
-            Tool::Findmnt,
-            Tool::Install,
-            Tool::Launchctl,
-            Tool::Losetup,
-            Tool::Luks,
-            Tool::MkfsExt4,
-            Tool::Mount,
-            Tool::Mountpoint,
-            Tool::Sudo,
-            Tool::Systemctl,
-            Tool::Umount,
-        ] {
+        for tool in TOOLS.into_iter().filter(|tool| *tool != Tool::Docker) {
             assert!(!trusted_metadata(tool, HostOs::MacOs, 501, 501, 0o100_755,));
         }
         assert!(!trusted_metadata(
