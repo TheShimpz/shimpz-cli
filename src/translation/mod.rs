@@ -458,6 +458,23 @@ mod tests {
         Ok(())
     }
 
+    /// Translate `catalog` against the memory under `directory` with `workers` exchanges, admitting every pack.
+    fn translate_in(
+        catalog: &Catalog,
+        directory: &Path,
+        translator: &dyn Translator,
+        workers: usize,
+    ) -> Result<Pack, Failure> {
+        translate(
+            catalog,
+            POLICY,
+            &memory(directory),
+            translator,
+            workers,
+            &accept,
+        )
+    }
+
     const POLICY: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     #[test]
@@ -484,15 +501,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let catalog = catalog();
         let fake = Fake::new(|template, _| Ok(tagged(template)));
-        let pack = translate(
-            &catalog,
-            POLICY,
-            &memory(directory.path()),
-            &fake,
-            WORKERS,
-            &accept,
-        )
-        .unwrap();
+        let pack = translate_in(&catalog, directory.path(), &fake, WORKERS).unwrap();
         assert_eq!(
             fake.calls.load(Ordering::SeqCst),
             catalog.templates().count()
@@ -505,15 +514,7 @@ mod tests {
 
         // The same messages are never sent again.
         let again = Fake::new(|_, _| Err(ProviderError::Unavailable));
-        let reused = translate(
-            &catalog,
-            POLICY,
-            &memory(directory.path()),
-            &again,
-            WORKERS,
-            &accept,
-        )
-        .unwrap();
+        let reused = translate_in(&catalog, directory.path(), &again, WORKERS).unwrap();
         assert_eq!(again.calls.load(Ordering::SeqCst), 0);
         assert_eq!(reused.bytes(), pack.bytes());
     }
@@ -682,15 +683,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let catalog = catalog();
             let fake = Fake::new(move |_, _| Err(error));
-            let failure = translate(
-                &catalog,
-                POLICY,
-                &memory(directory.path()),
-                &fake,
-                1,
-                &accept,
-            )
-            .unwrap_err();
+            let failure = translate_in(&catalog, directory.path(), &fake, 1).unwrap_err();
             assert_eq!(failure, Failure::Provider(error));
             assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
             let message = failure.message(Path::new("/k"));
@@ -713,17 +706,7 @@ mod tests {
                 Ok(tagged(template))
             }
         });
-        assert!(
-            translate(
-                &catalog,
-                POLICY,
-                &memory(directory.path()),
-                &fake,
-                1,
-                &accept
-            )
-            .is_ok()
-        );
+        assert!(translate_in(&catalog, directory.path(), &fake, 1).is_ok());
         assert_eq!(fake.calls.load(Ordering::SeqCst), 3);
     }
 
@@ -740,15 +723,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let fake = Fake::new(|template, _| Ok(tagged(template)));
-        translate(
-            &catalog,
-            POLICY,
-            &memory(directory.path()),
-            &fake,
-            WORKERS,
-            &accept,
-        )
-        .unwrap();
+        translate_in(&catalog, directory.path(), &fake, WORKERS).unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 12);
         assert!(fake.peak.load(Ordering::SeqCst) <= WORKERS);
     }
