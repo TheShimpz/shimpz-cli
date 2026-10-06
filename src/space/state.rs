@@ -58,11 +58,7 @@ impl Lock {
         let metadata = file
             .metadata()
             .map_err(|error| format!("could not inspect the Local lifecycle lock: {error}"))?;
-        if !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.permissions().mode() & 0o777 != 0o600
-        {
+        if !exact_private(&metadata) {
             return Err("the Local lifecycle lock is invalid".into());
         }
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
@@ -125,12 +121,7 @@ pub(crate) fn read_private_record(
     let metadata = file
         .metadata()
         .map_err(|error| format!("{name} could not be inspected: {error}"))?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.len() > limit
-    {
+    if !exact_private(&metadata) || metadata.len() > limit {
         return Err(refused());
     }
     let mut document = String::new();
@@ -168,6 +159,14 @@ fn parse_installed(
             .get("SHIMPZ_LOCAL_RELEASE_BASELINE")
             .map(|value| (*value).to_owned()),
     })
+}
+
+/// A regular file with one link, owned by this user, with exactly mode 0600.
+fn exact_private(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.nlink() == 1
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && metadata.permissions().mode() & 0o777 == 0o600
 }
 
 fn parse_environment(document: &str) -> Result<BTreeMap<&str, &str>, String> {
@@ -408,13 +407,7 @@ pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result
         return Ok(false);
     }
     let metadata = paths.failed_release.symlink_metadata().map_err(io_error)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.len() > 256
-    {
+    if metadata.file_type().is_symlink() || !exact_private(&metadata) || metadata.len() > 256 {
         return Err("the failed Local release record is invalid".into());
     }
     let document = fs::read_to_string(&paths.failed_release)
@@ -435,10 +428,7 @@ pub(crate) fn stopped(paths: &Paths) -> Result<bool, String> {
         Err(error) => return Err(io_error(error)),
     };
     if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o600
+        || !exact_private(&metadata)
         || metadata.len() != STOPPED.len() as u64
     {
         return Err("the Local stopped-state record is invalid".into());
