@@ -5,6 +5,8 @@
 //! under `localhost/`, and uses the closed `local-dev-v1` schema: the published fields plus the exact published
 //! `baseline` it was assembled from. The reference namespace selects the schema, so neither can pass as the other.
 
+use std::collections::BTreeMap;
+
 use crate::digest;
 
 pub(crate) const RELEASE_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-local-release";
@@ -87,8 +89,7 @@ pub(crate) fn parse(reference: &str, document: &str) -> Result<Release, String> 
     } else {
         return Err("the Local release reference is invalid".into());
     };
-    let values =
-        super::state::key_values(document, 2_048, "the Local release metadata is malformed")?;
+    let values = key_values(document, 2_048, "the Local release metadata is malformed")?;
     let expected = KEYS.len() + usize::from(developer);
     if values.len() != expected
         || KEYS.iter().any(|key| !values.contains_key(key))
@@ -202,6 +203,30 @@ fn in_namespace(value: &str, namespace: &str, package: &str) -> bool {
     value
         .strip_prefix(namespace)
         .is_some_and(|rest| digest::is_pinned(rest, package))
+}
+
+/// Parse a bounded document of unique, non-empty `KEY=VALUE` lines without carriage returns; any other shape is
+/// `malformed`.
+pub(crate) fn key_values<'a>(
+    document: &'a str,
+    limit: u64,
+    malformed: &str,
+) -> Result<BTreeMap<&'a str, &'a str>, String> {
+    if document.len() as u64 > limit || document.contains('\r') {
+        return Err(malformed.into());
+    }
+    let mut values = BTreeMap::new();
+    for line in document.lines() {
+        let (key, value) = line.split_once('=').ok_or_else(|| malformed.to_owned())?;
+        if key.is_empty()
+            || value.is_empty()
+            || value.contains('=')
+            || values.insert(key, value).is_some()
+        {
+            return Err(malformed.into());
+        }
+    }
+    Ok(values)
 }
 
 #[cfg(test)]
