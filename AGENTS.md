@@ -14,13 +14,14 @@
 - Shimpz is pre-production. Update the current contract directly; do not add migrations, deprecated aliases,
   old-format parsers, version fallbacks, dual behavior, or retired-resource cleanup paths. Current-contract reset,
   compensation, and idempotent reconciliation are not compatibility paths.
-- Push a successful CLI commit before advancing its umbrella gitlink; the gitlink records the exact source admitted
-  to an atomic Local release.
+- The umbrella gitlink records the exact CLI source of an atomic Local release. Commits reach `main` only through the
+  umbrella's `.scripts/local-release/deploy` (ADR-0102), which pushes them before the umbrella commit that records
+  them; never push around it. A standalone `v<version>` release tag follows the umbrella's `.context/RELEASES.md`.
 
 ## Delivery
 
 - Work in the smallest independently reviewable task that produces a useful result.
-- After a microtask succeeds, run the smallest relevant local checks, commit it immediately, and push it immediately.
+- After a microtask succeeds, run the smallest relevant local checks and commit it immediately.
 - Never batch unrelated successful microtasks into one commit.
 - Write every commit message in English with a clear conventional prefix.
 
