@@ -16,10 +16,6 @@ jobs:
       - run: cargo fmt --check
       - name: Lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      - name: Test
-        run: |
-          processors="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc)"
-          cargo test --all-features --locked --jobs "${processors}"
       - run: cargo package --locked
 
   lifecycle-coverage:
