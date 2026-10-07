@@ -67,7 +67,18 @@ pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
         .open(&temporary)?;
     file.write_all(contents)?;
     file.sync_all()?;
-    fs::rename(temporary, path)
+    fs::rename(temporary, path)?;
+    sync_parent(path)
+}
+
+/// Make a rename or removal in `path`'s directory durable.
+#[cfg(unix)]
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)?.sync_all()
 }
 
 #[cfg(all(test, unix))]

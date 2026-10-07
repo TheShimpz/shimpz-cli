@@ -1,5 +1,6 @@
 //! Native install, reconcile, update, stop, status, and reset orchestration.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -16,6 +17,7 @@ use zeroize::Zeroizing;
 use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output;
 
+use super::deploy;
 use super::docker::{Engine, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
@@ -37,6 +39,7 @@ const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const SCHEDULED_STOPPED: &str = "Shimpz Space is stopped.\nNext: shimpz start";
 const UPDATE_DEFERRED: &str =
     "A Local update is waiting for active Shimpz work to finish; it will retry automatically.";
+const STORAGE_LOCKED: &str = "Encrypted Local storage is locked. No workloads were started.";
 const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_PROGRESS: [&str; 3] = [
     "Checking the Shimpz Space...",
@@ -64,13 +67,63 @@ pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
     let _lock = (!options.candidate)
         .then(|| Lock::acquire(&paths))
         .transpose()?;
-    if options.scheduled
-        && options.release.is_none()
-        && let Some(message) = scheduled_gate(&paths)?
-    {
-        return Ok(message);
+    if options.scheduled && options.release.is_none() {
+        if let Some(request) = deploy::claim(&paths)? {
+            return apply_deploy_request(&paths, &request);
+        }
+        if let Some(message) = scheduled_gate(&paths)? {
+            return Ok(message);
+        }
     }
     Context::connect(paths, options.scheduled)?.start(options)
+}
+
+/// Apply the developer release a deploy request names, exactly as a scheduled start of that release, and record
+/// whether this attempt committed it.
+fn apply_deploy_request(paths: &Paths, request: &deploy::Request) -> Result<String, String> {
+    let options = SpaceStart {
+        scheduled: true,
+        release: Some(request.release.clone()),
+        candidate: false,
+    };
+    finish_deploy_request(paths, request, || {
+        Context::connect(Paths::discover()?, true)?.start(&options)
+    })
+}
+
+/// A stopped Space keeps its stop intent: the request fails without running. Otherwise only an attempt that ends
+/// with the requested release installed and its reconciliation recorded applied it; a deferral keeps the request.
+fn finish_deploy_request(
+    paths: &Paths,
+    request: &deploy::Request,
+    start: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let result = if state::stopped(paths)? {
+        Err("the Local Space is stopped; start it with shimpz start, then deploy again".into())
+    } else {
+        start()
+    };
+    let outcome = match &result {
+        Ok(message) if message == UPDATE_DEFERRED => deploy::Outcome::Deferred,
+        Ok(message) if message != STORAGE_LOCKED && deploy_committed(paths, &request.release) => {
+            deploy::Outcome::Applied
+        }
+        Ok(_) | Err(_) => deploy::Outcome::Failed,
+    };
+    let (Ok(message) | Err(message)) = &result;
+    deploy::finish(paths, request, outcome, message)?;
+    result
+}
+
+/// The installed release is exactly `release_ref` and its successful reconciliation is the recorded status.
+fn deploy_committed(paths: &Paths, release_ref: &str) -> bool {
+    host::detect()
+        .and_then(|profile| state::read_installed(paths, profile))
+        .is_ok_and(|installed| {
+            installed.release_ref == release_ref
+                && poll::status_record(paths, release_ref, installed.ordinal)
+                    == poll::StatusRecord::Reconciled
+        })
 }
 
 /// The cheap scheduled check before any Docker work: a stopped Space or an unchanged release ends the run.
@@ -212,6 +265,8 @@ struct Context {
     profile: HostProfile,
     engine: Engine,
     scheduled: bool,
+    /// Whether this run emptied the runtime state, directly or through the release-bound CLI it handed off to.
+    recreated: Cell<bool>,
 }
 
 struct RuntimeSnapshot {
@@ -283,6 +338,7 @@ impl Context {
             profile,
             engine,
             scheduled,
+            recreated: Cell::new(false),
         })
     }
 
@@ -322,7 +378,7 @@ impl Context {
             activate_cli(
                 &self.paths,
                 &running,
-                expected_cli_hash(&release, self.profile),
+                expected_cli_hash(&release, self.profile)?,
             )?;
         } else if exact_release.is_none()
             && self.handoff_if_needed(&release, installed.as_ref(), false)?
@@ -339,19 +395,14 @@ impl Context {
     }
 
     /// Resolve the `stable` channel or one exact release. A developer release is admitted only from this host's
-    /// image store, only on the amd64 Linux profiles, and only bound to the exact published baseline it names.
+    /// image store and only on the amd64 Linux profiles.
     fn resolve(&self, exact: Option<&str>) -> Result<ResolvedRelease, String> {
         let release = self.engine.resolve_release(exact, &self.paths.home)?;
-        let Some(baseline) = &release.metadata.baseline else {
-            return Ok(release);
-        };
-        if self.profile == HostProfile::MacOs {
+        if release::valid_developer_release_ref(&release.reference)
+            && self.profile == HostProfile::MacOs
+        {
             return Err("a developer release applies only to an amd64 Linux Space".into());
         }
-        let published = self
-            .engine
-            .resolve_release(Some(baseline), &self.paths.home)?;
-        release::bind_developer(&release.metadata, &published.metadata)?;
         Ok(release)
     }
 
@@ -396,9 +447,8 @@ impl Context {
         )
     }
 
-    /// Select what a start applies: the `stable` channel or the exact release it names. While `stable` still names
-    /// the baseline of the installed developer release, that developer release is the selection (ADR-0099); it then
-    /// meets failed-release memory like any other selection and never hands off.
+    /// Select what a start applies: the exact release it names, else the installed developer release, which never
+    /// follows `stable`, else the `stable` channel. A selection without an exact release meets failed-release memory.
     fn select_start(
         &self,
         options: &SpaceStart,
@@ -406,20 +456,20 @@ impl Context {
         stopped: bool,
     ) -> Result<Option<StartSelection>, String> {
         let channel = options.release.is_none();
-        let mut release = self.resolve(options.release.as_deref())?;
+        let selected = match options.release.as_deref() {
+            Some(exact) => Some(exact),
+            None if installed.developer() => Some(installed.release_ref.as_str()),
+            None => None,
+        };
+        let release = self.resolve(selected)?;
         validate_forward_release(&release, Some(installed))?;
-        let developer = keeps_developer_release(channel, installed, &release);
-        if developer {
-            release = self.resolve(Some(&installed.release_ref))?;
-            validate_forward_release(&release, Some(installed))?;
-        }
         let selected_failed =
             channel && state::failed_release_matches(&self.paths, &release.reference)?;
         Ok(match failed_release_decision(stopped, selected_failed) {
             FailedReleaseDecision::UseSelected => Some(StartSelection {
                 release,
                 preserve_failed_release: false,
-                may_hand_off: channel && !developer,
+                may_hand_off: !options.candidate,
             }),
             FailedReleaseDecision::ResumeInstalled => Some(StartSelection {
                 release: self.resolve(Some(&installed.release_ref))?,
@@ -512,6 +562,8 @@ impl Context {
             preserve_failed_release,
         ) {
             Ok(outcome) => outcome,
+            // An apply that emptied the runtime state says so on every failure: rollback never restores it.
+            Err(error) if self.recreated.get() => return Err(self.with_recreation(error)),
             Err(error) if fresh => match self.compensate_fresh_failure(&space_id) {
                 Ok(()) => return Err(error),
                 Err(cleanup) => {
@@ -524,12 +576,13 @@ impl Context {
         };
         let port = match outcome {
             ApplyOutcome::Ready { port } => port,
-            ApplyOutcome::Locked => {
-                return Ok("Encrypted Local storage is locked. No workloads were started.".into());
-            }
+            ApplyOutcome::Locked => return Ok(STORAGE_LOCKED.into()),
             ApplyOutcome::Deferred => return Ok(UPDATE_DEFERRED.into()),
         };
-        let ready = ready_outcome(release, port);
+        let mut ready = ready_outcome(release, port);
+        if self.recreated.get() {
+            ready = format!("{ready}\n{}", recreation_notice(release));
+        }
         scheduler_outcome(
             ready,
             scheduler::install(self.profile, &self.paths, scheduled),
@@ -599,6 +652,12 @@ impl Context {
     /// cause to report before the rollback outcome, or `None` when the rollback outcome alone describes it.
     fn replace_and_start(&self, candidate: &Candidate<'_>) -> Result<(), Option<String>> {
         let release = candidate.release;
+        self.reconcile_runtime_state(
+            Some(release.metadata.state_epoch),
+            &release.metadata.team,
+            candidate.installed.is_none(),
+        )
+        .map_err(Some)?;
         state::write_environment(
             &self.paths,
             &Environment {
@@ -675,7 +734,8 @@ impl Context {
         output::progress("Downloading Shimpz Space (1/4): Admin...");
         self.engine
             .pull_exact(&release.metadata.admin, release::ADMIN)?;
-        if installed.is_some() {
+        // Admin's own authentication record is read only by Admin, so an unchanged Admin image needs no new probe.
+        if installed.is_some_and(|installed| installed.admin_image != release.metadata.admin) {
             output::progress("Checking existing Supervisor authentication...");
             let authentication_state = admin_authentication_state_probe_response(
                 &self
@@ -864,6 +924,38 @@ impl Context {
         }
     }
 
+    /// Recreate the disposable runtime state empty unless the epoch recorded for it on disk is `epoch`, the stored
+    /// format the starting release reads. An unknown epoch on either side always recreates it. The record is
+    /// forgotten first and written only after the volumes were emptied, so an interrupted recreation is redone.
+    /// Nothing is migrated: this repository is pre-production.
+    fn reconcile_runtime_state(
+        &self,
+        epoch: Option<u32>,
+        team_image: &str,
+        fresh: bool,
+    ) -> Result<bool, String> {
+        let recreate =
+            runtime_state_reset_needed(fresh, epoch, state::read_state_epoch(&self.paths));
+        if recreate {
+            output::progress("Recreating Team runtime state for a new stored format...");
+            state::forget_state_epoch(&self.paths)?;
+            let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+            self.stop_owned_containers(&inventory)?;
+            // Containers Team created before it stopped are found, stopped, and the whole Space proved stopped.
+            self.restore_stopped_after_reset_failure()?;
+            self.engine
+                .clear_volumes(team_image, &graph::RUNTIME_STATE_VOLUMES)?;
+            self.recreated.set(true);
+        }
+        // An unchanged record keeps its identity, so only a recreation or a fresh start replaces it.
+        if let Some(epoch) = epoch
+            && (recreate || fresh)
+        {
+            state::write_state_epoch(&self.paths, epoch)?;
+        }
+        Ok(recreate)
+    }
+
     fn validate_started_storage(&self, space_id: &str) -> Result<(), String> {
         if self.profile == HostProfile::Linux {
             linux::Pool::new(&self.paths, space_id)?.validate_mounted()
@@ -934,7 +1026,12 @@ impl Context {
     /// Report a release-bound CLI run truthfully: it may have deferred the update or left it unapplied.
     fn handoff_outcome(&self, release: &ResolvedRelease) -> Result<String, String> {
         if state::read_installed(&self.paths, self.profile)?.release_ref == release.reference {
-            return Ok("The release-bound CLI completed reconciliation.".into());
+            let completed = "The release-bound CLI completed reconciliation.";
+            return Ok(if self.recreated.get() {
+                format!("{completed}\n{}", recreation_notice(release))
+            } else {
+                completed.into()
+            });
         }
         let deferred = poll::release_digest(&release.reference)
             .is_some_and(|digest| poll::deferred(&self.paths, digest, poll::now()));
@@ -985,7 +1082,7 @@ impl Context {
     ) -> Result<bool, String> {
         let running = std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?;
         reconcile_previous_cli(&self.paths.managed_cli, &running)?;
-        let expected = expected_cli_hash(release, self.profile);
+        let expected = expected_cli_hash(release, self.profile)?;
         if hash_file(&running)? == expected {
             return Ok(false);
         }
@@ -1033,12 +1130,39 @@ impl Context {
                 .arg(&release.reference)
                 .arg("--candidate");
         }
+        let record_before = state::read_state_record(&self.paths);
         let failure = handoff_failure(command.stdin(Stdio::null()).status());
+        // Only a completed recreation writes a new record; a record the child forgot but never rewrote proves none.
+        if state::read_state_record(&self.paths)
+            .is_some_and(|record| Some(&record) != record_before.as_ref())
+        {
+            self.recreated.set(true);
+        }
+        self.handoff_result(release, scheduled, &previous, failure)
+            .map_err(|error| self.with_recreation(error))
+    }
+
+    /// Append the recreation of the runtime state to a failure that followed it: no rollback restores that state.
+    fn with_recreation(&self, error: String) -> String {
+        if self.recreated.get() {
+            format!("{error}; the Team runtime state was recreated empty")
+        } else {
+            error
+        }
+    }
+
+    fn handoff_result(
+        &self,
+        release: &ResolvedRelease,
+        scheduled: bool,
+        previous: &Path,
+        failure: Option<String>,
+    ) -> Result<bool, String> {
         // A successful exit proves nothing on its own: a scheduled child also succeeds when it defers the update or
         // finds storage locked, so the durable commit evidence decides which CLI matches the Space.
         match (commit_evidence(&self.paths, self.profile, release), failure) {
             (CommitEvidence::Committed, None) => {
-                remove_regular_if_present(&previous)?;
+                remove_regular_if_present(previous)?;
                 ensure_public_cli(&self.paths)?;
                 Ok(true)
             }
@@ -1049,7 +1173,7 @@ impl Context {
                     "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
                 );
                 Err(
-                    match remove_regular_if_present(&previous)
+                    match remove_regular_if_present(previous)
                         .and_then(|()| ensure_public_cli(&self.paths))
                     {
                         Ok(()) => failure,
@@ -1058,15 +1182,15 @@ impl Context {
                 )
             }
             (CommitEvidence::Unknown(cause), None) => {
-                Err(self.uncertain_handoff("exited successfully, but", &cause, &previous))
+                Err(self.uncertain_handoff("exited successfully, but", &cause, previous))
             }
             (CommitEvidence::Unknown(cause), Some(reason)) => Err(self.uncertain_handoff(
                 &format!("did not complete ({reason}), and"),
                 &cause,
-                &previous,
+                previous,
             )),
             (CommitEvidence::NotCommitted, None) => {
-                restore_previous_cli(&self.paths.managed_cli, &previous)?;
+                restore_previous_cli(&self.paths.managed_cli, previous)?;
                 if scheduled {
                     // Only a scheduled run may legitimately skip the commit; the caller reports the deferred or
                     // unapplied outcome from the unchanged Local state.
@@ -1076,7 +1200,7 @@ impl Context {
                 }
             }
             (CommitEvidence::NotCommitted, Some(reason)) => {
-                restore_previous_cli(&self.paths.managed_cli, &previous)?;
+                restore_previous_cli(&self.paths.managed_cli, previous)?;
                 Err(format!(
                     "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
                 ))
@@ -1118,6 +1242,7 @@ impl Context {
         fs::rename(&backup.compose, &self.paths.compose).map_err(io_error)?;
         fs::rename(&backup.environment, &self.paths.environment).map_err(io_error)?;
         let installed = state::read_installed(&self.paths, self.profile)?;
+        let previous_epoch = self.engine.release_state_epoch(&installed.release_ref).ok();
         match self.ensure_storage(&installed.space_id, false, self.scheduled)? {
             linux::Admission::Verified => {}
             linux::Admission::Locked => {
@@ -1134,24 +1259,40 @@ impl Context {
                 );
             }
         }
-        let restored = self.engine.compose(
-            &self.paths,
-            [
-                "up",
-                "-d",
-                "--wait",
-                "--wait-timeout",
-                "120",
-                "--no-build",
-                "--pull",
-                "never",
-                "--remove-orphans",
-            ],
-        )?;
+        // The previous release must never start on runtime state in a stored format it does not read.
+        let restored = match self.reconcile_runtime_state(
+            previous_epoch,
+            &release.metadata.team,
+            false,
+        ) {
+            Ok(_) => self
+                .engine
+                .compose(
+                    &self.paths,
+                    [
+                        "up",
+                        "-d",
+                        "--wait",
+                        "--wait-timeout",
+                        "120",
+                        "--no-build",
+                        "--pull",
+                        "never",
+                        "--remove-orphans",
+                    ],
+                )?
+                .success(),
+            Err(error) => {
+                output::warning(&format!(
+                    "the previous release was not started because its runtime state could not be recreated: {error}"
+                ));
+                false
+            }
+        };
         // Persist and project independently: a failed local write must not leave Admin reporting the abandoned release.
         let status = state::status_document(release, "rollback-needed")?;
         let persisted = state::write_private(&self.paths.status, &status);
-        if restored.success()
+        if restored
             && self
                 .engine
                 .project_release_status(&release.metadata.admin, status.as_bytes())
@@ -1162,7 +1303,7 @@ impl Context {
             );
         }
         // The restoration's own outcome leads; failed-release memory and scheduler diagnostics only follow it.
-        let primary = if restored.success() {
+        let primary = if restored {
             "the update failed; the previous healthy release was restored"
         } else {
             "the update and its rollback both failed"
@@ -1367,8 +1508,14 @@ fn remove_runtime_files(paths: &Paths) -> Result<(), String> {
     Ok(())
 }
 
-fn managed_runtime_files(paths: &Paths) -> [PathBuf; 17] {
+fn managed_runtime_files(paths: &Paths) -> [PathBuf; 23] {
     [
+        paths.deploy_request.clone(),
+        paths.deploy_result.clone(),
+        paths.state_epoch.clone(),
+        paths.deploy_request.with_extension("tmp"),
+        paths.deploy_result.with_extension("tmp"),
+        paths.state_epoch.with_extension("tmp"),
         paths.compose.clone(),
         paths.environment.clone(),
         paths.status.clone(),
@@ -1448,6 +1595,13 @@ fn release_outcome(release: &ResolvedRelease, installed: Option<&Installed>) -> 
     } else {
         "updated"
     }
+}
+
+fn recreation_notice(release: &ResolvedRelease) -> String {
+    format!(
+        "Recreated the Team runtime state for state epoch {}; its earlier records were removed.",
+        release.metadata.state_epoch
+    )
 }
 
 fn ready_outcome(release: &ResolvedRelease, port: u16) -> String {
@@ -1984,50 +2138,36 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
     }
 }
 
-/// Admit only forward moves (ADR-0041), extended for developer releases (ADR-0099): a developer release applies
-/// only over exactly the published release it names as its baseline, or over a developer release of that same
-/// baseline; a published release replaces a developer release when it is newer than the baseline or is exactly it.
+/// Admit only forward moves among published releases (ADR-0041). A developer release is an explicit selection on
+/// this host and applies over any installed release, but never as a fresh install; the explicit return to the
+/// published channel replaces an installed developer release with any published release.
 fn validate_forward_release(
     release: &ResolvedRelease,
     installed: Option<&Installed>,
 ) -> Result<(), String> {
-    let refused = || Err("the Local release channel moved backward or became ambiguous".into());
+    let developer = release::valid_developer_release_ref(&release.reference);
     let Some(installed) = installed else {
-        return if release.metadata.baseline.is_some() {
-            Err("a developer release applies only over its installed published baseline".into())
+        return if developer {
+            Err("a developer release applies only to an installed Local Space".into())
         } else {
             Ok(())
         };
     };
-    if let Some(baseline) = &release.metadata.baseline {
-        return if *baseline == installed.published_ref()
-            && release.metadata.ordinal == installed.ordinal
-        {
-            Ok(())
-        } else {
-            Err("a developer release applies only over its installed published baseline; run shimpz update and rebuild it".into())
-        };
-    }
-    if let Some(baseline) = &installed.baseline {
-        let returns =
-            release.reference == *baseline && release.metadata.ordinal == installed.ordinal;
-        return if returns || release.metadata.ordinal > installed.ordinal {
-            Ok(())
-        } else {
-            refused()
-        };
+    if developer || installed.developer() {
+        return Ok(());
     }
     let same_reference = release.reference == installed.release_ref;
     let same_ordinal = release.metadata.ordinal == installed.ordinal;
     if release.metadata.ordinal < installed.ordinal || same_reference != same_ordinal {
-        return refused();
+        return Err("the Local release channel moved backward or became ambiguous".into());
     }
     Ok(())
 }
 
-/// A channel resolution that still names the installed developer release's baseline keeps that developer release.
-fn keeps_developer_release(channel: bool, installed: &Installed, stable: &ResolvedRelease) -> bool {
-    channel && installed.baseline.as_deref() == Some(stable.reference.as_str())
+/// Existing runtime state is recreated unless both the epoch recorded for it and the starting release's are known
+/// and equal; a fresh Space has none.
+fn runtime_state_reset_needed(fresh: bool, epoch: Option<u32>, recorded: Option<u32>) -> bool {
+    !fresh && (epoch.is_none() || recorded != epoch)
 }
 
 fn admit_before_handoff<T>(
@@ -2039,16 +2179,20 @@ fn admit_before_handoff<T>(
     handoff()
 }
 
-fn expected_cli_hash(release: &ResolvedRelease, profile: HostProfile) -> &str {
+fn expected_cli_hash(release: &ResolvedRelease, profile: HostProfile) -> Result<&str, String> {
     match profile {
-        HostProfile::Linux | HostProfile::Wsl => &release.metadata.cli_linux_amd64_sha256,
-        HostProfile::MacOs => &release.metadata.cli_macos_arm64_sha256,
+        HostProfile::Linux | HostProfile::Wsl => Ok(&release.metadata.cli_linux_amd64_sha256),
+        HostProfile::MacOs => release
+            .metadata
+            .cli_macos_arm64_sha256
+            .as_deref()
+            .ok_or_else(|| "the Local release carries no macOS CLI".to_owned()),
     }
 }
 
 fn verify_running_cli(release: &ResolvedRelease, profile: HostProfile) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?;
-    if hash_file(&current)? == expected_cli_hash(release, profile) {
+    if hash_file(&current)? == expected_cli_hash(release, profile)? {
         Ok(())
     } else {
         Err("the running CLI is not bound to the selected Local release".into())
@@ -2587,22 +2731,21 @@ mod tests {
                 umbrella_revision: "a".repeat(40),
                 cli_revision: "b".repeat(40),
                 cli_linux_amd64_sha256: HEX.into(),
-                cli_macos_arm64_sha256: HEX.into(),
+                cli_macos_arm64_sha256: Some(HEX.into()),
                 admin: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
                 team: format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{HEX}"),
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
-                baseline: None,
+                state_epoch: 1,
             },
         }
     }
 
-    /// A developer release over `release(ordinal, baseline)` with a rebuilt Admin, identified by `digest`.
-    fn developer(ordinal: u64, baseline: char, digest: char) -> ResolvedRelease {
-        let published = release(ordinal, baseline);
-        let mut metadata = published.metadata;
+    /// A developer release with a rebuilt Admin, identified by `digest`.
+    fn developer(ordinal: u64, digest: char) -> ResolvedRelease {
+        let mut metadata = release(ordinal, 'b').metadata;
         metadata.admin = format!("localhost/shimpz-admin@sha256:{}", "e".repeat(64));
-        metadata.baseline = Some(published.reference);
+        metadata.cli_macos_arm64_sha256 = None;
         ResolvedRelease {
             reference: format!(
                 "localhost/shimpz-local-release@sha256:{}",
@@ -2619,45 +2762,26 @@ mod tests {
             admin_image: release.metadata.admin.clone(),
             ordinal: release.metadata.ordinal,
             port: 7777,
-            baseline: release.metadata.baseline.clone(),
         }
     }
 
     #[test]
-    fn a_developer_release_moves_only_over_its_exact_baseline_and_yields_to_publications() {
-        let baseline = installed_from(&release(2, 'b'));
-        // Over its exact installed baseline, and over a sibling of the same baseline.
-        assert!(validate_forward_release(&developer(2, 'b', '1'), Some(&baseline)).is_ok());
-        let installed = installed_from(&developer(2, 'b', '1'));
-        assert!(validate_forward_release(&developer(2, 'b', '1'), Some(&installed)).is_ok());
-        assert!(validate_forward_release(&developer(2, 'b', '2'), Some(&installed)).is_ok());
-        // Never as a fresh install, over another publication, or over a developer release of another baseline.
-        assert!(validate_forward_release(&developer(2, 'b', '1'), None).is_err());
-        assert!(
-            validate_forward_release(
-                &developer(2, 'b', '1'),
-                Some(&installed_from(&release(3, 'c')))
-            )
-            .is_err()
-        );
-        assert!(validate_forward_release(&developer(1, 'a', '1'), Some(&baseline)).is_err());
-        assert!(validate_forward_release(&developer(3, 'c', '1'), Some(&baseline)).is_err());
-        assert!(validate_forward_release(&developer(3, 'c', '2'), Some(&installed)).is_err());
-        // A published release replaces it when newer than the baseline or exactly the baseline (the way back).
+    fn a_developer_release_applies_over_any_installation_and_yields_to_an_explicit_return() {
+        let published = installed_from(&release(2, 'b'));
+        let installed = installed_from(&developer(9, '1'));
+        // Over a published release or another developer release, in either direction, but never as a fresh install.
+        assert!(validate_forward_release(&developer(9, '1'), Some(&published)).is_ok());
+        assert!(validate_forward_release(&developer(1, '2'), Some(&installed)).is_ok());
+        assert!(validate_forward_release(&developer(9, '1'), Some(&installed)).is_ok());
+        assert!(validate_forward_release(&developer(9, '1'), None).is_err());
+        // The explicit return to the published channel replaces it with any published release.
+        assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
-        assert!(validate_forward_release(&release(2, 'b'), Some(&installed)).is_ok());
-        assert!(validate_forward_release(&release(2, 'c'), Some(&installed)).is_err());
-        assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_err());
-        // `start` and the scheduler keep it while `stable` names its baseline; an exact release never does.
-        assert!(keeps_developer_release(true, &installed, &release(2, 'b')));
-        assert!(!keeps_developer_release(
-            false,
-            &installed,
-            &release(2, 'b')
-        ));
-        assert!(!keeps_developer_release(true, &installed, &release(3, 'c')));
-        assert!(!keeps_developer_release(true, &baseline, &release(2, 'b')));
-        // While running, an explicit update returns to the baseline; a stopped Space only reports it.
+        // Published releases still move only forward.
+        assert!(validate_forward_release(&release(1, 'a'), Some(&published)).is_err());
+        assert!(validate_forward_release(&release(2, 'c'), Some(&published)).is_err());
+        assert!(validate_forward_release(&release(3, 'c'), Some(&published)).is_ok());
+        // While running, an explicit update returns to `stable`; a stopped Space only reports it.
         assert_eq!(
             update_decision(&installed, &release(2, 'b'), false, false),
             UpdateDecision::Apply
@@ -2671,17 +2795,16 @@ mod tests {
     /// The release.env document of a resolved release, as a release set image carries it.
     fn release_document(release: &ResolvedRelease) -> String {
         let metadata = &release.metadata;
-        let (schema, baseline) = match &metadata.baseline {
-            Some(baseline) => ("local-dev-v1", format!("baseline={baseline}\n")),
-            None => ("local-v2", String::new()),
+        let (schema, macos) = match &metadata.cli_macos_arm64_sha256 {
+            Some(hash) => ("local-v2", format!("cli_macos_arm64_sha256={hash}\n")),
+            None => ("local-dev-v2", String::new()),
         };
         format!(
-            "schema={schema}\nordinal={}\numbrella_revision={}\ncli_revision={}\ncli_linux_amd64_sha256={}\ncli_macos_arm64_sha256={}\nadmin={}\nteam={}\nbrain={}\negress={}\n{baseline}",
+            "schema={schema}\nordinal={}\numbrella_revision={}\ncli_revision={}\ncli_linux_amd64_sha256={}\n{macos}admin={}\nteam={}\nbrain={}\negress={}\n",
             metadata.ordinal,
             metadata.umbrella_revision,
             metadata.cli_revision,
             metadata.cli_linux_amd64_sha256,
-            metadata.cli_macos_arm64_sha256,
             metadata.admin,
             metadata.team,
             metadata.brain,
@@ -2689,27 +2812,21 @@ mod tests {
         )
     }
 
-    /// A Docker stand-in holding one developer release and its published baseline. It logs every call, serves
-    /// `localhost/` images only from its "store", and lets a published reference be pulled.
+    /// A Docker stand-in holding one developer release and the published images it reuses. It logs every call,
+    /// declares state epoch 1 for every set, serves `localhost/` images only from its "store", and refuses to pull
+    /// them.
     #[cfg(unix)]
-    fn developer_docker(
-        directory: &Path,
-        published: &ResolvedRelease,
-        developer: &ResolvedRelease,
-    ) -> PathBuf {
-        let published_document = directory.join("published.env");
+    fn developer_docker(directory: &Path, developer: &ResolvedRelease) -> PathBuf {
         let developer_document = directory.join("developer.env");
-        fs::write(&published_document, release_document(published)).unwrap();
         fs::write(&developer_document, release_document(developer)).unwrap();
         let log = directory.join("docker.log");
         let docker = directory.join("docker");
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;;\n  create) case \"$6\" in localhost/*) echo developer ;; *) echo published ;; esac ;;\n  cp) case \"$2\" in developer:*) cat '{developer}' > \"$3\" ;; *) cat '{published}' > \"$3\" ;; esac ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$4\" in *Labels*) echo 1 ;; *) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; esac ;;\n  create) echo developer ;;\n  cp) cat '{developer}' > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 developer = developer_document.display(),
-                published = published_document.display(),
             ),
         );
         docker
@@ -2717,60 +2834,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_developer_release_resolves_from_the_local_store_bound_to_its_baseline() {
+    fn a_developer_release_resolves_from_the_local_store_and_present_digests_are_never_pulled() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
-        let published = release(2, 'b');
-        let developer_release = developer(2, 'b', '1');
-        let docker = developer_docker(home.path(), &published, &developer_release);
+        let developer_release = developer(9, '1');
+        let docker = developer_docker(home.path(), &developer_release);
         let context = Context {
             paths,
             profile: HostProfile::Linux,
             engine: Engine::with_docker(docker),
             scheduled: false,
+            recreated: Cell::new(false),
         };
         let resolved = context.resolve(Some(&developer_release.reference)).unwrap();
         assert_eq!(resolved.reference, developer_release.reference);
         assert_eq!(resolved.metadata, developer_release.metadata);
-        context
-            .engine
-            .pull_exact(&resolved.metadata.admin, release::ADMIN)
-            .unwrap();
+        for (member, package) in [
+            (&resolved.metadata.admin, release::ADMIN),
+            (&resolved.metadata.team, release::TEAM),
+        ] {
+            context.engine.pull_exact(member, package).unwrap();
+        }
         let log = fs::read_to_string(home.path().join("docker.log")).unwrap();
-        assert!(log.contains(&format!(
-            "pull --quiet --platform linux/amd64 {}",
-            published.reference
-        )));
         assert!(log.contains(&format!(
             "create --pull never --platform linux/amd64 {}",
             developer_release.reference
         )));
-        for line in log.lines() {
-            assert!(
-                !(line.starts_with("pull") && line.contains("localhost/")),
-                "pulled: {line}"
-            );
-        }
+        assert!(
+            !log.lines().any(|line| line.starts_with("pull")),
+            "pulled an image the store holds: {log}"
+        );
 
-        // The same set on macOS, or bound to a baseline whose members differ, is refused.
+        // The same set on macOS is refused.
         let macos = Context {
             profile: HostProfile::MacOs,
             ..context
         };
         assert!(macos.resolve(Some(&developer_release.reference)).is_err());
-        let mut drifted = release(2, 'b');
-        drifted.metadata.team = format!(
-            "ghcr.io/theshimpz/shimpz-team-local@sha256:{}",
-            "f".repeat(64)
-        );
-        let docker = developer_docker(home.path(), &drifted, &developer_release);
-        let context = Context {
-            engine: Engine::with_docker(docker),
-            profile: HostProfile::Linux,
-            ..macos
-        };
-        assert!(context.resolve(Some(&developer_release.reference)).is_err());
     }
 
     /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set.
@@ -2792,7 +2893,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *Labels*) echo 1 ;; *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 stable = stable.reference,
                 directory = directory.display(),
             ),
@@ -2824,14 +2925,15 @@ mod tests {
             paths,
             profile: HostProfile::Linux,
             engine: Engine::with_docker(channel_docker(home, stable, sets)),
-            scheduled: exact.is_none(),
+            scheduled: true,
+            recreated: Cell::new(false),
         };
         let options = SpaceStart {
-            scheduled: exact.is_none(),
+            scheduled: true,
             release: exact.map(str::to_owned),
             candidate: false,
         };
-        let installed = installed_from(&developer(2, 'b', '1'));
+        let installed = installed_from(&developer(9, '1'));
         Ok(context
             .select_start(&options, &installed, stopped)?
             .map(|selected| {
@@ -2845,60 +2947,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_kept_developer_release_meets_failed_release_memory_and_never_hands_off() {
+    fn an_installed_developer_release_never_follows_stable_and_a_request_hands_off() {
         let home = tempfile::tempdir().unwrap();
-        let baseline = release(2, 'b');
         let newer = release(3, 'c');
-        let installed = developer(2, 'b', '1');
-        let sibling = developer(2, 'b', '2');
-        let sets = [&baseline, &newer, &installed, &sibling];
+        let installed = developer(9, '1');
+        let requested = developer(10, '2');
+        let sets = [&newer, &installed, &requested];
         let record = |release: &ResolvedRelease| format!("release={}\n", release.reference);
-        let select = |stable, failed: Option<&str>, exact, stopped| {
-            selection(home.path(), stable, &sets, failed, exact, stopped)
+        let select = |failed: Option<&str>, exact, stopped| {
+            selection(home.path(), &newer, &sets, failed, exact, stopped)
         };
-        // `stable` names the baseline: the developer release is kept and repaired, never handed off.
+        // A newer publication is not news: the scheduler repairs the installed developer release.
         assert_eq!(
-            select(&baseline, None, None, false),
-            Ok(Some((installed.reference.clone(), false, false)))
+            select(None, None, false),
+            Ok(Some((installed.reference.clone(), false, true)))
         );
         // A developer release that failed its repair is not applied again by the scheduler.
-        assert_eq!(
-            select(&baseline, Some(&record(&installed)), None, false),
-            Ok(None)
-        );
+        assert_eq!(select(Some(&record(&installed)), None, false), Ok(None));
         // A stopped Space resumes the installed developer release, preserving the memory.
         assert_eq!(
-            select(&baseline, Some(&record(&installed)), None, true),
+            select(Some(&record(&installed)), None, true),
             Ok(Some((installed.reference.clone(), true, false)))
         );
-        assert!(select(&baseline, Some("malformed"), None, false).is_err());
-        // The owner's explicit apply retries a developer release whatever the memory says.
+        assert!(select(Some("malformed"), None, false).is_err());
+        // A deploy request applies its exact release whatever the memory says, handing off to its CLI.
         assert_eq!(
-            select(
-                &baseline,
-                Some(&record(&sibling)),
-                Some(&sibling.reference),
-                false
-            ),
-            Ok(Some((sibling.reference.clone(), false, false)))
-        );
-        // A newer publication replaces it and may hand off, unless that publication failed health.
-        assert_eq!(
-            select(&newer, None, None, false),
-            Ok(Some((newer.reference.clone(), false, true)))
-        );
-        assert_eq!(select(&newer, Some(&record(&newer)), None, false), Ok(None));
-        assert_eq!(
-            select(&newer, Some(&record(&newer)), None, true),
-            Ok(Some((installed.reference.clone(), true, false)))
+            select(Some(&record(&requested)), Some(&requested.reference), false),
+            Ok(Some((requested.reference.clone(), false, true)))
         );
     }
 
-    /// Opt-in: admit a developer release built by .scripts/local-release/developer-release.sh from this host's
-    /// Docker store, bound to the public baseline it names. Only reads images and creates temporary containers.
+    /// Opt-in: admit a developer release built by .scripts/local-release/deploy from this host's Docker store. Only reads images
+    /// and creates temporary containers.
     #[cfg(unix)]
     #[test]
-    #[ignore = "needs SHIMPZ_DEVELOPER_RELEASE, this host's Docker store, and the public stable release"]
+    #[ignore = "needs SHIMPZ_DEVELOPER_RELEASE and this host's Docker store"]
     fn live_developer_release_resolves_from_this_hosts_store() {
         let reference =
             std::env::var("SHIMPZ_DEVELOPER_RELEASE").expect("SHIMPZ_DEVELOPER_RELEASE");
@@ -2910,9 +2993,10 @@ mod tests {
             profile: HostProfile::Linux,
             engine: Engine::with_docker(PathBuf::from("docker")),
             scheduled: false,
+            recreated: Cell::new(false),
         };
         let release = context.resolve(Some(&reference)).unwrap();
-        assert!(release.metadata.baseline.is_some());
+        assert_eq!(release.metadata.cli_macos_arm64_sha256, None);
         let metadata = &release.metadata;
         for (member, package) in [
             (&metadata.admin, release::ADMIN),
@@ -2968,13 +3052,232 @@ mod tests {
         )
         .unwrap();
         let backup = backup_current(&paths, HostProfile::MacOs).unwrap();
+        state::write_state_epoch(&paths, 1).unwrap();
         let context = Context {
             paths,
             profile: HostProfile::MacOs,
             engine: Engine::with_docker(docker),
             scheduled: false,
+            recreated: Cell::new(false),
         };
         (context, backup)
+    }
+
+    /// A Docker stand-in that logs every call, holds no image until it is pulled, owns the Admin data volume, and
+    /// fails every container run.
+    #[cfg(unix)]
+    fn logging_docker(home: &Path) -> (PathBuf, PathBuf) {
+        let log = home.join("docker.log");
+        let docker = home.join("logging-docker");
+        crate::fake_tool::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                log = log.display()
+            ),
+        );
+        (docker, log)
+    }
+
+    /// A Local home holding one pending deploy request for `requested`.
+    #[cfg(unix)]
+    fn deploy_home(requested: &ResolvedRelease) -> (tempfile::TempDir, Paths, deploy::Request) {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        state::write_private(
+            &paths.deploy_request,
+            &format!(
+                "id=0123456789abcdef0123456789abcdef\nrelease={}\n",
+                requested.reference
+            ),
+        )
+        .unwrap();
+        let request = deploy::claim(&paths).unwrap().unwrap();
+        (home, paths, request)
+    }
+
+    #[cfg(unix)]
+    fn deploy_outcome(paths: &Paths) -> String {
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.deploy_result).unwrap()).unwrap();
+        result["outcome"].as_str().unwrap().to_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deploy_request_is_applied_only_by_an_attempt_that_commits_it() {
+        let requested = developer(9, '1');
+        let profile = host::detect().unwrap();
+        // The release is installed and its reconciliation recorded: applied, and the request is consumed.
+        let (_home, paths, request) = deploy_home(&requested);
+        state::write_environment(
+            &paths,
+            &Environment {
+                release: &requested,
+                profile,
+                space_id: "space-0123456789abcdef01234567",
+                port: 7777,
+                docker_gid: 998,
+                docker_socket: Path::new("/var/run/docker.sock"),
+                cpuset: "0-3",
+                secure_root: &paths.pool_mount,
+            },
+        )
+        .unwrap();
+        state::write_private(
+            &paths.status,
+            &state::status_document(&requested, "updated").unwrap(),
+        )
+        .unwrap();
+        assert!(finish_deploy_request(&paths, &request, || Ok("ready".into())).is_ok());
+        assert_eq!(deploy_outcome(&paths), "applied");
+        assert!(!paths.deploy_request.exists());
+        // The same evidence does not count when this attempt found storage locked.
+        state::write_private(
+            &paths.deploy_request,
+            &format!(
+                "id=0123456789abcdef0123456789abcdef\nrelease={}\n",
+                requested.reference
+            ),
+        )
+        .unwrap();
+        let request = deploy::claim(&paths).unwrap().unwrap();
+        assert!(finish_deploy_request(&paths, &request, || Ok(STORAGE_LOCKED.into())).is_ok());
+        assert_eq!(deploy_outcome(&paths), "failed");
+        // Nothing installed, or a refusal, fails it; a deferral keeps the request for the next run.
+        let (_home, paths, request) = deploy_home(&requested);
+        assert!(finish_deploy_request(&paths, &request, || Ok("ready".into())).is_ok());
+        assert_eq!(deploy_outcome(&paths), "failed");
+        let (_home, paths, request) = deploy_home(&requested);
+        assert!(finish_deploy_request(&paths, &request, || Err("refused".into())).is_err());
+        assert_eq!(deploy_outcome(&paths), "failed");
+        assert!(!paths.deploy_request.exists());
+        let (_home, paths, request) = deploy_home(&requested);
+        assert!(finish_deploy_request(&paths, &request, || Ok(UPDATE_DEFERRED.into())).is_ok());
+        assert_eq!(deploy_outcome(&paths), "deferred");
+        assert!(paths.deploy_request.exists());
+        // A stopped Space keeps its stop intent: nothing runs.
+        let (_home, paths, request) = deploy_home(&requested);
+        state::write_stopped(&paths).unwrap();
+        assert!(
+            finish_deploy_request(&paths, &request, || panic!("a stopped Space was started"))
+                .is_err()
+        );
+        assert_eq!(deploy_outcome(&paths), "failed");
+    }
+
+    #[test]
+    fn runtime_state_is_recreated_exactly_when_its_stored_format_epoch_differs_or_is_unknown() {
+        // A fresh Space has no runtime state yet.
+        assert!(!runtime_state_reset_needed(true, Some(2), None));
+        assert!(!runtime_state_reset_needed(true, None, None));
+        // The same known epoch keeps it; another epoch in either direction, or an unknown one, recreates it.
+        assert!(!runtime_state_reset_needed(false, Some(2), Some(2)));
+        assert!(runtime_state_reset_needed(false, Some(3), Some(2)));
+        assert!(runtime_state_reset_needed(false, Some(1), Some(2)));
+        assert!(runtime_state_reset_needed(false, Some(2), None));
+        assert!(runtime_state_reset_needed(false, None, Some(2)));
+        assert!(runtime_state_reset_needed(false, None, None));
+    }
+
+    #[test]
+    fn the_runtime_state_group_holds_no_identity_records_or_bindings() {
+        for volume in graph::RUNTIME_STATE_VOLUMES {
+            assert!(graph::VOLUME_NAMES.contains(&volume), "{volume}");
+        }
+        for kept in [
+            "data",
+            "config",
+            "supervisor_key",
+            "controller_storage",
+            "controller_publications",
+            "controller_assistant_integration_state",
+            "controller_assistant_integration_key",
+            "controller_token",
+            "brain_runtime_token",
+            "account_egress_capability",
+            "reset_capability",
+            "assistant_egress_policy",
+        ] {
+            assert!(!graph::RUNTIME_STATE_VOLUMES.contains(&kept), "{kept}");
+        }
+    }
+
+    #[test]
+    fn the_state_epoch_record_is_private_and_forgotten_before_a_recreation() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        assert_eq!(state::read_state_epoch(&paths), None);
+        state::write_state_epoch(&paths, 7).unwrap();
+        assert_eq!(state::read_state_epoch(&paths), Some(7));
+        assert_eq!(
+            fs::metadata(&paths.state_epoch)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        // Each write is a distinct record, even for the same epoch.
+        let first = state::read_state_record(&paths).unwrap();
+        state::write_state_epoch(&paths, 7).unwrap();
+        assert_ne!(state::read_state_record(&paths).unwrap(), first);
+        state::forget_state_epoch(&paths).unwrap();
+        state::forget_state_epoch(&paths).unwrap();
+        assert_eq!(state::read_state_epoch(&paths), None);
+        for invalid in [
+            "7\n",
+            "0 0123456789abcdef0123456789abcdef\n",
+            "07 0123456789abcdef0123456789abcdef\n",
+            "7 0123\n",
+            "seven 0123456789abcdef0123456789abcdef\n",
+        ] {
+            state::write_private(&paths.state_epoch, invalid).unwrap();
+            assert_eq!(state::read_state_epoch(&paths), None, "{invalid}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_admin_image_needs_no_new_authentication_probe() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let (docker, log) = logging_docker(home.path());
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: true,
+            recreated: Cell::new(false),
+        };
+        let candidate = release(2, 'b');
+        let unchanged = installed_from(&release(1, 'a'));
+        // The stand-in's empty inspection proves nothing present, so members are pulled; no probe runs.
+        context
+            .download_and_admit_candidate(&candidate, Some(&unchanged))
+            .unwrap();
+        assert!(
+            !fs::read_to_string(&log)
+                .unwrap()
+                .contains("authentication_state")
+        );
+        let changed = Installed {
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64)),
+            ..unchanged
+        };
+        assert!(
+            context
+                .download_and_admit_candidate(&candidate, Some(&changed))
+                .is_err()
+        );
+        assert!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .contains("authentication_state")
+        );
     }
 
     #[cfg(unix)]
@@ -3041,7 +3344,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
         assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&release(2, 'b'), Some(&installed)).is_ok());
@@ -3059,7 +3361,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
         for invalid in [release(1, 'a'), release(2, 'c'), release(3, 'b')] {
             let mut called = false;
@@ -3082,7 +3383,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
         assert_eq!(release_outcome(&current, Some(&installed)), "current");
         assert_eq!(
@@ -3102,7 +3402,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
 
         for stopped in [false, true] {
@@ -3135,7 +3434,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
         let passive = [
             update_decision(&installed, &current, false, false),
@@ -3177,7 +3475,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,
-            baseline: None,
         };
         let outcomes = [
             current_release_outcome(&installed, false),
@@ -4072,7 +4369,7 @@ mod tests {
             ),
         )
         .unwrap();
-        target.metadata.cli_macos_arm64_sha256 = hash_file(&child).unwrap();
+        target.metadata.cli_macos_arm64_sha256 = Some(hash_file(&child).unwrap());
         crate::fake_tool::write(
             &docker,
             format!(
@@ -4117,7 +4414,7 @@ mod tests {
             format!("install --release {} --candidate\n", target.reference)
         );
         assert_eq!(
-            hash_file(&context.paths.managed_cli).unwrap(),
+            Some(hash_file(&context.paths.managed_cli).unwrap()),
             target.metadata.cli_macos_arm64_sha256
         );
         assert!(
@@ -4316,7 +4613,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            hash_file(&context.paths.managed_cli).unwrap(),
+            Some(hash_file(&context.paths.managed_cli).unwrap()),
             target.metadata.cli_macos_arm64_sha256
         );
         assert_eq!(
@@ -4359,7 +4656,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            hash_file(&context.paths.managed_cli).unwrap(),
+            Some(hash_file(&context.paths.managed_cli).unwrap()),
             target.metadata.cli_macos_arm64_sha256
         );
         assert_eq!(
@@ -4402,6 +4699,40 @@ mod tests {
                 .exists()
         );
         assert!(!context.paths.public_cli.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_that_recreated_and_rolled_back_reports_the_recreation() {
+        let home = tempfile::tempdir().unwrap();
+        // The child empties the runtime state for its release, fails health, and its rollback recreates the state
+        // again for the previous epoch: the epoch ends where it began, but the record does not.
+        let record = Paths::under(home.path()).unwrap().state_epoch;
+        let child_body = format!(
+            "umask 077\nprintf '1 %s\\n' {} > '{}'\nexit 1\n",
+            "f".repeat(32),
+            record.display()
+        );
+        let (_, _, _, outcome) = scheduled_handoff(home.path(), &child_body);
+
+        let error = outcome.unwrap_err();
+        assert!(
+            error.ends_with("; the Team runtime state was recreated empty"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_that_failed_before_emptying_the_state_reports_no_recreation() {
+        let home = tempfile::tempdir().unwrap();
+        // The child forgot the record before its recreation failed: nothing was emptied.
+        let record = Paths::under(home.path()).unwrap().state_epoch;
+        let child_body = format!("rm -f '{}'\nexit 1\n", record.display());
+        let (_, _, _, outcome) = scheduled_handoff(home.path(), &child_body);
+
+        let error = outcome.unwrap_err();
+        assert!(!error.contains("recreated"), "{error}");
     }
 
     #[cfg(unix)]
@@ -4474,7 +4805,7 @@ mod tests {
 
         assert_eq!(outcome, Ok(true));
         assert_eq!(
-            hash_file(&context.paths.managed_cli).unwrap(),
+            Some(hash_file(&context.paths.managed_cli).unwrap()),
             target.metadata.cli_macos_arm64_sha256
         );
         assert!(
@@ -4520,7 +4851,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            hash_file(&context.paths.managed_cli).unwrap(),
+            Some(hash_file(&context.paths.managed_cli).unwrap()),
             target.metadata.cli_macos_arm64_sha256
         );
         assert_eq!(
@@ -4539,7 +4870,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  image) echo 1 ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
                 projected.display()
             ),
         );
@@ -4607,6 +4938,7 @@ mod tests {
                 profile: HostProfile::MacOs,
                 engine: Engine::with_docker(docker),
                 scheduled: false,
+                recreated: Cell::new(false),
             };
             let inventory = Inventory {
                 project_containers: vec![format!("{:0<64}", "c001"), format!("{:0<64}", "c002")],
@@ -4633,6 +4965,7 @@ mod tests {
             profile: HostProfile::MacOs,
             engine: Engine::with_docker(stopped_space_docker(temporary.path())),
             scheduled: false,
+            recreated: Cell::new(false),
         };
         assert!(context.prepare_admin_for_recovery().is_ok());
         let calls = fs::read_to_string(temporary.path().join("calls")).unwrap();

@@ -24,14 +24,12 @@ pub(crate) struct Installed {
     pub(crate) admin_image: String,
     pub(crate) ordinal: u64,
     pub(crate) port: u16,
-    /// The exact published release a developer release was assembled from; `None` for a published release.
-    pub(crate) baseline: Option<String>,
 }
 
 impl Installed {
-    /// The published release this Space follows: itself, or the baseline of an installed developer release.
-    pub(crate) fn published_ref(&self) -> &str {
-        self.baseline.as_deref().unwrap_or(&self.release_ref)
+    /// Whether the installed release is a developer release built on this host.
+    pub(crate) fn developer(&self) -> bool {
+        release::valid_developer_release_ref(&self.release_ref)
     }
 }
 
@@ -155,9 +153,6 @@ fn parse_installed(
         admin_image: values["SHIMPZ_ADMIN_IMAGE"].into(),
         ordinal,
         port,
-        baseline: values
-            .get("SHIMPZ_LOCAL_RELEASE_BASELINE")
-            .map(|value| (*value).to_owned()),
     })
 }
 
@@ -204,11 +199,10 @@ fn validate_environment(
     let developer = values
         .get("SHIMPZ_LOCAL_RELEASE_IMAGE")
         .is_some_and(|value| release::valid_developer_release_ref(value));
-    let expected = required.len() + usize::from(linux) + usize::from(developer);
+    let expected = required.len() + usize::from(linux);
     if values.len() != expected
         || required.iter().any(|key| !values.contains_key(key))
         || (linux && !values.contains_key("SHIMPZ_SECURE_VOLUME_ROOT"))
-        || (developer && !values.contains_key("SHIMPZ_LOCAL_RELEASE_BASELINE"))
     {
         return Err("the installed Local environment has unknown or missing fields".into());
     }
@@ -220,11 +214,8 @@ fn validate_environment(
     if !release::valid_release_ref(release_ref) {
         return Err("the installed Local release reference is invalid".into());
     }
-    if developer
-        && (profile == HostProfile::MacOs
-            || !release::valid_published_release_ref(values["SHIMPZ_LOCAL_RELEASE_BASELINE"]))
-    {
-        return Err("the installed developer release baseline is invalid".into());
+    if developer && profile == HostProfile::MacOs {
+        return Err("a developer release applies only to an amd64 Linux Space".into());
     }
     let port = values["SHIMPZ_PORT"]
         .parse::<u16>()
@@ -330,11 +321,46 @@ pub(crate) fn write_environment(
         )
         .expect("String writes are infallible");
     }
-    if let Some(baseline) = &release.metadata.baseline {
-        writeln!(document, "SHIMPZ_LOCAL_RELEASE_BASELINE={baseline}")
-            .expect("String writes are infallible");
-    }
     write_private(&paths.environment, &document)
+}
+
+/// The runtime state record: its stored-format epoch and the identity of the recreation, or fresh start, that wrote
+/// it, so any recreation in between is visible even when the epoch ends where it began.
+pub(crate) fn read_state_record(paths: &Paths) -> Option<String> {
+    read_private_record(&paths.state_epoch, 64, "the Local state epoch")
+        .ok()
+        .flatten()
+}
+
+/// The stored-format epoch of the runtime state on disk, or `None` when it is unknown: never recorded, removed
+/// before a recreation that did not finish, or unreadable.
+pub(crate) fn read_state_epoch(paths: &Paths) -> Option<u32> {
+    read_state_record(paths).and_then(|document| {
+        let (epoch, identity) = document.strip_suffix('\n')?.split_once(' ')?;
+        crate::digest::is_lower_hex(identity, 32)
+            .then(|| release::parse_state_epoch(epoch).ok())
+            .flatten()
+    })
+}
+
+pub(crate) fn write_state_epoch(paths: &Paths, epoch: u32) -> Result<(), String> {
+    let mut identity = [0_u8; 16];
+    getrandom::fill(&mut identity).map_err(|_| "the system random source is unavailable")?;
+    let mut record = format!("{epoch} ");
+    for byte in identity {
+        write!(record, "{byte:02x}").expect("String writes are infallible");
+    }
+    record.push('\n');
+    write_private(&paths.state_epoch, &record)
+}
+
+/// Forget the recorded epoch before runtime state is recreated, so an interrupted recreation is redone.
+pub(crate) fn forget_state_epoch(paths: &Paths) -> Result<(), String> {
+    match fs::remove_file(&paths.state_epoch) {
+        Ok(()) => private_file::sync_parent(&paths.state_epoch).map_err(io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
 }
 
 pub(crate) fn write_marker(paths: &Paths) -> Result<(), String> {
@@ -517,22 +543,21 @@ mod tests {
                 umbrella_revision: "a".repeat(40),
                 cli_revision: "b".repeat(40),
                 cli_linux_amd64_sha256: HEX.into(),
-                cli_macos_arm64_sha256: HEX.into(),
+                cli_macos_arm64_sha256: Some(HEX.into()),
                 admin: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
                 team: format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{HEX}"),
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
-                baseline: None,
+                state_epoch: 1,
             },
         }
     }
 
-    /// A developer release over `release()` that rebuilt Team.
+    /// A developer release that rebuilt Team.
     fn developer_release() -> ResolvedRelease {
-        let published = release();
-        let mut metadata = published.metadata;
+        let mut metadata = release().metadata;
         metadata.team = format!("localhost/shimpz-team-local@sha256:{}", "c".repeat(64));
-        metadata.baseline = Some(published.reference);
+        metadata.cli_macos_arm64_sha256 = None;
         ResolvedRelease {
             reference: format!(
                 "{}@sha256:{}",
@@ -570,39 +595,29 @@ mod tests {
     }
 
     #[test]
-    fn records_a_developer_release_only_with_its_exact_published_baseline() {
+    fn records_a_developer_release_only_on_linux_and_its_members_only_by_namespace() {
         let (_home, paths) = fresh_paths();
         let developer = developer_release();
         write_linux(&paths, &developer);
         let installed = read_installed(&paths, HostProfile::Linux).unwrap();
         assert_eq!(installed.release_ref, developer.reference);
-        assert_eq!(installed.baseline, developer.metadata.baseline);
-        assert_eq!(installed.published_ref(), release().reference);
+        assert!(installed.developer());
         assert!(read_installed(&paths, HostProfile::MacOs).is_err());
         let valid = fs::read_to_string(&paths.environment).unwrap();
-        let baseline_line = format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", release().reference);
-        for invalid in [
-            valid.replace(&baseline_line, ""),
-            valid.replace(
-                &baseline_line,
-                &format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", developer.reference),
-            ),
-            format!("{valid}{baseline_line}"),
-        ] {
-            fs::write(&paths.environment, invalid).unwrap();
-            assert!(read_installed(&paths, HostProfile::Linux).is_err());
-        }
+        let retired = format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", release().reference);
+        fs::write(&paths.environment, format!("{valid}{retired}")).unwrap();
+        assert!(read_installed(&paths, HostProfile::Linux).is_err());
 
-        // A published release carries neither the baseline field nor a member from this host's image store.
+        // A published release never runs a member from this host's image store.
         write_linux(&paths, &release());
         let published = fs::read_to_string(&paths.environment).unwrap();
-        assert!(!published.contains("SHIMPZ_LOCAL_RELEASE_BASELINE"));
-        assert_eq!(
-            read_installed(&paths, HostProfile::Linux).unwrap().baseline,
-            None
+        assert!(
+            !read_installed(&paths, HostProfile::Linux)
+                .unwrap()
+                .developer()
         );
         for invalid in [
-            format!("{published}{baseline_line}"),
+            format!("{published}{retired}"),
             published.replace(
                 "ghcr.io/theshimpz/shimpz-team-local@",
                 "localhost/shimpz-team-local@",
@@ -626,7 +641,6 @@ mod tests {
                 admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
                 ordinal: 1,
                 port: 7777,
-                baseline: None,
             })),
             Ok(7777)
         );

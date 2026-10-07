@@ -35,6 +35,21 @@ pub(crate) const VOLUME_NAMES: [&str; 28] = [
     "brain_runtime_state",
 ];
 
+/// The disposable Team and Brain runtime state one state epoch covers: a release that reads another stored format
+/// of it recreates exactly these volumes empty. Supervisor authentication, Admin data, Team records, Assistant
+/// bindings and Integrations, capabilities, policy, and audit are never part of it.
+pub(crate) const RUNTIME_STATE_VOLUMES: [&str; 9] = [
+    "controller_inference",
+    "controller_action_journal",
+    "controller_chat_continuation_state",
+    "controller_chat_continuation_key",
+    "controller_assistant_stored_input_state",
+    "controller_assistant_stored_input_key",
+    "controller_routine_state",
+    "controller_routine_key",
+    "brain_runtime_state",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageProfile {
     LinuxLuks,

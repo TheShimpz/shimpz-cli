@@ -31,6 +31,9 @@ const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
+const SPACE_PROJECT: &str = "shimpz-space";
+const RUNTIME_STATE_RESET_CONTAINER: &str = "shimpz-runtime-state-reset";
+const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
 
 pub(crate) struct Engine {
     docker: PathBuf,
@@ -108,10 +111,11 @@ impl Engine {
             Some(_) => return Err("the internal Local release reference is invalid".into()),
             None => format!("{RELEASE_REPOSITORY}:{RELEASE_CHANNEL}"),
         };
-        // A developer release set exists only in this host's image store and is never pulled.
+        // A developer release set exists only in this host's image store and is never pulled; an exact published
+        // set already present by that digest is content-addressed and needs no download.
         if release::valid_developer_release_ref(&selector) {
             self.require_present(&selector, DEVELOPER_RELEASE_REPOSITORY)?;
-        } else {
+        } else if exact.is_none() || !self.present(&selector, RELEASE_REPOSITORY) {
             self.pull(&selector)?;
         }
         let reference = if exact.is_some() {
@@ -143,7 +147,17 @@ impl Engine {
             .map_err(|error| format!("could not read Local release metadata: {error}"))?;
         fs::remove_file(metadata_path)
             .map_err(|error| format!("could not remove temporary release metadata: {error}"))?;
-        let metadata = release::parse(&reference, &document)?;
+        let state_epoch = self.run_output([
+            "image",
+            "inspect",
+            "--format",
+            &format!(
+                "{{{{index .Config.Labels \"{}\"}}}}",
+                release::STATE_EPOCH_LABEL
+            ),
+            &reference,
+        ])?;
+        let metadata = release::parse(&reference, &document, state_epoch.trim_end_matches('\n'))?;
         Ok(ResolvedRelease {
             reference,
             metadata,
@@ -156,7 +170,11 @@ impl Engine {
         profile: HostProfile,
         target: &Path,
     ) -> Result<(), String> {
-        if !release::valid_published_release_ref(release_ref) {
+        // A developer release carries only the amd64 Linux CLI and applies only to an amd64 Linux Space.
+        let developer = release::valid_developer_release_ref(release_ref);
+        if !(release::valid_published_release_ref(release_ref)
+            || developer && profile != HostProfile::MacOs)
+        {
             return Err("the Local release reference is invalid".into());
         }
         let member = match profile {
@@ -182,17 +200,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Make one release member available by its exact digest: a published member is pulled, a developer member
-    /// must already be in this host's image store and is never pulled.
+    /// Make one release member available by its exact digest: a developer member must already be in this host's
+    /// image store and is never pulled; a published member is pulled unless the store already holds exactly that
+    /// digest for this Space's platform, since the digest names the content.
     pub(crate) fn pull_exact(&self, reference: &str, package: Package) -> Result<(), String> {
+        let repository = reference.split_once('@').map_or("", |(name, _)| name);
         if package.developer(reference) {
-            let repository = reference.split_once('@').map_or("", |(name, _)| name);
             return self.require_present(reference, repository);
         }
         if !package.published(reference) {
             return Err("a release component image reference is invalid".into());
         }
-        let repository = reference.split_once('@').map_or("", |(name, _)| name);
+        if self.present(reference, repository) {
+            return Ok(());
+        }
         self.pull(reference)?;
         let actual = self.unique_repo_digest(reference, repository)?;
         if actual == reference {
@@ -205,24 +226,103 @@ impl Engine {
     /// Admit a `localhost/` image only when this daemon's store already holds exactly that manifest digest for
     /// this Space's platform. Absence fails closed; nothing is pulled.
     fn require_present(&self, reference: &str, repository: &str) -> Result<(), String> {
-        let missing = || {
-            format!(
-                "the developer release image {reference} is not in the local Docker image store; rebuild it with .scripts/local-release/developer-release.sh, or return to the published release with shimpz update"
-            )
-        };
-        let document = self
-            .run_output([
-                "image",
+        if self.present(reference, repository) {
+            Ok(())
+        } else {
+            Err(format!(
+                "the developer release image {reference} is not in the local Docker image store; deploy the change again with .scripts/local-release/deploy, or return to the published release with shimpz update"
+            ))
+        }
+    }
+
+    /// The state epoch an admitted release set declares in its image label.
+    pub(crate) fn release_state_epoch(&self, release_ref: &str) -> Result<u32, String> {
+        if !release::valid_release_ref(release_ref) {
+            return Err("the Local release reference is invalid".into());
+        }
+        let label = self.run_output([
+            "image",
+            "inspect",
+            "--format",
+            &format!(
+                "{{{{index .Config.Labels \"{}\"}}}}",
+                release::STATE_EPOCH_LABEL
+            ),
+            release_ref,
+        ])?;
+        release::parse_state_epoch(label.trim_end_matches('\n'))
+    }
+
+    /// Empty exactly the named volumes of this Space, keeping each volume root with its ownership and mode, through
+    /// one network-less, read-only container of an image the Space already admitted. Only the container's root may
+    /// bypass file permissions, and it can do nothing but delete below the mounted roots.
+    pub(crate) fn clear_volumes(&self, image: &str, volumes: &[&str]) -> Result<(), String> {
+        if !release::TEAM.admits(image) {
+            return Err("the selected Team image reference is invalid".into());
+        }
+        for volume in volumes {
+            let name = format!("{SPACE_PROJECT}_{volume}");
+            let identity = self.run_output([
+                "volume",
                 "inspect",
                 "--format",
-                "{{json .RepoDigests}}|{{.Os}}/{{.Architecture}}",
-                reference,
-            ])
-            .map_err(|_| missing())?;
-        if !developer_image_present(&document, reference, repository, self.platform) {
-            return Err(missing());
+                "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
+                &name,
+            ])?;
+            if identity.trim_end() != format!("{name}|{SPACE_PROJECT}|{volume}") {
+                return Err(format!(
+                    "the Local volume {volume} is not owned by this Space"
+                ));
+            }
         }
-        Ok(())
+        // One fixed name: a helper an interrupted run left behind is removed before another starts, so no earlier
+        // deletion can still run while the Space starts again.
+        // Only this CLI's own helper is removed; any other occupant of the name is kept and refuses the reset.
+        if let Ok(kind) = self.run_output([
+            "container",
+            "inspect",
+            "--format",
+            "{{index .Config.Labels \"com.shimpz.local.kind\"}}",
+            RUNTIME_STATE_RESET_CONTAINER,
+        ]) {
+            if kind.trim_end() != RUNTIME_STATE_RESET_KIND {
+                return Err(format!(
+                    "another container is named {RUNTIME_STATE_RESET_CONTAINER}; it was kept"
+                ));
+            }
+            let removed = self.run_quiet_status(
+                "Docker runtime state reset cleanup",
+                ["rm", "--force", RUNTIME_STATE_RESET_CONTAINER],
+            )?;
+            if !removed.success() {
+                return Err("an earlier runtime state reset could not be removed".into());
+            }
+        }
+        let arguments = clear_volumes_arguments(
+            self.platform,
+            &self.cpuset,
+            image,
+            RUNTIME_STATE_RESET_CONTAINER,
+            volumes,
+        );
+        let status = self.run_quiet_status("Docker runtime state reset", arguments)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("the Local runtime state could not be recreated".into())
+        }
+    }
+
+    /// Whether this daemon's store holds exactly `reference` as a repository digest for this Space's platform.
+    fn present(&self, reference: &str, repository: &str) -> bool {
+        self.run_output([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RepoDigests}}|{{.Os}}/{{.Architecture}}",
+            reference,
+        ])
+        .is_ok_and(|document| image_present(&document, reference, repository, self.platform))
     }
 
     #[cfg(unix)]
@@ -731,6 +831,70 @@ fn socket_probe_arguments(
     arguments
 }
 
+fn clear_volumes_arguments(
+    platform: &str,
+    cpuset: &str,
+    image: &str,
+    container: &str,
+    volumes: &[&str],
+) -> Vec<OsString> {
+    let mut arguments: Vec<OsString> = [
+        "run",
+        "--rm",
+        "--name",
+        container,
+        "--label",
+        "com.shimpz.local.managed=1",
+        "--label",
+        "com.shimpz.local.kind=runtime-state-reset",
+        "--platform",
+        platform,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--user",
+        "0:0",
+        "--cpuset-cpus",
+        cpuset,
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--pids-limit",
+        "32",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    for volume in volumes {
+        arguments.push("--mount".into());
+        arguments.push(
+            format!("type=volume,src={SPACE_PROJECT}_{volume},dst=/state/{volume},volume-nocopy")
+                .into(),
+        );
+    }
+    // Depth 1 holds the volume roots themselves, which stay; everything below them is removed, and the deletions
+    // reach the disk where they ran, inside Docker's own machine, before the new epoch is recorded.
+    for value in [
+        "--entrypoint",
+        "/bin/sh",
+        image,
+        "-c",
+        "find /state -mindepth 2 -delete && sync",
+    ] {
+        arguments.push(value.into());
+    }
+    arguments
+}
+
 fn admin_authentication_probe_arguments(
     platform: &str,
     cpuset: &str,
@@ -1137,12 +1301,7 @@ fn one_line(value: &str, label: &str) -> Result<String, String> {
 }
 
 /// The inspected image holds exactly `reference` among its repository digests and runs on `platform`.
-fn developer_image_present(
-    document: &str,
-    reference: &str,
-    repository: &str,
-    platform: &str,
-) -> bool {
+fn image_present(document: &str, reference: &str, repository: &str, platform: &str) -> bool {
     let Some((digests, image_platform)) = document.trim_end().rsplit_once('|') else {
         return false;
     };
@@ -1439,6 +1598,63 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_reset_only_deletes_below_the_named_volume_roots_offline() {
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+        let arguments = clear_volumes_arguments(
+            "linux/amd64",
+            "0-3",
+            &image,
+            "shimpz-runtime-state-reset-1",
+            &["controller_routine_state", "brain_runtime_state"],
+        );
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect();
+        let tail = [
+            image.as_str(),
+            "-c",
+            "find /state -mindepth 2 -delete && sync",
+        ];
+        assert_eq!(&arguments[arguments.len() - tail.len()..], tail);
+        for pair in [
+            ["--network", "none"],
+            ["--pull", "never"],
+            ["--cap-drop", "ALL"],
+            ["--cap-add", "DAC_OVERRIDE"],
+            ["--entrypoint", "/bin/sh"],
+            [
+                "--mount",
+                "type=volume,src=shimpz-space_controller_routine_state,dst=/state/controller_routine_state,volume-nocopy",
+            ],
+            [
+                "--mount",
+                "type=volume,src=shimpz-space_brain_runtime_state,dst=/state/brain_runtime_state,volume-nocopy",
+            ],
+        ] {
+            assert!(
+                arguments.windows(2).any(|window| window == pair),
+                "{pair:?}"
+            );
+        }
+        assert!(arguments.contains(&"--read-only") && arguments.contains(&"--rm"));
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| **argument == "--cap-add")
+                .count(),
+            1
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| **argument == "--mount")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn admin_authentication_probe_is_read_only_offline_and_resource_bounded() {
         let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
         let mount = "type=volume,src=shimpz-space_data,dst=/data,volume-nocopy,readonly";
@@ -1571,7 +1787,7 @@ mod tests {
             "[\"{reference}\",\"localhost/shimpz-admin@sha256:{}\"]|linux/amd64\n",
             "c".repeat(64)
         );
-        assert!(developer_image_present(
+        assert!(image_present(
             &present,
             &reference,
             "localhost/shimpz-admin",
@@ -1588,14 +1804,14 @@ mod tests {
             ),
             (&format!("[\"{reference}\"]") as &str, "linux/amd64"),
         ] {
-            assert!(!developer_image_present(
+            assert!(!image_present(
                 document,
                 &reference,
                 "localhost/shimpz-admin",
                 platform
             ));
         }
-        assert!(!developer_image_present(
+        assert!(!image_present(
             &format!("[\"{reference}\"]|linux/amd64"),
             &reference,
             "localhost/shimpz-brain",

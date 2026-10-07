@@ -222,39 +222,48 @@ pub(crate) fn status_record(paths: &Paths, release_ref: &str, ordinal: u64) -> S
 
 /// Scheduled gate before any Docker work. Returns a message when the run may end here, or `None` when the full
 /// reconciliation path must run. Registry backoff postpones the full path too, because that path resolves the
-/// release through the same registry.
+/// release through the same registry. An installed developer release never follows `stable`: only its periodic
+/// repair, without any registry request, reaches the full path.
 pub(crate) fn scheduled_gate(
     paths: &Paths,
     installed: &Installed,
     now: u64,
     probe: impl FnOnce() -> Probe,
 ) -> Result<Option<&'static str>, String> {
-    // An installed developer release follows its published baseline: only a different `stable` is news.
-    let Some(installed_digest) = release_digest(installed.published_ref()) else {
-        return Ok(None);
-    };
     let mut state = read_state(paths, now);
-    if now < state.probe_retry_at {
-        return Ok(Some(RETRY));
-    }
-    let digest = match probe() {
-        Probe::Digest(digest) => digest,
-        Probe::Throttled { retry_after } => {
-            state.probe_retry_at =
-                now.saturating_add(backoff_seconds(state.probe_failures, retry_after));
-            state.probe_failures = state.probe_failures.saturating_add(1);
-            write_state(paths, &state)?;
+    let (digest, installed_digest) = if installed.developer() {
+        let Some(digest) = developer_digest(&installed.release_ref) else {
+            return Ok(None);
+        };
+        (digest.to_owned(), digest)
+    } else {
+        let Some(installed_digest) = release_digest(&installed.release_ref) else {
+            return Ok(None);
+        };
+        if now < state.probe_retry_at {
             return Ok(Some(RETRY));
         }
-        Probe::Unavailable => {
-            state.probe_retry_at = now.saturating_add(backoff_seconds(state.probe_failures, None));
-            state.probe_failures = state.probe_failures.saturating_add(1);
-            write_state(paths, &state)?;
-            return Ok(Some(RETRY));
-        }
+        let digest = match probe() {
+            Probe::Digest(digest) => digest,
+            Probe::Throttled { retry_after } => {
+                state.probe_retry_at =
+                    now.saturating_add(backoff_seconds(state.probe_failures, retry_after));
+                state.probe_failures = state.probe_failures.saturating_add(1);
+                write_state(paths, &state)?;
+                return Ok(Some(RETRY));
+            }
+            Probe::Unavailable => {
+                state.probe_retry_at =
+                    now.saturating_add(backoff_seconds(state.probe_failures, None));
+                state.probe_failures = state.probe_failures.saturating_add(1);
+                write_state(paths, &state)?;
+                return Ok(Some(RETRY));
+            }
+        };
+        state.probe_failures = 0;
+        state.probe_retry_at = 0;
+        (digest, installed_digest)
     };
-    state.probe_failures = 0;
-    state.probe_retry_at = 0;
     let repaired = last_repair(paths, installed, now);
     if repaired.is_some_and(|at| at >= state.attempted_at) {
         state.attempts = 0;
@@ -277,6 +286,13 @@ pub(crate) fn scheduled_gate(
     };
     write_state(paths, &state)?;
     Ok(message)
+}
+
+fn developer_digest(release_ref: &str) -> Option<&str> {
+    release_ref
+        .strip_prefix(super::release::DEVELOPER_RELEASE_REPOSITORY)
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|value| digest::is_sha256(value))
 }
 
 /// Decide, before a scheduled update replaces the running graph, whether active Team work defers it. Busy work
@@ -467,7 +483,6 @@ mod tests {
             admin_image: "admin".into(),
             ordinal: 7,
             port: 7777,
-            baseline: None,
         }
     }
 
@@ -497,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_developer_release_follows_its_baseline_and_needs_its_own_repair_evidence() {
+    fn an_installed_developer_release_never_probes_stable_and_repairs_with_backoff() {
         let (_home, paths) = gate_paths();
         let developer = Installed {
             release_ref: format!(
@@ -505,32 +520,26 @@ mod tests {
                 super::super::release::DEVELOPER_RELEASE_REPOSITORY,
                 "d".repeat(64)
             ),
-            baseline: Some(format!("{RELEASE_REPOSITORY}@{INSTALLED}")),
             ..installed()
         };
-        let developer_gate =
-            |now, probe| scheduled_gate(&paths, &developer, now, || probe).unwrap();
-        // Evidence for the baseline is not evidence for the developer release: the repair is due.
+        let developer_gate = |now| {
+            scheduled_gate(&paths, &developer, now, || {
+                panic!("a developer release must not probe the registry")
+            })
+            .unwrap()
+        };
+        // Evidence for another release is not evidence for the developer release: the repair is due.
         record_repair(&paths, 1_000);
-        assert_eq!(developer_gate(1_060, digest(INSTALLED)), None);
+        assert_eq!(developer_gate(1_060), None);
+        // A failed repair backs off instead of retrying every run.
+        assert_eq!(developer_gate(1_090), Some(RETRY));
         state::write_private(
             &paths.status,
             &status(&developer.release_ref, developer.ordinal, 1_100, "current"),
         )
         .unwrap();
-        // `stable` still names the baseline: nothing is news until the repair is due.
-        assert_eq!(developer_gate(1_160, digest(INSTALLED)), Some(CURRENT));
-        assert_eq!(
-            developer_gate(1_100 + FULL_REPAIR_SECONDS, digest(INSTALLED)),
-            None
-        );
-        // A newer publication reconciles at once.
-        state::write_private(
-            &paths.status,
-            &status(&developer.release_ref, developer.ordinal, 5_000, "current"),
-        )
-        .unwrap();
-        assert_eq!(developer_gate(5_060, digest(NEWER)), None);
+        assert_eq!(developer_gate(1_160), Some(CURRENT));
+        assert_eq!(developer_gate(1_100 + FULL_REPAIR_SECONDS), None);
     }
 
     #[test]

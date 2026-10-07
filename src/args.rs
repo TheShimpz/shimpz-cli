@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::help::Topic;
-use crate::space::release::{valid_developer_release_ref, valid_published_release_ref};
+use crate::space::release::{valid_published_release_ref, valid_release_ref};
 use crate::{digest, team_id};
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
@@ -220,19 +220,11 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
             return Ok(Invocation::Help(Topic::Start));
         }
         [option] if option == "--scheduled" => (true, None, false),
-        // The owner's explicit apply of one developer release from this host's image store (ADR-0099).
-        [option, release]
-            if option == "--local-release" && valid_developer_release_ref(release) =>
-        {
-            (false, Some(release.clone()), false)
-        }
-        [option, _] if option == "--local-release" => {
-            return Err("the developer release reference is invalid".into());
-        }
+        // The release-bound CLI's handoff start of one exact published or developer release set.
         [release_option, release, candidate_option]
             if release_option == "--release"
                 && candidate_option == "--candidate"
-                && valid_published_release_ref(release) =>
+                && valid_release_ref(release) =>
         {
             (false, Some(release.clone()), true)
         }
@@ -240,7 +232,7 @@ fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
             if scheduled_option == "--scheduled"
                 && release_option == "--release"
                 && candidate_option == "--candidate"
-                && valid_published_release_ref(release) =>
+                && valid_release_ref(release) =>
         {
             (true, Some(release.clone()), true)
         }
@@ -1104,24 +1096,26 @@ mod tests {
             Err("install accepts no public options".into())
         );
         let developer = format!("localhost/shimpz-local-release@sha256:{}", "b".repeat(64));
+        // A developer release reaches start only through the release-bound CLI's handoff.
         assert_eq!(
-            parse(strings(&["start", "--local-release", &developer])),
+            parse(strings(&[
+                "start",
+                "--scheduled",
+                "--release",
+                &developer,
+                "--candidate"
+            ])),
             Ok(Invocation::Execute(Command::Start(SpaceStart {
-                scheduled: false,
+                scheduled: true,
                 release: Some(developer.clone()),
-                candidate: false,
+                candidate: true,
             })))
         );
-        let published = format!(
-            "ghcr.io/theshimpz/shimpz-local-release@sha256:{}",
-            "a".repeat(64)
-        );
         for invalid in [
-            &["start", "--local-release", &published][..],
-            &["start", "--release", &developer, "--candidate"][..],
+            &["start", "--local-release", &developer][..],
+            &["start", "--release", &developer][..],
             &["install", "--release", &developer][..],
-            &["start", "--local-release", &developer, "--candidate"][..],
-            &["start", "--scheduled", "--local-release", &developer][..],
+            &["install", "--release", &developer, "--candidate"][..],
             &["start", "--local-release"][..],
         ] {
             assert!(parse(strings(invalid)).is_err(), "accepted: {invalid:?}");

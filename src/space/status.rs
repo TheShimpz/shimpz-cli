@@ -386,10 +386,10 @@ fn init_problem(observation: Observation) -> Option<String> {
     })
 }
 
-/// A developer release names itself, so it is never mistaken for the published release it was built on.
+/// A developer release names itself, so it is never mistaken for a published release.
 fn release_label(installed: &Installed) -> String {
-    if installed.baseline.is_some() {
-        format!("developer build on ordinal {}", installed.ordinal)
+    if installed.developer() {
+        format!("developer build {}", installed.ordinal)
     } else {
         format!("ordinal {}", installed.ordinal)
     }
@@ -416,7 +416,6 @@ mod tests {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "b".repeat(64)),
             ordinal: 42,
             port: 7777,
-            baseline: None,
         }
     }
 
@@ -424,10 +423,14 @@ mod tests {
     fn a_developer_release_is_labeled_as_such() {
         assert_eq!(release_label(&installed()), "ordinal 42");
         let developer = Installed {
-            baseline: Some(installed().release_ref),
+            release_ref: format!(
+                "{}@sha256:{}",
+                crate::space::release::DEVELOPER_RELEASE_REPOSITORY,
+                "d".repeat(64)
+            ),
             ..installed()
         };
-        assert_eq!(release_label(&developer), "developer build on ordinal 42");
+        assert_eq!(release_label(&developer), "developer build 42");
     }
 
     fn healthy_observations() -> Vec<Observation> {

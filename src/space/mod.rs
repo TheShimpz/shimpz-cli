@@ -1,6 +1,8 @@
 //! Complete Local Space lifecycle.
 
 pub(crate) mod command;
+#[cfg(unix)]
+pub(crate) mod deploy;
 pub(crate) mod docker;
 pub(crate) mod graph;
 pub(crate) mod host;

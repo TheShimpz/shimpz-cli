@@ -469,6 +469,11 @@ services:
     memswap_limit: 1g
     pids_limit: 128
     stop_grace_period: 15s
+    # The image keeps its check, interval, timeout, start period, and retries; only checks during the start period
+    # run every second instead of Docker's 5-second default, so a recreated Brain is admitted as soon as it serves.
+    healthcheck:
+      start_period: 5s
+      start_interval: 1s
     depends_on:
       team:
         condition: service_healthy
