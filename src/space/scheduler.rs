@@ -1,5 +1,6 @@
 //! Exact user scheduler for automatic Local release reconciliation.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
@@ -15,6 +16,7 @@ use super::paths::Paths;
 const MARKER: &str = "shimpz-local-update-v2";
 const MAX_SCHEDULER_BYTES: u64 = 16 * 1024;
 const SYSTEMD_TIMER: &str = "shimpz-update.timer";
+const SYSTEMD_SERVICE: &str = "shimpz-update.service";
 const LAUNCHD_LABEL: &str = "com.shimpz.update";
 /// `launchctl print` exit status when the domain has no service with the requested label.
 const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
@@ -96,17 +98,80 @@ where
     })? {
         return Ok(InstallOutcome::Preserved(preserved));
     }
-    if inspect_entries(profile, paths)?
+    let entries = inspect_entries(profile, paths)?;
+    if entries
         .iter()
         .any(|entry| entry.state == EntryState::Foreign)
     {
         return Err("a scheduler entry changed while it was being reconciled".into());
     }
+    let current = entries
+        .iter()
+        .all(|entry| entry.state == EntryState::Current);
     match profile {
+        // Unchanged unit files that systemd already runs need no reload and no re-enable.
+        HostProfile::Linux | HostProfile::Wsl
+            if current && systemd_schedule_is_running(run_probe) =>
+        {
+            Ok(())
+        }
         HostProfile::Linux | HostProfile::Wsl => install_systemd(paths),
         HostProfile::MacOs => install_launch_agent(paths),
     }?;
     Ok(InstallOutcome::Enabled)
+}
+
+/// Whether systemd holds exactly the unit files on disk and runs the enabled timer. Any probe failure or unexpected
+/// answer is `false`, so the caller reloads and enables as before.
+fn systemd_schedule_is_running<R>(mut run: R) -> bool
+where
+    R: FnMut(Tool, &[&str]) -> Result<Probe, String>,
+{
+    let Ok(show) = run(
+        Tool::Systemctl,
+        &[
+            "--user",
+            "show",
+            SYSTEMD_TIMER,
+            SYSTEMD_SERVICE,
+            "--property=Id,LoadState,ActiveState,UnitFileState,NeedDaemonReload",
+        ],
+    ) else {
+        return false;
+    };
+    show.succeeded() && systemd_schedule_is_loaded(&show.stdout)
+}
+
+fn systemd_schedule_is_loaded(show: &str) -> bool {
+    let mut units = BTreeMap::new();
+    for block in show.split("\n\n").filter(|block| !block.trim().is_empty()) {
+        let mut properties = BTreeMap::new();
+        for line in block.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                return false;
+            };
+            if properties.insert(key, value).is_some() {
+                return false;
+            }
+        }
+        let Some(id) = properties.get("Id").copied() else {
+            return false;
+        };
+        if units.insert(id, properties).is_some() {
+            return false;
+        }
+    }
+    let (Some(timer), Some(service)) = (units.get(SYSTEMD_TIMER), units.get(SYSTEMD_SERVICE))
+    else {
+        return false;
+    };
+    units.len() == 2
+        && timer.get("LoadState") == Some(&"loaded")
+        && timer.get("ActiveState") == Some(&"active")
+        && timer.get("UnitFileState") == Some(&"enabled")
+        && timer.get("NeedDaemonReload") == Some(&"no")
+        && service.get("LoadState") == Some(&"loaded")
+        && service.get("NeedDaemonReload") == Some(&"no")
 }
 
 fn resolve_foreign_entries<F>(
@@ -692,6 +757,80 @@ mod tests {
     fn write_private_file(path: &Path, value: &str) {
         fs::write(path, value).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    const RUNNING_SCHEDULE: &str = "Id=shimpz-update.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\nNeedDaemonReload=no\n\nId=shimpz-update.service\nLoadState=loaded\nActiveState=inactive\nUnitFileState=static\nNeedDaemonReload=no\n";
+
+    #[test]
+    fn only_a_loaded_enabled_active_schedule_skips_the_systemd_reload() {
+        assert!(systemd_schedule_is_loaded(RUNNING_SCHEDULE));
+        for (from, to) in [
+            ("ActiveState=active", "ActiveState=inactive"),
+            ("UnitFileState=enabled", "UnitFileState=disabled"),
+            (
+                "LoadState=loaded\nActiveState=active",
+                "LoadState=not-found\nActiveState=active",
+            ),
+            (
+                "static\nNeedDaemonReload=no",
+                "static\nNeedDaemonReload=yes",
+            ),
+            (
+                "enabled\nNeedDaemonReload=no",
+                "enabled\nNeedDaemonReload=yes",
+            ),
+            (
+                "ActiveState=inactive\n",
+                "ActiveState=inactive\nActiveState=active\n",
+            ),
+            ("Id=shimpz-update.service", "Id=other.service"),
+            ("\n\nId=shimpz-update.service", "\n\nId=shimpz-update.timer"),
+            (
+                "NeedDaemonReload=no\n\n",
+                "NeedDaemonReload=no\nunparsed\n\n",
+            ),
+        ] {
+            let changed = RUNNING_SCHEDULE.replacen(from, to, 1);
+            assert_ne!(changed, RUNNING_SCHEDULE, "{from}");
+            assert!(!systemd_schedule_is_loaded(&changed), "{to}");
+        }
+        assert!(!systemd_schedule_is_loaded(""));
+    }
+
+    #[test]
+    fn the_running_schedule_probe_fails_toward_a_reload() {
+        let answer = |code, stdout: &str| {
+            let stdout = stdout.to_owned();
+            move |tool: Tool, arguments: &[&str]| {
+                assert_eq!(tool, Tool::Systemctl);
+                assert_eq!(
+                    arguments,
+                    [
+                        "--user",
+                        "show",
+                        SYSTEMD_TIMER,
+                        SYSTEMD_SERVICE,
+                        "--property=Id,LoadState,ActiveState,UnitFileState,NeedDaemonReload",
+                    ]
+                );
+                Ok(Probe {
+                    code,
+                    stdout: stdout.clone(),
+                })
+            }
+        };
+        assert!(systemd_schedule_is_running(answer(
+            Some(0),
+            RUNNING_SCHEDULE
+        )));
+        assert!(!systemd_schedule_is_running(answer(
+            Some(1),
+            RUNNING_SCHEDULE
+        )));
+        assert!(!systemd_schedule_is_running(answer(None, RUNNING_SCHEDULE)));
+        assert!(!systemd_schedule_is_running(|_, _| Err(
+            "no systemctl".into()
+        )));
     }
 
     #[test]
