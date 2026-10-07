@@ -584,6 +584,7 @@ impl Context {
         if self.recreated.get() {
             ready = format!("{ready}\n{}", recreation_notice(release));
         }
+        output::progress("Confirming the automatic update schedule...");
         scheduler_outcome(
             ready,
             scheduler::install(self.profile, &self.paths, scheduled),
@@ -677,23 +678,10 @@ impl Context {
             .map_err(Some)?;
         state::clear_stopped(&self.paths).map_err(Some)?;
         output::progress("Starting the Shimpz Space...");
-        let started = self
-            .engine
-            .compose(
-                &self.paths,
-                [
-                    "up",
-                    "-d",
-                    "--wait",
-                    "--wait-timeout",
-                    "120",
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    "--remove-orphans",
-                ],
-            )
-            .map_err(Some)?;
+        let (started, timings) = self.engine.compose_up(&self.paths).map_err(Some)?;
+        for timing in &timings {
+            output::progress(timing);
+        }
         if !started.success() {
             return Err(None);
         }
@@ -718,6 +706,7 @@ impl Context {
         if authentication_error.is_some() {
             return Err(authentication_error);
         }
+        output::progress("Recording the Local release status...");
         let status = state::status_document(release, release_outcome(release, candidate.installed))
             .map_err(Some)?;
         self.engine

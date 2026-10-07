@@ -2,7 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,17 @@ const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
 const SPACE_PROJECT: &str = "shimpz-space";
+const COMPOSE_UP: [&str; 9] = [
+    "up",
+    "-d",
+    "--wait",
+    "--wait-timeout",
+    "120",
+    "--no-build",
+    "--pull",
+    "never",
+    "--remove-orphans",
+];
 const RUNTIME_STATE_RESET_CONTAINER: &str = "shimpz-runtime-state-reset";
 const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
 
@@ -506,6 +517,47 @@ impl Engine {
         Err("the Team controller cannot access the local Docker socket".into())
     }
 
+    /// Bring the Space up and wait for its health checks, recording when each container reached each state, so an
+    /// apply reports how long every recreated container took to start and become healthy. Compose's output is read
+    /// in bounded lines: only parsed container states and a bounded diagnostic prefix are kept.
+    pub(crate) fn compose_up(&self, paths: &Paths) -> Result<(ExitStatus, Vec<String>), String> {
+        let started = Instant::now();
+        let mut child = Command::new(&self.docker)
+            .arg("compose")
+            .arg("--progress")
+            .arg("plain")
+            .arg("--project-directory")
+            .arg(&paths.home)
+            .arg("--env-file")
+            .arg(&paths.environment)
+            .arg("--file")
+            .arg(&paths.compose)
+            .args(COMPOSE_UP)
+            // Progress must reach the stream read below, whatever the caller's environment selects.
+            .env("COMPOSE_STATUS_STDOUT", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
+        let read = read_compose_progress(stderr, started);
+        let status = child
+            .wait()
+            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        let (timings, diagnostic) = read?;
+        if !status.success() {
+            crate::output::warning(&format!(
+                "Docker Compose failed; Docker returned {status}: {}",
+                render_diagnostic(&diagnostic)
+            ));
+        }
+        Ok((status, timings.summary()))
+    }
+
     pub(crate) fn compose<I, S>(&self, paths: &Paths, arguments: I) -> Result<ExitStatus, String>
     where
         I: IntoIterator<Item = S>,
@@ -829,6 +881,108 @@ fn socket_probe_arguments(
         .map(OsString::from),
     );
     arguments
+}
+
+/// The longest Compose progress line kept; anything beyond it on the same line is dropped.
+const MAX_COMPOSE_LINE_BYTES: usize = 512;
+/// The most containers whose progress is tracked.
+const MAX_COMPOSE_CONTAINERS: usize = 64;
+
+/// When each container Compose reported was first started and first healthy, from its plain progress events, which
+/// read ` Container <name> <state>`.
+#[derive(Default)]
+struct ContainerTimings {
+    containers: Vec<(String, Option<Duration>, Option<Duration>)>,
+}
+
+impl ContainerTimings {
+    fn observe(&mut self, elapsed: Duration, line: &str) {
+        let mut words = line.split_whitespace();
+        let (Some("Container"), Some(name), Some(state), None) =
+            (words.next(), words.next(), words.next(), words.next())
+        else {
+            return;
+        };
+        let index = match self
+            .containers
+            .iter()
+            .position(|(known, _, _)| known == name)
+        {
+            Some(index) => index,
+            None if self.containers.len() < MAX_COMPOSE_CONTAINERS => {
+                self.containers.push((name.to_owned(), None, None));
+                self.containers.len() - 1
+            }
+            None => return,
+        };
+        let entry = &mut self.containers[index];
+        match state {
+            "Started" if entry.1.is_none() => entry.1 = Some(elapsed),
+            "Healthy" if entry.2.is_none() => entry.2 = Some(elapsed),
+            _ => {}
+        }
+    }
+
+    /// One line per started container: when it started and when it was first healthy, in seconds since `up` began.
+    fn summary(&self) -> Vec<String> {
+        self.containers
+            .iter()
+            .filter_map(|(name, started, healthy)| {
+                let started = (*started)?;
+                Some(match healthy {
+                    Some(healthy) => format!(
+                        "{name} started at {:.1}s and was healthy at {:.1}s",
+                        started.as_secs_f64(),
+                        healthy.as_secs_f64()
+                    ),
+                    None => format!("{name} started at {:.1}s", started.as_secs_f64()),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Read Compose's progress stream to its end in bounded lines, timing every container event and keeping a bounded
+/// diagnostic prefix, marked truncated when anything was dropped.
+fn read_compose_progress(
+    reader: impl Read,
+    started: Instant,
+) -> Result<(ContainerTimings, capture::Drained), String> {
+    let mut reader = std::io::BufReader::new(reader);
+    let mut timings = ContainerTimings::default();
+    let mut diagnostic = capture::Drained {
+        bytes: Vec::new(),
+        truncated: false,
+    };
+    let mut line = Vec::with_capacity(MAX_COMPOSE_LINE_BYTES);
+    loop {
+        let available = reader
+            .fill_buf()
+            .map_err(|_| "Docker Compose progress could not be read".to_owned())?;
+        if available.is_empty() {
+            break;
+        }
+        let consumed = available.len();
+        for &byte in available {
+            let room = MAX_DOCKER_DIAGNOSTIC_BYTES - TRUNCATED_DIAGNOSTIC.len();
+            if diagnostic.bytes.len() < room {
+                diagnostic.bytes.push(byte);
+            } else {
+                diagnostic.truncated = true;
+            }
+            if byte == b'\n' {
+                timings.observe(started.elapsed(), &String::from_utf8_lossy(&line));
+                line.clear();
+            } else if line.len() < MAX_COMPOSE_LINE_BYTES {
+                line.push(byte);
+            }
+        }
+        reader.consume(consumed);
+    }
+    if !line.is_empty() {
+        timings.observe(started.elapsed(), &String::from_utf8_lossy(&line));
+    }
+    Ok((timings, diagnostic))
 }
 
 fn clear_volumes_arguments(
@@ -1595,6 +1749,66 @@ mod tests {
                 .windows(2)
                 .any(|pair| { pair[0] == "--entrypoint" && pair[1] == "/opt/venv/bin/python" })
         );
+    }
+
+    #[test]
+    fn compose_progress_reports_when_each_started_container_became_healthy() {
+        let mut timings = ContainerTimings::default();
+        let at = |seconds: f64| Duration::from_secs_f64(seconds);
+        for (seconds, line) in [
+            (0.1, " Container shimpz-brain Recreate "),
+            (1.2, " Container shimpz-brain Recreated "),
+            (1.3, " Container shimpz-team Running "),
+            (1.4, " Container shimpz-brain Starting "),
+            (1.9, " Container shimpz-brain Started "),
+            (2.0, " Container shimpz-brain Waiting "),
+            (4.5, " Container shimpz-brain Healthy "),
+            (4.6, " Container shimpz-admin Started "),
+            (5.0, " Container shimpz-brain Healthy "),
+            (5.1, "container shimpz-admin is unhealthy"),
+            (5.2, " Container a b c d"),
+        ] {
+            timings.observe(at(seconds), line);
+        }
+        assert_eq!(
+            timings.summary(),
+            [
+                "shimpz-brain started at 1.9s and was healthy at 4.5s",
+                "shimpz-admin started at 4.6s",
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_progress_is_read_in_bounded_lines_and_a_bounded_diagnostic() {
+        let started = Instant::now();
+        // One newline-free line far beyond every bound, then an ordinary event.
+        let mut output = vec![b'x'; 3 * MAX_DOCKER_DIAGNOSTIC_BYTES];
+        output.extend_from_slice(b"\n Container shimpz-brain Started \n");
+        let (timings, diagnostic) = read_compose_progress(output.as_slice(), started).unwrap();
+        assert_eq!(timings.summary().len(), 1);
+        assert!(diagnostic.truncated);
+        assert_eq!(
+            diagnostic.bytes.len(),
+            MAX_DOCKER_DIAGNOSTIC_BYTES - TRUNCATED_DIAGNOSTIC.len()
+        );
+        assert!(render_diagnostic(&diagnostic).ends_with(TRUNCATED_DIAGNOSTIC));
+        // A short failure keeps its whole explanation, and a final line without a newline still counts.
+        let (timings, diagnostic) = read_compose_progress(
+            b"Error: service brain failed\n Container shimpz-brain Started".as_slice(),
+            started,
+        )
+        .unwrap();
+        assert_eq!(timings.summary().len(), 1);
+        assert!(!diagnostic.truncated);
+        assert!(render_diagnostic(&diagnostic).starts_with("Error: service brain failed"));
+        // Container tracking is bounded too.
+        let mut many = Vec::new();
+        for index in 0..(MAX_COMPOSE_CONTAINERS + 10) {
+            many.extend_from_slice(format!(" Container c{index} Started\n").as_bytes());
+        }
+        let (timings, _) = read_compose_progress(many.as_slice(), started).unwrap();
+        assert_eq!(timings.summary().len(), MAX_COMPOSE_CONTAINERS);
     }
 
     #[test]
