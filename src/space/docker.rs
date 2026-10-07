@@ -31,6 +31,10 @@ const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
+/// The CPU quota of every one-shot helper container, inside the Space cpuset. One CPU bounds a helper as firmly as
+/// a fraction would, while a quarter-CPU quota stretched each helper's Python start several-fold (the Admin
+/// authentication probe from about 2 s to 7 s).
+const HELPER_CPUS: &str = "1";
 const SPACE_PROJECT: &str = "shimpz-space";
 const COMPOSE_UP: [&str; 9] = [
     "up",
@@ -860,7 +864,7 @@ fn socket_probe_arguments(
             "--cpuset-cpus",
             cpuset,
             "--cpus",
-            "0.25",
+            HELPER_CPUS,
             "--memory",
             "64m",
             "--memory-swap",
@@ -1081,7 +1085,7 @@ fn admin_authentication_probe_arguments(
         "--cpuset-cpus",
         cpuset,
         "--cpus",
-        "0.25",
+        HELPER_CPUS,
         "--memory",
         "256m",
         "--memory-swap",
@@ -1130,7 +1134,7 @@ fn status_projection_arguments(
         "--cpuset-cpus",
         cpuset,
         "--cpus",
-        "0.25",
+        HELPER_CPUS,
         "--memory",
         "64m",
         "--memory-swap",
@@ -1190,7 +1194,7 @@ fn reset_capability_arguments(
             "--cpuset-cpus",
             cpuset,
             "--cpus",
-            "0.25",
+            HELPER_CPUS,
             "--memory",
             "64m",
             "--memory-swap",
@@ -1723,7 +1727,7 @@ mod tests {
             ("--cap-drop", "ALL"),
             ("--security-opt", "no-new-privileges:true"),
             ("--group-add", "0"),
-            ("--cpus", "0.25"),
+            ("--cpus", HELPER_CPUS),
             ("--memory", "64m"),
             ("--memory-swap", "64m"),
             ("--pids-limit", "32"),
