@@ -65,33 +65,22 @@ impl Engine {
     pub(crate) fn connect(profile: HostProfile, paths: &Paths) -> Result<Self, String> {
         let docker = Tool::Docker.resolve()?;
         validate_endpoint(&docker, profile, paths)?;
-        require_success(
+        let compose = output(&docker, ["compose", "version", "--short"]).map_err(|error| {
+            format!(
+                "Docker Compose v2 check failed; run docker compose version as the current user; {error}"
+            )
+        })?;
+        // `docker version` fails unless the daemon answers, so one call proves it reachable and reports its versions.
+        let daemon = output(
             &docker,
-            ["compose", "version"],
-            "Docker Compose v2 check failed; run docker compose version as the current user",
-        )?;
-        require_success(
-            &docker,
-            ["info"],
-            "Docker daemon check failed; start Docker and run docker info as the current user",
-        )?;
-        let server = output(&docker, ["version", "--format", "{{.Server.Version}}"])?;
-        let api = output(&docker, ["version", "--format", "{{.Server.APIVersion}}"])?;
-        let compose = output(&docker, ["compose", "version", "--short"])?;
-        if !version_at_least(server.trim(), (25, 0, 0)) || !version_at_least(api.trim(), (1, 44, 0))
-        {
-            return Err(format!(
-                "Docker Engine 25.0 or newer with API 1.44 is required (Engine {}, API {})",
-                server.trim(),
-                api.trim()
-            ));
-        }
-        if !version_at_least(compose.trim(), (2, 20, 2)) {
-            return Err(format!(
-                "Docker Compose 2.20.2 or newer is required (found {})",
-                compose.trim()
-            ));
-        }
+            ["version", "--format", "{{.Server.Version}}|{{.Server.APIVersion}}"],
+        )
+        .map_err(|error| {
+            format!(
+                "Docker daemon check failed; start Docker and run docker info as the current user; {error}"
+            )
+        })?;
+        require_engine_versions(&daemon, &compose)?;
         let processors = output(&docker, ["info", "--format", "{{.NCPU}}"])?
             .trim()
             .parse::<usize>()
@@ -1291,23 +1280,21 @@ fn validate_managed_endpoint(
     }
 }
 
-fn require_success<I, S>(program: &Path, arguments: I, message: &str) -> Result<(), String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let result = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-    if result.success() {
-        Ok(())
-    } else {
-        Err(format!("{message}; Docker returned {result}"))
+/// The daemon answered `<engine>|<api>` and Compose its short version; each must meet the supported floor.
+fn require_engine_versions(daemon: &str, compose: &str) -> Result<(), String> {
+    let (server, api) = daemon.trim().split_once('|').unwrap_or((daemon.trim(), ""));
+    if !version_at_least(server, (25, 0, 0)) || !version_at_least(api, (1, 44, 0)) {
+        return Err(format!(
+            "Docker Engine 25.0 or newer with API 1.44 is required (Engine {server}, API {api})"
+        ));
     }
+    if !version_at_least(compose.trim(), (2, 20, 2)) {
+        return Err(format!(
+            "Docker Compose 2.20.2 or newer is required (found {})",
+            compose.trim()
+        ));
+    }
+    Ok(())
 }
 
 fn quiet_status(command: &mut Command, operation: &str) -> Result<ExitStatus, String> {
@@ -1929,20 +1916,33 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_docker_check_names_the_command_evidence_without_classifying_it() {
-        let program = Path::new("/bin/sh");
-        let error = require_success(
-            program,
-            ["-c", "exit 7"],
-            "Docker daemon check failed; run docker info as the current user",
-        )
-        .unwrap_err();
-
+    fn engine_versions_meet_the_supported_floors() {
+        assert_eq!(require_engine_versions("29.8.2|1.52\n", "5.6.0\n"), Ok(()));
         assert_eq!(
-            error,
-            "Docker daemon check failed; run docker info as the current user; Docker returned exit status: 7"
+            require_engine_versions("24.0.9|1.43\n", "5.6.0\n"),
+            Err(
+                "Docker Engine 25.0 or newer with API 1.44 is required (Engine 24.0.9, API 1.43)"
+                    .into()
+            )
+        );
+        assert_eq!(
+            require_engine_versions("29.8.2|1.43\n", "5.6.0\n"),
+            Err(
+                "Docker Engine 25.0 or newer with API 1.44 is required (Engine 29.8.2, API 1.43)"
+                    .into()
+            )
+        );
+        assert_eq!(
+            require_engine_versions("29.8.2\n", "5.6.0\n"),
+            Err(
+                "Docker Engine 25.0 or newer with API 1.44 is required (Engine 29.8.2, API )"
+                    .into()
+            )
+        );
+        assert_eq!(
+            require_engine_versions("29.8.2|1.52\n", "2.20.1\n"),
+            Err("Docker Compose 2.20.2 or newer is required (found 2.20.1)".into())
         );
     }
 
