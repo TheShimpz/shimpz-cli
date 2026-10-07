@@ -11,12 +11,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::command::Tool;
+use super::graph;
 use super::host::HostProfile;
 use super::paths::Paths;
 #[cfg(unix)]
 use super::poll::{self, TeamActivity};
 use super::release::{
-    self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, Package, RELEASE_REPOSITORY, Release,
+    self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, EGRESS, Package, RELEASE_REPOSITORY, Release,
 };
 use crate::capture::{self, Drained};
 use crate::digest;
@@ -35,6 +36,10 @@ const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
 /// a fraction would, while a quarter-CPU quota stretched each helper's Python start several-fold (the Admin
 /// authentication probe from about 2 s to 7 s).
 const HELPER_CPUS: &str = "1";
+const ACCOUNT_EGRESS: &str = "shimpz-account-egress";
+const ACCOUNT_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
+/// State, exit code, Compose project, service and configuration hash, image, and the capability mount's source.
+const INIT_RECORD_FORMAT: &str = "{{.State.Status}}|{{.State.ExitCode}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{index .Config.Labels \"com.docker.compose.config-hash\"}}|{{.Config.Image}}|{{range .Mounts}}{{if eq .Destination \"/run/shimpz-account-egress\"}}{{.Type}}:{{.Name}}{{end}}{{end}}";
 const SPACE_PROJECT: &str = "shimpz-space";
 const COMPOSE_UP: [&str; 9] = [
     "up",
@@ -513,7 +518,16 @@ impl Engine {
     /// Bring the Space up and wait for its health checks, recording when each container reached each state, so an
     /// apply reports how long every recreated container took to start and become healthy. Compose's output is read
     /// in bounded lines: only parsed container states and a bounded diagnostic prefix are kept.
+    ///
+    /// A full `up` starts an exited one-shot service again and holds every dependent until it exits. When the Account
+    /// egress initializer already completed under exactly the candidate configuration, it is left alone: only the
+    /// long-running services are brought up, still in their dependency order among themselves.
     pub(crate) fn compose_up(&self, paths: &Paths) -> Result<(ExitStatus, Vec<String>), String> {
+        let selection: &[&str] = if self.completed_init_is_current(paths) {
+            &graph::LONG_RUNNING_SERVICES
+        } else {
+            &[]
+        };
         let started = Instant::now();
         let mut child = Command::new(&self.docker)
             .arg("compose")
@@ -526,6 +540,12 @@ impl Engine {
             .arg("--file")
             .arg(&paths.compose)
             .args(COMPOSE_UP)
+            .args(if selection.is_empty() {
+                &[][..]
+            } else {
+                &["--no-deps"][..]
+            })
+            .args(selection)
             // Progress must reach the stream read below, whatever the caller's environment selects.
             .env("COMPOSE_STATUS_STDOUT", "0")
             .stdin(Stdio::null())
@@ -549,6 +569,63 @@ impl Engine {
             ));
         }
         Ok((status, timings.summary()))
+    }
+
+    /// The initializer container exited 0 as this project's initializer, under the configuration hash Compose
+    /// derives for it from the candidate files, and the capability it produced still passes its producer's own reader
+    /// now, inside the running Account egress of the same image and capability volume. Any other state or any failed
+    /// observation runs the initializer again.
+    fn completed_init_is_current(&self, paths: &Paths) -> bool {
+        let Ok(records) = self.run_output([
+            "inspect",
+            "--type=container",
+            "--format",
+            INIT_RECORD_FORMAT,
+            graph::ACCOUNT_EGRESS_INIT,
+            ACCOUNT_EGRESS,
+        ]) else {
+            return false;
+        };
+        let Ok(configuration) = self.run_output([
+            OsStr::new("compose"),
+            OsStr::new("--project-directory"),
+            paths.home.as_os_str(),
+            OsStr::new("--env-file"),
+            paths.environment.as_os_str(),
+            OsStr::new("--file"),
+            paths.compose.as_os_str(),
+            OsStr::new("config"),
+            OsStr::new("--hash"),
+            OsStr::new(graph::ACCOUNT_EGRESS_INIT),
+        ]) else {
+            return false;
+        };
+        completed_init_matches(&records, &configuration) && self.account_capability_reads()
+    }
+
+    /// The Account egress capability reader accepts the current capability. It prints nothing, so the capability
+    /// never leaves the container.
+    fn account_capability_reads(&self) -> bool {
+        matches!(
+            execute_bounded_stdout(
+                Command::new(&self.docker)
+                    .args([
+                        "exec",
+                        ACCOUNT_EGRESS,
+                        "python3",
+                        "-c",
+                        "import sys; sys.path.insert(0, '/app/account'); import capability; capability.read_capability()",
+                    ])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null()),
+                ACCOUNT_CAPABILITY_TIMEOUT,
+            ),
+            Ok(BoundedOutput::Completed {
+                status,
+                bytes,
+                truncated: false,
+            }) if status.success() && bytes.is_empty()
+        )
     }
 
     pub(crate) fn compose<I, S>(&self, paths: &Paths, arguments: I) -> Result<ExitStatus, String>
@@ -813,6 +890,40 @@ fn controller_socket_path(profile: HostProfile) -> &'static Path {
         HostProfile::MacOs => Path::new("/var/run/docker.sock.raw"),
         HostProfile::Linux | HostProfile::Wsl => Path::new("/var/run/docker.sock"),
     }
+}
+
+/// `records` holds the inspected initializer, then the Account egress, in `INIT_RECORD_FORMAT`; `configuration` is
+/// `docker compose config --hash` for the initializer.
+fn completed_init_matches(records: &str, configuration: &str) -> bool {
+    let Some(hash) = configuration
+        .strip_suffix('\n')
+        .and_then(|line| line.strip_prefix(graph::ACCOUNT_EGRESS_INIT))
+        .and_then(|line| line.strip_prefix(' '))
+        .filter(|hash| digest::is_sha256_hex(hash))
+    else {
+        return false;
+    };
+    let mut lines = records.split_terminator('\n');
+    let (Some(init), Some(egress), None) = (lines.next(), lines.next(), lines.next()) else {
+        return false;
+    };
+    let capability = format!("volume:{SPACE_PROJECT}_account_egress_capability");
+    let Some(image) = init
+        .strip_prefix(&format!(
+            "exited|0|{SPACE_PROJECT}|{}|{hash}|",
+            graph::ACCOUNT_EGRESS_INIT
+        ))
+        .and_then(|rest| rest.strip_suffix(&format!("|{capability}")))
+        .filter(|image| EGRESS.admits(image))
+    else {
+        return false;
+    };
+    egress
+        .strip_prefix(&format!("running|0|{SPACE_PROJECT}|{ACCOUNT_EGRESS}|"))
+        .and_then(|rest| rest.split_once('|'))
+        .is_some_and(|(egress_hash, rest)| {
+            digest::is_sha256_hex(egress_hash) && rest == format!("{image}|{capability}")
+        })
 }
 
 #[cfg(unix)]
@@ -1694,6 +1805,125 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, "Docker returned an invalid Docker socket group");
+    }
+
+    fn init_records(hash: &str) -> String {
+        let image = format!("localhost/shimpz-egress@sha256:{DIGEST}");
+        let capability = "volume:shimpz-space_account_egress_capability";
+        format!(
+            "exited|0|shimpz-space|shimpz-account-egress-init|{hash}|{image}|{capability}\nrunning|0|shimpz-space|shimpz-account-egress|{}|{image}|{capability}\n",
+            "9".repeat(64)
+        )
+    }
+
+    #[test]
+    fn only_an_initializer_completed_under_the_candidate_configuration_is_left_alone() {
+        let hash = "c".repeat(64);
+        let configuration = format!("shimpz-account-egress-init {hash}\n");
+        let records = init_records(&hash);
+        assert!(completed_init_matches(&records, &configuration));
+        let other_image = format!("localhost/shimpz-egress@sha256:{}", "f".repeat(64));
+        let (init, egress) = records.split_once('\n').unwrap();
+        for changed in [
+            records.replacen("exited|", "running|", 1),
+            records.replacen("exited|", "created|", 1),
+            records.replacen("exited|0|", "exited|1|", 1),
+            records.replacen("shimpz-space|", "other|", 1),
+            records.replacen("|shimpz-account-egress-init|", "|shimpz-account-egress|", 1),
+            records.replacen(&hash, &"d".repeat(64), 1),
+            records.replacen(
+                "volume:shimpz-space_account_egress_capability",
+                "volume:other",
+                1,
+            ),
+            records.replacen("volume:shimpz-space_account_egress_capability", "bind:", 1),
+            format!("{init}\n{}", egress.replacen("running|", "restarting|", 1)),
+            format!(
+                "{init}\n{}",
+                egress.replacen("|shimpz-account-egress|", "|team|", 1)
+            ),
+            format!(
+                "{init}\n{}",
+                egress.replacen(
+                    &format!("localhost/shimpz-egress@sha256:{DIGEST}"),
+                    &other_image,
+                    1
+                )
+            ),
+            format!(
+                "{init}\n{}",
+                egress.replacen("volume:shimpz-space_account_egress_capability", "", 1)
+            ),
+            format!("{init}\n{}", egress.replacen(&"9".repeat(64), "", 1)),
+            records.replace(
+                &format!("localhost/shimpz-egress@sha256:{DIGEST}"),
+                "localhost/shimpz-admin:latest",
+            ),
+            format!("{init}\n"),
+            format!("{records}{egress}\n"),
+        ] {
+            assert!(
+                !completed_init_matches(&changed, &configuration),
+                "{changed}"
+            );
+        }
+        for changed in [
+            configuration.replace(&hash, &"C".repeat(64)),
+            configuration.replace(&hash, &"c".repeat(63)),
+            configuration.replace("shimpz-account-egress-init ", "shimpz-account-egress "),
+            configuration.trim_end().to_owned(),
+            format!("{configuration}{configuration}"),
+            String::new(),
+        ] {
+            assert!(!completed_init_matches(&records, &changed), "{changed}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_up_leaves_alone_only_a_current_initializer_whose_capability_still_reads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = Paths::under(temporary.path()).unwrap();
+        let calls = temporary.path().join("calls");
+        let hash = "e".repeat(64);
+        let services = " --no-deps team shimpz-assistant-egress shimpz-assistant-release shimpz-account-egress shimpz-brain-egress brain admin";
+        for (records, capability, selected) in [
+            (init_records(&hash), "exit 0", true),
+            (init_records(&hash), "exit 1", false),
+            (init_records(&hash), "printf leaked", false),
+            (
+                init_records(&hash).replacen("exited|0|", "exited|2|", 1),
+                "exit 0",
+                false,
+            ),
+        ] {
+            let command = temporary.path().join("docker");
+            let records = records.replace('\n', "\\n");
+            crate::fake_tool::write(
+                &command,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  inspect*) printf '{records}' ;;\n  *' config --hash '*) printf 'shimpz-account-egress-init {hash}\\n' ;;\n  exec*) {capability} ;;\nesac\n",
+                    calls.display()
+                ),
+            );
+            let _ = fs::remove_file(&calls);
+            let engine = Engine {
+                docker: command,
+                platform: "linux/amd64",
+                cpuset: "0".into(),
+            };
+
+            let (status, _) = engine.compose_up(&paths).unwrap();
+
+            assert!(status.success());
+            let invocations = fs::read_to_string(&calls).unwrap();
+            let up = invocations
+                .lines()
+                .find(|line| line.contains(" up -d "))
+                .unwrap();
+            assert_eq!(up.ends_with(services), selected, "{capability}: {up}");
+            assert_eq!(up.ends_with("--remove-orphans"), !selected, "{up}");
+        }
     }
 
     #[cfg(unix)]

@@ -4,6 +4,19 @@ const TEMPLATE: &str = include_str!("../../contracts/local-space/compose.yaml");
 const VOLUME_TOKEN: &str = "{{SHIMPZ_VOLUME_DEFINITIONS}}";
 const VOLUME_NOCOPY_TOKEN: &str = "{{SHIMPZ_VOLUME_NOCOPY}}";
 
+/// The one-shot service that creates or validates the Account egress capability, then exits.
+pub(crate) const ACCOUNT_EGRESS_INIT: &str = "shimpz-account-egress-init";
+/// Every long-running service of the graph, in the template's order.
+pub(crate) const LONG_RUNNING_SERVICES: [&str; 7] = [
+    "team",
+    "shimpz-assistant-egress",
+    "shimpz-assistant-release",
+    "shimpz-account-egress",
+    "shimpz-brain-egress",
+    "brain",
+    "admin",
+];
+
 pub(crate) const VOLUME_NAMES: [&str; 28] = [
     "config",
     "data",
@@ -113,6 +126,27 @@ mod tests {
         }
         assert_eq!(StorageProfile::LinuxLuks.name(), "linux-luks");
         assert_eq!(StorageProfile::ManagedDisk.name(), "managed-disk");
+    }
+
+    #[test]
+    fn the_graph_holds_exactly_the_init_and_the_long_running_services() {
+        let graph: Value = serde_yaml::from_str(&render(StorageProfile::LinuxLuks)).unwrap();
+        let services: BTreeSet<_> = graph["services"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|key| key.as_str().unwrap().to_owned())
+            .collect();
+        let expected: BTreeSet<_> = LONG_RUNNING_SERVICES
+            .iter()
+            .chain([&ACCOUNT_EGRESS_INIT])
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(services, expected);
+        assert_eq!(
+            graph["services"][ACCOUNT_EGRESS_INIT]["restart"].as_str(),
+            Some("no")
+        );
     }
 
     #[test]
