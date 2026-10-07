@@ -53,6 +53,11 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 name = "shimpz"
 path = "src/main.rs"
 
+# The lifecycle tests hash the running test binary, about 100 MB in a debug build, as the current CLI; unoptimized
+# SHA-256 takes seconds per hash, so the hash alone is optimized in development and test builds.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1
 lto = "fat"
