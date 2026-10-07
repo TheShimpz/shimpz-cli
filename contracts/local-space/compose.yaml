@@ -175,6 +175,11 @@ services:
     memswap_limit: 256m
     pids_limit: 128
     stop_grace_period: 15s
+    # The image keeps its check, interval, timeout, and retries; only checks during its start period run every 250 ms,
+    # so a recreated Team is admitted as soon as it serves.
+    healthcheck:
+      start_period: 30s
+      start_interval: 250ms
     logging:
       driver: none
     depends_on:
@@ -293,7 +298,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 30s
-      start_interval: 1s
+      start_interval: 250ms
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
     cpus: "0.5"
     mem_limit: 128m
@@ -368,7 +373,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 30s
-      start_interval: 1s
+      start_interval: 250ms
 
   shimpz-brain-egress:
     container_name: shimpz-brain-egress
@@ -422,7 +427,7 @@ services:
       timeout: 4s
       retries: 3
       start_period: 30s
-      start_interval: 1s
+      start_interval: 250ms
 
   brain:
     container_name: shimpz-brain
@@ -470,10 +475,10 @@ services:
     pids_limit: 128
     stop_grace_period: 15s
     # The image keeps its check, interval, timeout, start period, and retries; only checks during the start period
-    # run every second instead of Docker's 5-second default, so a recreated Brain is admitted as soon as it serves.
+    # run every 250 ms instead of Docker's 5-second default, so a recreated Brain is admitted as soon as it serves.
     healthcheck:
       start_period: 5s
-      start_interval: 1s
+      start_interval: 250ms
     depends_on:
       team:
         condition: service_healthy
@@ -551,7 +556,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 30s
-      start_interval: 1s
+      start_interval: 250ms
     cpus: "2.0"
     cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
     mem_limit: 512m
