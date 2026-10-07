@@ -86,7 +86,7 @@ fn apply_deploy_request(paths: &Paths, request: &deploy::Request) -> Result<Stri
         release: Some(request.release.clone()),
         candidate: false,
     };
-    finish_deploy_request(paths, request, || {
+    finish_deploy_request(paths, host::detect()?, request, || {
         Context::connect(Paths::discover()?, true)?.start(&options)
     })
 }
@@ -95,6 +95,7 @@ fn apply_deploy_request(paths: &Paths, request: &deploy::Request) -> Result<Stri
 /// with the requested release installed and its reconciliation recorded applied it; a deferral keeps the request.
 fn finish_deploy_request(
     paths: &Paths,
+    profile: HostProfile,
     request: &deploy::Request,
     start: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
@@ -105,7 +106,9 @@ fn finish_deploy_request(
     };
     let outcome = match &result {
         Ok(message) if message == UPDATE_DEFERRED => deploy::Outcome::Deferred,
-        Ok(message) if message != STORAGE_LOCKED && deploy_committed(paths, &request.release) => {
+        Ok(message)
+            if message != STORAGE_LOCKED && deploy_committed(paths, profile, &request.release) =>
+        {
             deploy::Outcome::Applied
         }
         Ok(_) | Err(_) => deploy::Outcome::Failed,
@@ -116,14 +119,12 @@ fn finish_deploy_request(
 }
 
 /// The installed release is exactly `release_ref` and its successful reconciliation is the recorded status.
-fn deploy_committed(paths: &Paths, release_ref: &str) -> bool {
-    host::detect()
-        .and_then(|profile| state::read_installed(paths, profile))
-        .is_ok_and(|installed| {
-            installed.release_ref == release_ref
-                && poll::status_record(paths, release_ref, installed.ordinal)
-                    == poll::StatusRecord::Reconciled
-        })
+fn deploy_committed(paths: &Paths, profile: HostProfile, release_ref: &str) -> bool {
+    state::read_installed(paths, profile).is_ok_and(|installed| {
+        installed.release_ref == release_ref
+            && poll::status_record(paths, release_ref, installed.ordinal)
+                == poll::StatusRecord::Reconciled
+    })
 }
 
 /// The cheap scheduled check before any Docker work: a stopped Space or an unchanged release ends the run.
@@ -3108,7 +3109,8 @@ mod tests {
     #[test]
     fn a_deploy_request_is_applied_only_by_an_attempt_that_commits_it() {
         let requested = developer(9, '1');
-        let profile = host::detect().unwrap();
+        // A developer release applies only to an amd64 Linux Space, whatever host runs this test.
+        let profile = HostProfile::Linux;
         // The release is installed and its reconciliation recorded: applied, and the request is consumed.
         let (_home, paths, request) = deploy_home(&requested);
         state::write_environment(
@@ -3130,9 +3132,24 @@ mod tests {
             &state::status_document(&requested, "updated").unwrap(),
         )
         .unwrap();
-        assert!(finish_deploy_request(&paths, &request, || Ok("ready".into())).is_ok());
+        assert!(finish_deploy_request(&paths, profile, &request, || Ok("ready".into())).is_ok());
         assert_eq!(deploy_outcome(&paths), "applied");
         assert!(!paths.deploy_request.exists());
+        // The same evidence never acknowledges a developer release on a macOS Space.
+        state::write_private(
+            &paths.deploy_request,
+            &format!(
+                "id=0123456789abcdef0123456789abcdef\nrelease={}\n",
+                requested.reference
+            ),
+        )
+        .unwrap();
+        let request = deploy::claim(&paths).unwrap().unwrap();
+        assert!(
+            finish_deploy_request(&paths, HostProfile::MacOs, &request, || Ok("ready".into()))
+                .is_ok()
+        );
+        assert_eq!(deploy_outcome(&paths), "failed");
         // The same evidence does not count when this attempt found storage locked.
         state::write_private(
             &paths.deploy_request,
@@ -3143,26 +3160,34 @@ mod tests {
         )
         .unwrap();
         let request = deploy::claim(&paths).unwrap().unwrap();
-        assert!(finish_deploy_request(&paths, &request, || Ok(STORAGE_LOCKED.into())).is_ok());
+        assert!(
+            finish_deploy_request(&paths, profile, &request, || Ok(STORAGE_LOCKED.into())).is_ok()
+        );
         assert_eq!(deploy_outcome(&paths), "failed");
         // Nothing installed, or a refusal, fails it; a deferral keeps the request for the next run.
         let (_home, paths, request) = deploy_home(&requested);
-        assert!(finish_deploy_request(&paths, &request, || Ok("ready".into())).is_ok());
+        assert!(finish_deploy_request(&paths, profile, &request, || Ok("ready".into())).is_ok());
         assert_eq!(deploy_outcome(&paths), "failed");
         let (_home, paths, request) = deploy_home(&requested);
-        assert!(finish_deploy_request(&paths, &request, || Err("refused".into())).is_err());
+        assert!(
+            finish_deploy_request(&paths, profile, &request, || Err("refused".into())).is_err()
+        );
         assert_eq!(deploy_outcome(&paths), "failed");
         assert!(!paths.deploy_request.exists());
         let (_home, paths, request) = deploy_home(&requested);
-        assert!(finish_deploy_request(&paths, &request, || Ok(UPDATE_DEFERRED.into())).is_ok());
+        assert!(
+            finish_deploy_request(&paths, profile, &request, || Ok(UPDATE_DEFERRED.into())).is_ok()
+        );
         assert_eq!(deploy_outcome(&paths), "deferred");
         assert!(paths.deploy_request.exists());
         // A stopped Space keeps its stop intent: nothing runs.
         let (_home, paths, request) = deploy_home(&requested);
         state::write_stopped(&paths).unwrap();
         assert!(
-            finish_deploy_request(&paths, &request, || panic!("a stopped Space was started"))
-                .is_err()
+            finish_deploy_request(&paths, profile, &request, || panic!(
+                "a stopped Space was started"
+            ))
+            .is_err()
         );
         assert_eq!(deploy_outcome(&paths), "failed");
     }
