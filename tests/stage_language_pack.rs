@@ -21,7 +21,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn messages() -> Value {
-    json!([{"id": hex(SUMMARY.as_bytes()), "msgid": SUMMARY, "max_length": 160, "params": []}])
+    json!([{"id": hex(SUMMARY.as_bytes()), "msgid": SUMMARY, "max_length": 80, "params": []}])
 }
 
 fn catalog_digest() -> String {

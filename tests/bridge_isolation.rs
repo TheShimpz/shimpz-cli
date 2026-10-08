@@ -64,7 +64,7 @@ fn trusted_environment(root: &Path) -> PathBuf {
              path = pathlib.Path(sys.argv[2]).resolve() / 'actions' / 'greet.py'\n\
              spec = importlib.util.spec_from_file_location('greet', path)\n\
              spec.loader.exec_module(importlib.util.module_from_spec(spec))\n\
-             print(json.dumps({{'messages': [{{'id': '{id}', 'msgid': '{SUMMARY}', 'max_length': 160, 'params': []}}], 'summary': '{SUMMARY}'}}))\n"
+             print(json.dumps({{'messages': [{{'id': '{id}', 'msgid': '{SUMMARY}', 'max_length': 80, 'params': []}}], 'summary': '{SUMMARY}'}}))\n"
         ),
     )
     .unwrap();

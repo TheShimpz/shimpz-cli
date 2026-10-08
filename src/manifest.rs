@@ -38,7 +38,7 @@ impl PublicationIdentity {
             || !valid_version(&identity.version)
             || !valid_creators(&identity.creators)
             || !valid_display_text(&identity.name, 80)
-            || !valid_display_text(&identity.summary, 160)
+            || !valid_display_text(&identity.summary, 80)
         {
             return Err("Assistant manifest identity is invalid".into());
         }
@@ -129,6 +129,19 @@ summary = "A bounded Assistant summary."
                 summary: "A bounded Assistant summary.".into(),
             })
         );
+    }
+
+    #[test]
+    fn bounds_the_summary_to_a_short_eighty_character_description() {
+        for summary in ["s".repeat(80), format!("{}\u{1F44B}", "s".repeat(79))] {
+            let source = VALID.replace("A bounded Assistant summary.", &summary);
+            assert_eq!(
+                PublicationIdentity::parse(source.as_bytes()).map(|identity| identity.summary),
+                Ok(summary)
+            );
+        }
+        let source = VALID.replace("A bounded Assistant summary.", &"s".repeat(81));
+        assert!(PublicationIdentity::parse(source.as_bytes()).is_err());
     }
 
     #[test]

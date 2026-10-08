@@ -523,10 +523,10 @@ mod tests {
     fn retranslates_a_remembered_text_the_current_declaration_refuses() {
         let directory = tempfile::tempdir().unwrap();
         let memory = memory(directory.path());
-        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let catalog = catalog_of(&[("Greets people.", 80)]);
         let (id, template) = catalog.templates().next().unwrap();
-        // A text admitted under a wider field no longer fits the 160-character summary bound.
-        memory.put(id, &tagged(&"x".repeat(200))).unwrap();
+        // A text admitted under a wider field no longer fits the 80-character summary bound.
+        memory.put(id, &tagged(&"x".repeat(120))).unwrap();
         let fake = Fake::new(|template, _| Ok(tagged(template)));
         let pack = translate(&catalog, POLICY, &memory, &fake, WORKERS, &accept).unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
@@ -598,11 +598,11 @@ mod tests {
 
     #[test]
     fn names_every_refused_locale_and_quotes_at_most_sixty_characters() {
-        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let catalog = catalog_of(&[("Greets people.", 80)]);
         let (id, _) = catalog.templates().next().unwrap();
         let mut texts = tagged("Greets people.");
         texts.insert("ar".into(), "\u{200b}x".into());
-        texts.insert("ja".into(), "y".repeat(161));
+        texts.insert("ja".into(), "y".repeat(81));
         assert_eq!(
             refusal_reason(&catalog, id, &texts).unwrap(),
             "ar is not trimmed, printable NFC text (public_text), ja exceeds the field's length budget \
@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn a_refused_exchange_is_retried_like_an_inadmissible_answer() {
         let directory = tempfile::tempdir().unwrap();
-        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let catalog = catalog_of(&[("Greets people.", 80)]);
         let fake = Fake::new(|template, call| {
             if call < 2 {
                 Err(ProviderError::Refused)
@@ -761,7 +761,7 @@ mod tests {
     fn remembers_nothing_until_the_reference_validator_admits_the_pack() {
         let directory = tempfile::tempdir().unwrap();
         let memory = memory(directory.path());
-        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let catalog = catalog_of(&[("Greets people.", 80)]);
         let (id, template) = catalog.templates().next().unwrap();
         // U+1FAEA is assigned in the CLI's Unicode data but unassigned in the pinned reference's Unicode 16.
         let newer = Fake::new(|template, _| Ok(tagged(&format!("{template} \u{1faea}"))));
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_terminal_failure_elsewhere_cancels_every_further_attempt() {
-        let catalog = catalog_of(&[("Greets people.", 160)]);
+        let catalog = catalog_of(&[("Greets people.", 80)]);
         let (id, template) = catalog.templates().next().unwrap();
         let stop = AtomicBool::new(false);
         // Another worker fails while this inadmissible answer is in flight, which would otherwise earn two retries.

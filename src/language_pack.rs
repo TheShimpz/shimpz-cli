@@ -343,7 +343,7 @@ pub(crate) mod tests {
     /// One valid catalog document with a parameterized, a plain, and the summary message.
     pub(crate) fn catalog_document() -> String {
         let mut messages = vec![
-            message(SUMMARY, 160, &json!([])),
+            message(SUMMARY, 80, &json!([])),
             message(TITLE, 80, &json!([])),
             message(
                 DESCRIPTION,
@@ -445,7 +445,7 @@ pub(crate) mod tests {
     fn admits_each_closed_param_kind_only_within_its_bound() {
         let document = |kind: &str, max_length: usize| {
             let mut messages = vec![
-                message(SUMMARY, 160, &json!([])),
+                message(SUMMARY, 80, &json!([])),
                 message(
                     "Authorize {value}.",
                     500,
