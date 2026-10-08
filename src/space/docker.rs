@@ -164,13 +164,35 @@ impl Engine {
             "Docker temporary container cleanup",
             [OsString::from("rm"), OsString::from(&container)],
         );
-        if !copied?.success() || !removed?.success() {
-            return Err("the Local release metadata could not be extracted cleanly".into());
+        // The temporary metadata is read, if it was copied, and removed whatever else failed, so no exit leaves it.
+        let copied = copied.map(|status| status.success());
+        let document = match copied {
+            Ok(true) => Some(
+                fs::read_to_string(&metadata_path)
+                    .map_err(|error| format!("could not read Local release metadata: {error}")),
+            ),
+            _ => None,
+        };
+        let cleaned = match fs::remove_file(&metadata_path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
+                "could not remove temporary release metadata: {error}"
+            )),
+            _ => Ok(()),
+        };
+        let failure = match (copied, removed) {
+            (Ok(true), Ok(removed)) if removed.success() => None,
+            (Err(error), _) | (_, Err(error)) => Some(error),
+            _ => Some("the Local release metadata could not be extracted cleanly".to_owned()),
+        };
+        if let Some(failure) = failure {
+            return Err(match cleaned {
+                Ok(()) => failure,
+                Err(cleanup) => format!("{failure}; {cleanup}"),
+            });
         }
-        let document = fs::read_to_string(&metadata_path)
-            .map_err(|error| format!("could not read Local release metadata: {error}"))?;
-        fs::remove_file(metadata_path)
-            .map_err(|error| format!("could not remove temporary release metadata: {error}"))?;
+        let document =
+            document.ok_or_else(|| "Local release metadata was not copied".to_owned())??;
+        cleaned?;
         let state_epoch = self.run_output([
             "image",
             "inspect",

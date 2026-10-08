@@ -443,7 +443,15 @@ impl Context {
                 .unwrap_or_else(|_| Err("the Local inventory could not be observed".into()));
             (inventory, selection)
         });
-        inventory?;
+        if let Err(error) = inventory {
+            // The refused inventory leads; a resolution that also failed, for example in its cleanup, follows it.
+            return Err(match selection.map(Withheld::release) {
+                Some(Err(resolution)) => {
+                    format!("{error}; the Local release resolution also failed: {resolution}")
+                }
+                Some(Ok(_)) | None => error,
+            });
+        }
         let stopped = stopped?;
         if options.scheduled && stopped {
             return Ok(SCHEDULED_STOPPED.into());
@@ -2992,6 +3000,35 @@ mod tests {
         assert!(macos.resolve(Some(&developer_release.reference)).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_resolution_whose_container_cleanup_fails_leaves_no_temporary_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let developer_release = developer(9, '1');
+        let docker = developer_docker(home.path(), &developer_release);
+        let script = fs::read_to_string(&docker)
+            .unwrap()
+            .replace("rm) exit 0", "rm) exit 1");
+        crate::fake_tool::write(&docker, script);
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+        let Err(error) = context.resolve(Some(&developer_release.reference)) else {
+            panic!("a resolution whose container cleanup failed was admitted");
+        };
+        assert_eq!(
+            error,
+            "the Local release metadata could not be extracted cleanly"
+        );
+        assert!(!context.paths.home.join("release.env.tmp").exists());
+    }
+
     /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set.
     #[cfg(unix)]
     fn channel_docker(
@@ -3510,11 +3547,171 @@ mod tests {
         assert!(!outcome.contains("restored"), "{outcome}");
     }
 
+    const REPLACED_ADMIN: &str = "a0000000000000000000000000000000000000000000000000000000000000ad";
+    const KEPT_TEAM: &str = "b0000000000000000000000000000000000000000000000000000000000000be";
+
+    /// A Docker stand-in for an installed Space whose project holds the installed Admin and Team: every name lookup
+    /// misses, each listing holds only those two containers, the release image labels state epoch 1, and `stop`,
+    /// `rm`, and `compose` exit with the given statuses. Every call is logged.
+    #[cfg(unix)]
+    fn replacing_docker(home: &Path, stop: u8, remove: u8, compose: u8) -> (PathBuf, PathBuf) {
+        let log = home.join("docker.log");
+        let docker = home.join("replacing-docker");
+        let installed = release(1, 'a').metadata;
+        crate::fake_tool::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} ;; esac ;;\n  volume) case \"$2\" in inspect) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                log = log.display(),
+                admin_id = REPLACED_ADMIN,
+                team_id = KEPT_TEAM,
+                admin = installed.admin,
+                team = installed.team,
+            ),
+        );
+        (docker, log)
+    }
+
+    /// A candidate that replaces only the installed Admin image.
+    fn admin_replacing_release() -> ResolvedRelease {
+        let mut candidate = release(2, 'b');
+        candidate.metadata.admin =
+            format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "c".repeat(64));
+        candidate
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_stop_or_removal_of_replaced_containers_rolls_back_and_keeps_volumes() {
+        for (stop, remove, compose, cause, outcome) in [
+            (
+                1,
+                0,
+                0,
+                "could not stop every managed Local container",
+                "the previous healthy release was restored",
+            ),
+            (
+                0,
+                1,
+                0,
+                "could not remove every replaced Local container",
+                "the previous healthy release was restored",
+            ),
+            (
+                1,
+                0,
+                1,
+                "could not stop every managed Local container",
+                "the update and its rollback both failed",
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let (docker, log) = replacing_docker(home.path(), stop, remove, compose);
+            let (context, backup) = installed_space(home.path(), docker);
+            let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+            let candidate_release = admin_replacing_release();
+            let candidate = Candidate {
+                release: &candidate_release,
+                installed: Some(&installed),
+                space_id: &installed.space_id,
+                port: installed.port,
+                docker_gid: 0,
+                docker_socket: Path::new("/var/run/docker.sock.raw"),
+            };
+
+            let error = context
+                .start_or_roll_back(&candidate, Some(backup))
+                .unwrap_err();
+
+            assert!(error.contains(cause) && error.contains(outcome), "{error}");
+            let calls = fs::read_to_string(&log).unwrap();
+            // Only the container whose image the candidate replaces is stopped, and removed without its volumes.
+            assert!(
+                calls
+                    .lines()
+                    .any(|line| line == format!("stop {REPLACED_ADMIN}"))
+            );
+            assert!(
+                calls
+                    .lines()
+                    .all(|line| !line.starts_with("stop ") || !line.contains(KEPT_TEAM))
+            );
+            if stop == 0 {
+                assert!(
+                    calls
+                        .lines()
+                        .any(|line| line == format!("rm {REPLACED_ADMIN}"))
+                );
+            } else {
+                assert!(!calls.lines().any(|line| line.starts_with("rm ")));
+            }
+            // The rollback brought the previous configuration back up through Compose.
+            assert!(
+                calls
+                    .lines()
+                    .any(|line| line.starts_with("compose ") && line.contains(" up -d "))
+            );
+            let restored = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+            assert_eq!(restored.release_ref, release(1, 'a').reference);
+        }
+    }
+
+    /// An installed, marked Space under `home` whose Docker is `docker`.
+    #[cfg(unix)]
+    fn started_space(home: &Path, docker: PathBuf) -> Context {
+        let (context, backup) = installed_space(home, docker);
+        remove_backup(Some(backup)).unwrap();
+        state::write_marker(&context.paths).unwrap();
+        context
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_start_judges_the_inventory_before_the_release_it_resolved_beside_it() {
+        let options = SpaceStart {
+            scheduled: true,
+            release: None,
+            candidate: false,
+        };
+        // A scheduled start of a stopped Space, or of an unreadable stopped record, resolves no release.
+        let home = tempfile::tempdir().unwrap();
+        let (docker, log) = replacing_docker(home.path(), 0, 0, 0);
+        let context = started_space(home.path(), docker);
+        state::write_stopped(&context.paths).unwrap();
+        assert_eq!(context.start(&options).unwrap(), SCHEDULED_STOPPED);
+        fs::remove_file(&context.paths.stopped).unwrap();
+        fs::create_dir(&context.paths.stopped).unwrap();
+        assert!(context.start(&options).is_err());
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.starts_with("create ") || line.starts_with("pull "))
+        );
+
+        // A refused inventory leads, and a resolution that failed beside it follows.
+        let home = tempfile::tempdir().unwrap();
+        let docker = home.path().join("refusing-docker");
+        crate::fake_tool::write(
+            &docker,
+            "#!/bin/sh\ncase \"$1\" in\n  ps) exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let context = started_space(home.path(), docker);
+        let error = context.start(&options).unwrap_err();
+        assert!(
+            error.contains("; the Local release resolution also failed: "),
+            "{error}"
+        );
+        assert!(!error.starts_with("Docker could not pull"), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_compose_invocation_failure_after_replacement_restores_the_previous_release() {
         let home = tempfile::tempdir().unwrap();
-        let (context, backup) = installed_space(home.path(), home.path().join("missing-docker"));
+        let (docker, log) = replacing_docker(home.path(), 0, 0, 1);
+        let (context, backup) = installed_space(home.path(), docker);
         let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
         let candidate_release = release(2, 'b');
         let candidate = Candidate {
@@ -3530,6 +3727,18 @@ mod tests {
             context
                 .start_or_roll_back(&candidate, Some(backup))
                 .is_err()
+        );
+        // The candidate reached Compose: nothing was replaced, so nothing was stopped or removed first.
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(
+            calls
+                .lines()
+                .any(|line| line.starts_with("compose ") && line.contains(" up -d "))
+        );
+        assert!(
+            !calls
+                .lines()
+                .any(|line| line.starts_with("stop ") || line.starts_with("rm "))
         );
 
         let restored = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
