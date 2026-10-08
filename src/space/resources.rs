@@ -1,6 +1,7 @@
 //! Exact Docker resource ownership and cleanup proof.
 
 use std::collections::BTreeSet;
+use std::thread;
 
 use super::docker::Engine;
 use super::graph::{StorageProfile, VOLUME_NAMES};
@@ -45,68 +46,89 @@ pub(crate) struct Inventory {
 }
 
 impl Inventory {
+    /// Every observation is an independent read-only Docker call, so each round runs its calls at once and then
+    /// judges their answers in the fixed order a sequential inspection would, so the first refusal is the same.
     pub(crate) fn inspect(
         engine: &Engine,
         paths: &Paths,
         storage: StorageProfile,
     ) -> Result<Self, String> {
-        validate_reserved(engine)?;
+        let project = format!("label=com.docker.compose.project={PROJECT}");
+        let profile = format!("label=com.shimpz.local.profile={PROFILE}");
+        let local_filter = [
+            "--filter",
+            "label=com.shimpz.local.managed=1",
+            "--filter",
+            &profile,
+        ];
+        let (reserved, controller, lists) = thread::scope(|scope| {
+            let reserved: Vec<_> = RESERVED
+                .iter()
+                .map(|name| scope.spawn(move || reserved_occupant(engine, name)))
+                .collect();
+            let controller = scope.spawn(|| controller_space_id(engine));
+            let lists: Vec<_> = [
+                vec!["ps", "--all", "--quiet", "--filter", &project],
+                vec!["volume", "ls", "--quiet", "--filter", &project],
+                vec!["network", "ls", "--quiet", "--filter", &project],
+                [&["ps", "--all", "--quiet"][..], &local_filter].concat(),
+                [&["network", "ls", "--quiet"][..], &local_filter].concat(),
+            ]
+            .into_iter()
+            .map(|arguments| scope.spawn(move || engine.run_output(arguments).map(|out| ids(&out))))
+            .collect();
+            (
+                reserved.into_iter().map(joined).collect::<Vec<_>>(),
+                joined(controller),
+                lists.into_iter().map(joined).collect::<Vec<_>>(),
+            )
+        });
+        reserved.into_iter().collect::<Result<(), String>>()?;
         let environment_id = read_space_id(paths)?;
-        let controller_id = controller_space_id(engine)?;
-        let space_id = match (environment_id, controller_id) {
+        let space_id = match (environment_id, controller?) {
             (Some(left), Some(right)) if left != right => {
                 return Err("local and controller Space identities differ".into());
             }
             (Some(value), _) | (_, Some(value)) => Some(value),
             (None, None) => None,
         };
-        let project_containers = ids(&engine.run_output([
-            "ps",
-            "--all",
-            "--quiet",
-            "--filter",
-            &format!("label=com.docker.compose.project={PROJECT}"),
-        ])?);
-        let project_volumes = ids(&engine.run_output([
-            "volume",
-            "ls",
-            "--quiet",
-            "--filter",
-            &format!("label=com.docker.compose.project={PROJECT}"),
-        ])?);
-        let project_networks = ids(&engine.run_output([
-            "network",
-            "ls",
-            "--quiet",
-            "--filter",
-            &format!("label=com.docker.compose.project={PROJECT}"),
-        ])?);
-        validate_project_containers(engine, &project_containers)?;
-        validate_project_volumes(engine, paths, storage, &project_volumes)?;
-        validate_project_networks(engine, &project_networks)?;
-        let local_containers = ids(&engine.run_output([
-            "ps",
-            "--all",
-            "--quiet",
-            "--filter",
-            "label=com.shimpz.local.managed=1",
-            "--filter",
-            &format!("label=com.shimpz.local.profile={PROFILE}"),
-        ])?);
-        let local_networks = ids(&engine.run_output([
-            "network",
-            "ls",
-            "--quiet",
-            "--filter",
-            "label=com.shimpz.local.managed=1",
-            "--filter",
-            &format!("label=com.shimpz.local.profile={PROFILE}"),
-        ])?);
-        match &space_id {
-            Some(value) => {
-                validate_dynamic_containers(engine, value, &local_containers)?;
-                validate_dynamic_networks(engine, value, &local_networks)?;
+        let [
+            project_containers,
+            project_volumes,
+            project_networks,
+            local_containers,
+            local_networks,
+        ] = <[Result<Vec<String>, String>; 5]>::try_from(lists)
+            .map_err(|_| "the Local inventory is incomplete".to_owned())?;
+        let (project_containers, project_volumes, project_networks) =
+            (project_containers?, project_volumes?, project_networks?);
+        let dynamic = match (&space_id, &local_containers, &local_networks) {
+            (Some(value), Ok(containers), Ok(networks)) => {
+                Some((value.as_str(), containers, networks))
             }
+            _ => None,
+        };
+        let (validated, dynamic) = thread::scope(|scope| {
+            let validated = [
+                scope.spawn(|| validate_project_containers(engine, &project_containers)),
+                scope.spawn(|| validate_project_volumes(engine, paths, storage, &project_volumes)),
+                scope.spawn(|| validate_project_networks(engine, &project_networks)),
+            ];
+            let dynamic = dynamic.map(|(value, containers, networks)| {
+                [
+                    scope.spawn(move || validate_dynamic_containers(engine, value, containers)),
+                    scope.spawn(move || validate_dynamic_networks(engine, value, networks)),
+                ]
+            });
+            (
+                validated.map(joined),
+                dynamic.map(|handles| handles.map(joined)),
+            )
+        });
+        validated.into_iter().collect::<Result<(), String>>()?;
+        let (local_containers, local_networks) = (local_containers?, local_networks?);
+        match dynamic {
+            Some(results) => results.into_iter().collect::<Result<(), String>>()?,
             None if !local_containers.is_empty() || !local_networks.is_empty() => {
                 return Err(
                     "current Space identity is required to manage Team or Assistant resources"
@@ -219,22 +241,28 @@ impl Inventory {
     }
 }
 
-fn validate_reserved(engine: &Engine) -> Result<(), String> {
-    for name in RESERVED {
-        let record = engine.run_output([
-            "inspect",
-            "--type=container",
-            "--format",
-            "{{index .Config.Labels \"com.docker.compose.project\"}}",
-            name,
-        ]);
-        match record {
-            Ok(value) if value.trim() == PROJECT => {}
-            Ok(_) => return Err(format!("another Docker container is already named {name}")),
-            Err(_) => {}
+/// A reserved container name is free or held by this project; any other occupant refuses the inventory.
+fn reserved_occupant(engine: &Engine, name: &str) -> Result<(), String> {
+    let record = engine.run_output([
+        "inspect",
+        "--type=container",
+        "--format",
+        "{{index .Config.Labels \"com.docker.compose.project\"}}",
+        name,
+    ]);
+    match record {
+        Ok(value) if value.trim() != PROJECT => {
+            Err(format!("another Docker container is already named {name}"))
         }
+        Ok(_) | Err(_) => Ok(()),
     }
-    Ok(())
+}
+
+/// The answer of one concurrent observation; a worker that panicked observed nothing and refuses the inventory.
+fn joined<T>(handle: thread::ScopedJoinHandle<'_, Result<T, String>>) -> Result<T, String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("a Local inventory observation failed".into()))
 }
 
 fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
@@ -617,6 +645,37 @@ mod tests {
             Some("n002")
         );
         assert_eq!(calls(&temporary), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_observations_refuse_with_the_first_failure_in_sequential_order() {
+        // Shimpz Admin answers last but precedes Shimpz Brain in the reserved order, so its refusal is reported.
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = Paths::under(temporary.path()).unwrap();
+        let command = temporary.path().join("docker");
+        crate::fake_tool::write(
+            &command,
+            "#!/bin/sh\ncase \"$*\" in\n  *' shimpz-admin') sleep 0.3; echo other ;;\n  *' shimpz-brain') echo other ;;\n  inspect*) exit 1 ;;\nesac\n",
+        );
+        let engine = Engine::with_docker(command);
+        assert_eq!(
+            Inventory::inspect(&engine, &paths, StorageProfile::ManagedDisk).unwrap_err(),
+            "another Docker container is already named shimpz-admin"
+        );
+        // With every name free, an empty project and no managed resources are a complete, empty inventory.
+        let command = temporary.path().join("docker");
+        crate::fake_tool::write(
+            &command,
+            "#!/bin/sh\ncase \"$*\" in\n  inspect*) exit 1 ;;\nesac\n",
+        );
+        let inventory = Inventory::inspect(
+            &Engine::with_docker(command),
+            &paths,
+            StorageProfile::ManagedDisk,
+        )
+        .unwrap();
+        assert!(inventory.empty() && inventory.space_id.is_none());
     }
 
     #[cfg(unix)]
