@@ -605,14 +605,12 @@ impl Context {
             }
             linux::Admission::Verified => {}
         }
-        self.download_and_admit_candidate(release, installed)?;
+        let controller_socket = self.download_and_admit_candidate(release, installed)?;
         if scheduled && self.defer_for_activity(release, installed)? {
             return Ok(ApplyOutcome::Deferred);
         }
         let port = state::selected_port(installed)?;
-        let (docker_socket, docker_gid) = self
-            .engine
-            .controller_socket(self.profile, &release.metadata.team)?;
+        let (docker_socket, docker_gid) = controller_socket?;
         let previous = installed
             .map(|_| backup_current(&self.paths, self.profile))
             .transpose()?;
@@ -716,22 +714,52 @@ impl Context {
         state::write_private(&self.paths.status, &status).map_err(Some)
     }
 
+    /// Make every release image available, check the existing Supervisor authentication against a changed Admin,
+    /// and probe the Team controller's Docker socket access. The Admin check and the socket probe are independent
+    /// one-shot helpers, so they run beside the downloads, the probe once the exact Team image is admitted; every
+    /// answer is judged in the former sequential order. The socket probe's own answer is returned for the caller to
+    /// judge where it did before: after the activity deferral and the port selection.
     fn download_and_admit_candidate(
         &self,
         release: &ResolvedRelease,
         installed: Option<&Installed>,
-    ) -> Result<(), String> {
+    ) -> Result<Result<(PathBuf, u32), String>, String> {
         output::progress("Downloading Shimpz Space (1/4): Admin...");
         self.engine
             .pull_exact(&release.metadata.admin, release::ADMIN)?;
         // Admin's own authentication record is read only by Admin, so an unchanged Admin image needs no new probe.
-        if installed.is_some_and(|installed| installed.admin_image != release.metadata.admin) {
-            output::progress("Checking existing Supervisor authentication...");
+        let changed_admin =
+            installed.is_some_and(|installed| installed.admin_image != release.metadata.admin);
+        // The helpers borrow only the engine: the context's recreation flag stays on this thread.
+        let (engine, profile) = (&self.engine, self.profile);
+        let (authentication, downloads, controller_socket) = thread::scope(|scope| {
+            let authentication = changed_admin.then(|| {
+                output::progress("Checking existing Supervisor authentication...");
+                scope.spawn(|| engine.admin_authentication_state(&release.metadata.admin))
+            });
+            output::progress("Downloading Shimpz Space (2/4): Team...");
+            let team = engine.pull_exact(&release.metadata.team, release::TEAM);
+            let controller_socket = team
+                .is_ok()
+                .then(|| scope.spawn(|| engine.controller_socket(profile, &release.metadata.team)));
+            let downloads = team
+                .and_then(|()| {
+                    output::progress("Downloading Shimpz Space (3/4): Brain...");
+                    engine.pull_exact(&release.metadata.brain, release::BRAIN)
+                })
+                .and_then(|()| {
+                    output::progress("Downloading Shimpz Space (4/4): network boundaries...");
+                    engine.pull_exact(&release.metadata.egress, release::EGRESS)
+                });
+            (
+                authentication.map(joined),
+                downloads,
+                controller_socket.map(joined),
+            )
+        });
+        if let Some(authentication) = authentication {
             let authentication_state = admin_authentication_state_probe_response(
-                &self
-                    .engine
-                    .admin_authentication_state(&release.metadata.admin)
-                    .map_err(|error| candidate_admission_error(&error))?,
+                &authentication.map_err(|error: String| candidate_admission_error(&error))?,
             )
             .map_err(|error| candidate_admission_error(&error))?;
             if authentication_state == AdminAuthenticationState::RecoveryRequired {
@@ -740,16 +768,9 @@ impl Context {
                 ));
             }
         }
-        output::progress("Downloading Shimpz Space (2/4): Team...");
-        self.engine
-            .pull_exact(&release.metadata.team, release::TEAM)?;
-        output::progress("Downloading Shimpz Space (3/4): Brain...");
-        self.engine
-            .pull_exact(&release.metadata.brain, release::BRAIN)?;
-        output::progress("Downloading Shimpz Space (4/4): network boundaries...");
-        self.engine
-            .pull_exact(&release.metadata.egress, release::EGRESS)?;
-        Ok(())
+        downloads?;
+        Ok(controller_socket
+            .unwrap_or_else(|| Err("the Team controller socket probe did not run".into())))
     }
 
     fn reset(&self) -> Result<String, String> {
@@ -2319,6 +2340,13 @@ fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, S
     }
 }
 
+/// The answer of one concurrent helper; a worker that panicked answered nothing, which refuses the release.
+fn joined<T>(handle: thread::ScopedJoinHandle<'_, Result<T, String>>) -> Result<T, String> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err("a Local release check failed".into()))
+}
+
 fn candidate_admission_error(error: &str) -> String {
     format!("{error}; the installed release is unchanged")
 }
@@ -3269,15 +3297,18 @@ mod tests {
         };
         let candidate = release(2, 'b');
         let unchanged = installed_from(&release(1, 'a'));
-        // The stand-in's empty inspection proves nothing present, so members are pulled; no probe runs.
-        context
+        // The stand-in's empty inspection proves nothing present, so members are pulled; no probe runs. The Team
+        // socket probe runs beside the downloads, and its refusal is returned for the caller to judge.
+        let controller_socket = context
             .download_and_admit_candidate(&candidate, Some(&unchanged))
             .unwrap();
-        assert!(
-            !fs::read_to_string(&log)
-                .unwrap()
-                .contains("authentication_state")
+        assert_eq!(
+            controller_socket,
+            Err("the Team controller cannot access the local Docker socket".into())
         );
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(!calls.contains("authentication_state"));
+        assert!(calls.contains("dst=/var/run/docker.sock"));
         let changed = Installed {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64)),
             ..unchanged
