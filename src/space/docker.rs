@@ -70,26 +70,41 @@ impl Engine {
     pub(crate) fn connect(profile: HostProfile, paths: &Paths) -> Result<Self, String> {
         let docker = Tool::Docker.resolve()?;
         validate_endpoint(&docker, profile, paths)?;
-        let compose = output(&docker, ["compose", "version", "--short"]).map_err(|error| {
+        // The three engine observations are independent, so they run at once and are judged in this order.
+        let (compose, daemon, processors) = thread::scope(|scope| {
+            let compose = scope.spawn(|| output(&docker, ["compose", "version", "--short"]));
+            // `docker version` fails unless the daemon answers, so one call proves it reachable and reports its
+            // versions.
+            let daemon = scope.spawn(|| {
+                output(
+                    &docker,
+                    [
+                        "version",
+                        "--format",
+                        "{{.Server.Version}}|{{.Server.APIVersion}}",
+                    ],
+                )
+            });
+            let processors = scope.spawn(|| output(&docker, ["info", "--format", "{{.NCPU}}"]));
+            let joined = |handle: thread::ScopedJoinHandle<'_, Result<String, String>>| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("the Docker engine check failed".into()))
+            };
+            (joined(compose), joined(daemon), joined(processors))
+        });
+        let compose = compose.map_err(|error| {
             format!(
                 "Docker Compose v2 check failed; run docker compose version as the current user; {error}"
             )
         })?;
-        // `docker version` fails unless the daemon answers, so one call proves it reachable and reports its versions.
-        let daemon = output(
-            &docker,
-            ["version", "--format", "{{.Server.Version}}|{{.Server.APIVersion}}"],
-        )
-        .map_err(|error| {
+        let daemon = daemon.map_err(|error| {
             format!(
                 "Docker daemon check failed; start Docker and run docker info as the current user; {error}"
             )
         })?;
         require_engine_versions(&daemon, &compose)?;
-        let processors = output(&docker, ["info", "--format", "{{.NCPU}}"])?
-            .trim()
-            .parse::<usize>()
-            .ok();
+        let processors = processors?.trim().parse::<usize>().ok();
         let processors = processors
             .filter(|value| *value > 0)
             .ok_or_else(|| "Docker returned an invalid CPU count".to_owned())?;
