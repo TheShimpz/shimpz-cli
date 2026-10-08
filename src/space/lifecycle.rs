@@ -424,8 +424,27 @@ impl Context {
             return Err("Shimpz Space is not installed; run shimpz install".into());
         }
         let installed = self.installed_state()?;
-        Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
-        let stopped = state::stopped(&self.paths)?;
+        // The inventory proof and the release resolution are independent, so the resolution runs beside it, its
+        // warnings withheld; both are judged in the former order. A scheduled run of an intentionally stopped Space
+        // still resolves nothing.
+        let stopped = state::stopped(&self.paths);
+        let resolve = match stopped {
+            Ok(stopped) => !(options.scheduled && stopped),
+            Err(_) => false,
+        };
+        let (engine, paths, storage) = (&self.engine, &self.paths, self.profile.storage());
+        let (inventory, selection) = thread::scope(|scope| {
+            let inventory = scope.spawn(|| Inventory::inspect(engine, paths, storage));
+            let selection = resolve.then(|| {
+                output::withhold(|| self.select_start(options, &installed, stopped == Ok(true)))
+            });
+            let inventory = inventory
+                .join()
+                .unwrap_or_else(|_| Err("the Local inventory could not be observed".into()));
+            (inventory, selection)
+        });
+        inventory?;
+        let stopped = stopped?;
         if options.scheduled && stopped {
             return Ok(SCHEDULED_STOPPED.into());
         }
@@ -433,7 +452,9 @@ impl Context {
             release,
             preserve_failed_release,
             may_hand_off,
-        }) = self.select_start(options, &installed, stopped)?
+        }) = selection
+            .ok_or_else(|| "the Local release was not resolved".to_owned())?
+            .release()?
         else {
             return Ok("The selected Local release previously failed health; the current Space remains unchanged.".into());
         };
