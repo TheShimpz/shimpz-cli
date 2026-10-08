@@ -513,7 +513,7 @@ mod tests {
     fn policies_are_pinned_and_never_the_developers_policy() {
         assert_eq!(
             translated_policy(),
-            "sha256:777f9b28b25a5837f257ef702bca76e5a2971a42d720a00bda11097ac5003948"
+            "sha256:2bf53fe5c497a38d08cafdf045079d7af5949f4c27329bd09b19b1dbba999c66"
         );
         assert_eq!(
             source_text_policy(),
