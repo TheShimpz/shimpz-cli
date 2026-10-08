@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::help::Topic;
 use crate::space::release::{valid_published_release_ref, valid_release_ref};
-use crate::{digest, team_id};
+use crate::{digest, identifier, team_id};
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
@@ -374,7 +374,7 @@ fn parse_assistant_new(arguments: &[String]) -> Result<Invocation, String> {
         index += 1;
     }
     let name = name.ok_or_else(|| "assistant new requires a name".to_owned())?;
-    if !valid_assistant_name(&name) {
+    if !identifier::assistant_id(&name) {
         return Err("Assistant name is invalid".into());
     }
     Ok(Invocation::Execute(Command::Assistant(
@@ -429,7 +429,7 @@ fn parse_assistant_run(arguments: &[String]) -> Result<Invocation, String> {
     let Some(action) = arguments.first().filter(|value| !value.starts_with('-')) else {
         return Err("assistant run requires an Action id".into());
     };
-    if !valid_action_id(action) {
+    if !identifier::declared(action) {
         return Err("Action id is invalid".into());
     }
     let mut project = PathBuf::from(".");
@@ -558,26 +558,6 @@ fn unicode(value: OsString) -> Result<String, String> {
     value
         .into_string()
         .map_err(|_| "arguments must be valid UTF-8".into())
-}
-
-fn valid_action_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.starts_with(|character: char| character.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.ends_with('-')
-}
-
-fn valid_assistant_name(value: &str) -> bool {
-    valid_action_id(value)
-        && value.len() <= 40
-        && !value.contains("--")
-        && !matches!(
-            value,
-            "postgres" | "assistant-egress" | "shimpz-assistant-egress"
-        )
 }
 
 #[cfg(test)]
@@ -795,11 +775,19 @@ mod tests {
             "postgres",
             "assistant-egress",
             "shimpz-assistant-egress",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "a--b",
+            "a-",
+            &"a".repeat(41),
         ] {
             assert_eq!(
                 parse(strings(&["assistant", "new", name])),
                 Err("Assistant name is invalid".into())
+            );
+        }
+        for name in ["a-b", &"a".repeat(40)] {
+            assert!(
+                parse(strings(&["assistant", "new", name])).is_ok(),
+                "{name}"
             );
         }
     }
@@ -842,10 +830,25 @@ mod tests {
 
     #[test]
     fn rejects_invalid_action_ids() {
-        assert_eq!(
-            parse(strings(&["assistant", "run", "CreateDns"])),
-            Err("Action id is invalid".into())
-        );
+        for action in [
+            "CreateDns",
+            "create--dns",
+            "a--b",
+            "create-",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                parse(strings(&["assistant", "run", action])),
+                Err("Action id is invalid".into()),
+                "{action}"
+            );
+        }
+        for action in ["a-b", &"a".repeat(64)] {
+            assert!(
+                parse(strings(&["assistant", "run", action])).is_ok(),
+                "{action}"
+            );
+        }
     }
 
     #[test]

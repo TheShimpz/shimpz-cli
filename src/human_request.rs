@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::action_failure::ActionFailure;
-use crate::{digest, output};
+use crate::{digest, identifier, output};
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
 const OPTION_FIELDS: [&str; 3] = ["description", "label", "value"];
@@ -61,7 +61,7 @@ pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
                 && object
                     .get("stored_input")
                     .and_then(Value::as_str)
-                    .is_some_and(valid_stored_input_id) =>
+                    .is_some_and(identifier::declared) =>
         {
             Ok(ActionResponse::StoredInputRejected(
                 object["stored_input"]
@@ -236,7 +236,7 @@ fn valid_request_fields(fields: &Map<String, Value>, kind: &str) -> bool {
     fields.keys().map(String::as_str).collect::<HashSet<_>>() == expected
         && fields
             .get("stored_input")
-            .is_none_or(|value| value.as_str().is_some_and(valid_stored_input_id))
+            .is_none_or(|value| value.as_str().is_some_and(identifier::declared))
 }
 
 /// Every copy field is a catalog reference; only a placeholder or an option description may be absent (null).
@@ -307,17 +307,6 @@ fn display_text(value: &Value) -> Option<&str> {
             && text.chars().count() <= MAX_DISPLAY_CHARACTERS
             && !text.chars().any(char::is_control)
     })
-}
-
-fn valid_stored_input_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    (1..=64).contains(&bytes.len())
-        && bytes[0].is_ascii_lowercase()
-        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-        && !bytes.windows(2).any(|pair| pair == b"--")
 }
 
 fn confirm(prompt: &str) -> Result<bool, String> {

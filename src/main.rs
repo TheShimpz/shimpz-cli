@@ -13,6 +13,7 @@ mod digest;
 mod fake_tool;
 mod help;
 mod human_request;
+mod identifier;
 mod install;
 mod invoke;
 mod language_pack;

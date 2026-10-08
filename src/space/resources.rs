@@ -7,7 +7,7 @@ use super::graph::{StorageProfile, VOLUME_NAMES};
 use super::id;
 use super::paths::Paths;
 use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
-use crate::team_id;
+use crate::{identifier, team_id};
 
 const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
@@ -466,7 +466,7 @@ fn validate_dynamic_containers(
             "assistant"
                 if fields[0].starts_with("/shimpz-local-")
                     && team_id::valid(fields[5])
-                    && valid_assistant(fields[6]) => {}
+                    && identifier::assistant_id(fields[6]) => {}
             "assistant-egress" if fields[0] == "/shimpz-assistant-egress" => {}
             "assistant-release" if fields[0] == "/shimpz-assistant-release" => {}
             "brain-egress" if fields[0] == "/shimpz-brain-egress" => {}
@@ -520,20 +520,6 @@ fn static_service(name: &str, service: &str) -> Option<Package> {
         | ("/shimpz-account-egress-init", "shimpz-account-egress-init") => Some(EGRESS),
         _ => None,
     }
-}
-
-fn valid_assistant(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 48
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase())
-        && !value.contains("--")
-        && !value.ends_with('-')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn ids(document: &str) -> Vec<String> {
@@ -665,11 +651,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn validates_closed_dynamic_identifiers() {
-        assert!(valid_assistant("dns-manager"));
-        assert!(!valid_assistant("DnsManager"));
-        assert!(!valid_assistant("dns--manager"));
+    fn assistant_containers_carry_a_protocol_assistant_id_label() {
+        let space = "space-1";
+        let validate = |assistant: &str| {
+            let (_temporary, engine) = fake_docker(&format!(
+                "{:0<64}|/shimpz-local-team_1-x|1|{PROFILE}|{space}|assistant|team_1|{assistant}\n",
+                "c001"
+            ));
+            validate_dynamic_containers(&engine, space, &["c001".to_owned()])
+        };
+        for admitted in ["dns-manager", "a-b", &"a".repeat(40)] {
+            assert_eq!(validate(admitted), Ok(()), "{admitted}");
+        }
+        for refused in [
+            "DnsManager",
+            "dns--manager",
+            "a--b",
+            "dns-",
+            "postgres",
+            &"a".repeat(41),
+        ] {
+            assert!(validate(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

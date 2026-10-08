@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
+use crate::identifier;
+
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct PublicationIdentity {
     pub(crate) id: String,
@@ -32,7 +34,7 @@ impl PublicationIdentity {
         let manifest: PublicationManifest = toml::from_str(source)
             .map_err(|_| "Assistant manifest identity is invalid".to_owned())?;
         let identity = manifest.shimpz;
-        if !valid_id(&identity.id)
+        if !identifier::assistant_id(&identity.id)
             || !valid_version(&identity.version)
             || !valid_creators(&identity.creators)
             || !valid_display_text(&identity.name, 80)
@@ -51,7 +53,7 @@ pub(crate) fn integration_ids(bytes: &[u8]) -> Result<Vec<String>, String> {
         .map_err(|_| "Assistant manifest Integrations are invalid".to_owned())?;
     if manifest.integrations.len() > 16
         || manifest.integrations.iter().any(|(id, declaration)| {
-            !valid_bounded_id(id, 80)
+            !identifier::declared(id)
                 || declaration.scopes.len() > 32
                 || declaration.scopes.iter().any(|scope| {
                     scope.is_empty()
@@ -71,29 +73,6 @@ fn valid_display_text(value: &str, maximum: usize) -> bool {
         && value.chars().count() <= maximum
         && value.trim() == value
         && !value.chars().any(char::is_control)
-}
-
-pub(crate) fn valid_id(value: &str) -> bool {
-    valid_bounded_id(value, 40)
-        && !matches!(
-            value,
-            "postgres" | "assistant-egress" | "shimpz-assistant-egress"
-        )
-}
-
-pub(crate) fn valid_action_id(value: &str) -> bool {
-    valid_bounded_id(value, 80)
-}
-
-fn valid_bounded_id(value: &str, maximum: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= maximum
-        && value.starts_with(|character: char| character.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.ends_with('-')
-        && !value.contains("--")
 }
 
 pub(crate) fn valid_version(value: &str) -> bool {
@@ -126,7 +105,7 @@ fn valid_creators(creators: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicationIdentity, integration_ids, valid_action_id};
+    use super::{PublicationIdentity, integration_ids};
 
     const VALID: &str = r#"
 [shimpz]
@@ -158,6 +137,8 @@ summary = "A bounded Assistant summary."
             VALID.replace("hello-world", "postgres"),
             VALID.replace("hello-world", "assistant-egress"),
             VALID.replace("hello-world", "shimpz-assistant-egress"),
+            VALID.replace("hello-world", "hello--world"),
+            VALID.replace("hello-world", &"a".repeat(41)),
             VALID.replace("1.2.3", "1..3"),
             VALID.replace("@creator-two", "@creator-one"),
             VALID.replace("@creator-two", "@Creator"),
@@ -185,7 +166,14 @@ summary = "A bounded Assistant summary."
             integration_ids(format!("{VALID}\n[integrations.Bad]\nscopes = []\n").as_bytes())
                 .is_err()
         );
-        assert!(valid_action_id("send-message"));
-        assert!(!valid_action_id("send_message"));
+        let integration = |id: &str| {
+            integration_ids(format!("{VALID}\n[integrations.{id}]\nscopes = []\n").as_bytes())
+        };
+        for admitted in ["a-b".to_owned(), "a".repeat(64)] {
+            assert_eq!(integration(&admitted), Ok(vec![admitted.clone()]));
+        }
+        for refused in ["a--b".to_owned(), "a-".to_owned(), "a".repeat(65)] {
+            assert!(integration(&refused).is_err(), "{refused}");
+        }
     }
 }

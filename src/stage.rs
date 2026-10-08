@@ -16,8 +16,8 @@ use crate::manifest::{self, PublicationIdentity};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
 use crate::{
-    capture, digest, output, python, snapshot_files, snapshot_lock, source_package, toolchain,
-    translation,
+    capture, digest, identifier, output, python, snapshot_files, snapshot_lock, source_package,
+    toolchain, translation,
 };
 
 const PYTHON_VERSION: &str = "3.14";
@@ -656,9 +656,7 @@ fn action_ids(files: &[String]) -> Result<Vec<String>, String> {
     actions.sort();
     if actions.is_empty()
         || actions.len() > 128
-        || actions
-            .iter()
-            .any(|action| !manifest::valid_action_id(action))
+        || actions.iter().any(|action| !identifier::declared(action))
         || actions.windows(2).any(|pair| pair[0] == pair[1])
     {
         return Err("Assistant Action identities are invalid".into());
@@ -854,6 +852,18 @@ mod tests {
         );
         assert!(action_ids(&["same_name.py".into(), "same-name.py".into()]).is_err());
         assert!(action_ids(&[]).is_err());
+        let longest = "a".repeat(64);
+        assert_eq!(action_ids(&[format!("{longest}.py")]), Ok(vec![longest]));
+        for refused in [
+            "a__b.py".to_owned(),
+            "a_.py".to_owned(),
+            format!("{}.py", "a".repeat(65)),
+        ] {
+            assert!(
+                action_ids(std::slice::from_ref(&refused)).is_err(),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

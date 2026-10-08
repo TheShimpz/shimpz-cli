@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use ureq::{Agent, Body, http::Response};
 
-use crate::{auth, developers_client, digest, manifest, team_id};
+use crate::{auth, developers_client, digest, identifier, team_id};
 
 const TEAMS_URL: &str = "https://developers.shimpz.com/api/v1/teams";
 const INSTALLATIONS_URL: &str = "https://developers.shimpz.com/api/v1/installations";
@@ -196,7 +196,7 @@ impl Installed {
             || self.status != "installed"
             || self.team_id != team_id
             || self.source_digest != source_digest
-            || !manifest::valid_id(&self.assistant_id)
+            || !identifier::assistant_id(&self.assistant_id)
             || !digest::is_sha256(&self.oci_digest)
             || !digest::is_sha256(&self.binding_digest)
         {

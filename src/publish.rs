@@ -13,7 +13,7 @@ use crate::{
     args::PublicationVisibility,
     auth,
     developers_client::{self, unavailable},
-    digest, manifest, output, python, source_package,
+    digest, identifier, manifest, output, python, source_package,
 };
 
 const CREATOR_CONSENTS_URL: &str = "https://developers.shimpz.com/api/v1/publication-consents";
@@ -339,7 +339,7 @@ impl AssistantTestFailure {
 
 impl Publication {
     fn validate(&self, expected_digest: &str, expected_visibility: &str) -> Result<(), String> {
-        if !manifest::valid_id(&self.assistant_id)
+        if !identifier::assistant_id(&self.assistant_id)
             || !manifest::valid_version(&self.version)
             || self.source_digest != expected_digest
             || self.visibility != expected_visibility
