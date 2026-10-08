@@ -101,6 +101,23 @@ impl Catalog {
             .map(|message| (message.id.as_str(), message.msgid.as_str()))
     }
 
+    /// The most characters a translation of message `id` may have as written: its bound, less every parameter's
+    /// rendering budget, plus the characters of each `{placeholder}` the text keeps.
+    pub(crate) fn template_budget(&self, id: &str) -> Option<usize> {
+        let message = self.entries.iter().find(|message| message.id == id)?;
+        let fields = message
+            .params
+            .iter()
+            .map(|param| param.name.len() + 2)
+            .sum::<usize>();
+        let parameters = message
+            .params
+            .iter()
+            .map(|param| param.max_length)
+            .sum::<usize>();
+        Some((message.max_length + fields).saturating_sub(parameters))
+    }
+
     /// The first reason `text` is not an admissible translation of message `id`, mirroring the protocol codes.
     pub(crate) fn translation_error(&self, id: &str, text: &str) -> Option<&'static str> {
         self.entries
@@ -371,6 +388,33 @@ pub(crate) mod tests {
         entries.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
         Catalog::from_document(&json!({"messages": entries, "summary": messages[0].0}).to_string())
             .expect("valid catalog")
+    }
+
+    #[test]
+    fn a_translation_budget_counts_each_placeholder_as_written() {
+        let catalog = catalog();
+        // The 80-character summary fits 80 characters; the description keeps 500 less its parameters' budgets
+        // (4 + 80) plus the written placeholders `{count}` and `{name}` (7 + 6).
+        assert_eq!(
+            catalog.template_budget(&hex_sha256(SUMMARY.as_bytes())),
+            Some(80)
+        );
+        assert_eq!(
+            catalog.template_budget(&hex_sha256(DESCRIPTION.as_bytes())),
+            Some(429)
+        );
+        assert_eq!(catalog.template_budget("unknown"), None);
+        let at_budget = format!("{} {{name}} {{count}}", "x".repeat(429 - 15));
+        assert_eq!(at_budget.chars().count(), 429);
+        assert_eq!(
+            catalog.translation_error(&hex_sha256(DESCRIPTION.as_bytes()), &at_budget),
+            None
+        );
+        let over = format!("x{at_budget}");
+        assert_eq!(
+            catalog.translation_error(&hex_sha256(DESCRIPTION.as_bytes()), &over),
+            Some("translation_budget")
+        );
     }
 
     pub(crate) fn pack_value(catalog: &Catalog) -> Value {

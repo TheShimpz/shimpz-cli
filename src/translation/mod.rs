@@ -33,8 +33,9 @@ type Texts = BTreeMap<String, String>;
 const POLICY_FORMAT: &str = "shimpz-local-translation-policy-v1";
 /// Parallel provider requests while translating one catalog.
 const WORKERS: usize = 4;
-/// Provider answers one message may receive before staging fails.
-const ATTEMPTS: usize = 3;
+/// Provider answers one message may receive before staging fails; a model often overshoots a short budget, so each
+/// retry asks a tighter one and keeps every locale an earlier answer already fit.
+const ATTEMPTS: usize = 5;
 
 /// How the staged pack renders the messages in every interface language other than English.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -383,13 +384,33 @@ fn translate_message(
     stop: &AtomicBool,
 ) -> Outcome {
     let mut reason = None;
-    for _ in 0..ATTEMPTS {
+    // The most characters the template's translation may have as written, which the provider is asked to fit.
+    let budget = catalog
+        .template_budget(id)
+        .unwrap_or_else(|| template.chars().count());
+    // A text admitted for a locale is kept, so a retry only has to bring the locales still refused within bounds.
+    let mut admitted = Texts::new();
+    for attempt in 0..ATTEMPTS {
         if stop.load(Ordering::SeqCst) {
             return Outcome::Cancelled;
         }
-        reason = match translator.translate(template).map(composed) {
+        reason = match translator
+            .translate(template, requested(budget, attempt))
+            .map(composed)
+        {
             Ok(texts) => match refusal_reason(catalog, id, &texts) {
                 None => return Outcome::Translated(texts),
+                refused if texts.keys().map(String::as_str).eq(LOCALES) => {
+                    for (locale, text) in texts {
+                        if catalog.translation_error(id, &text).is_none() {
+                            admitted.entry(locale).or_insert(text);
+                        }
+                    }
+                    if admitted.keys().map(String::as_str).eq(LOCALES) {
+                        return Outcome::Translated(admitted);
+                    }
+                    refused
+                }
                 refused => refused,
             },
             Err(ProviderError::Refused) => Some(MALFORMED.to_owned()),
@@ -397,6 +418,12 @@ fn translate_message(
         };
     }
     Outcome::Refused(reason.unwrap_or_default())
+}
+
+/// The budget asked of attempt `attempt`: the full budget first, then a tenth tighter per retry, because a model
+/// that overshot once tends to overshoot by a little again; admission still checks the full budget.
+fn requested(budget: usize, attempt: usize) -> usize {
+    (budget * (10 - attempt.min(5)) / 10).max(1)
 }
 
 #[cfg(test)]
@@ -431,7 +458,11 @@ mod tests {
     impl<F: Fn(&str, usize) -> Result<BTreeMap<String, String>, ProviderError> + Sync> Translator
         for Fake<F>
     {
-        fn translate(&self, template: &str) -> Result<BTreeMap<String, String>, ProviderError> {
+        fn translate(
+            &self,
+            template: &str,
+            _max_characters: usize,
+        ) -> Result<BTreeMap<String, String>, ProviderError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
@@ -481,7 +512,7 @@ mod tests {
     fn policies_are_pinned_and_never_the_developers_policy() {
         assert_eq!(
             translated_policy(),
-            "sha256:a155c476af22c11e8ca76522ce00a8c15fc0cb04d664cb7c0de661e4d3403747"
+            "sha256:777f9b28b25a5837f257ef702bca76e5a2971a42d720a00bda11097ac5003948"
         );
         assert_eq!(
             source_text_policy(),
@@ -533,6 +564,36 @@ mod tests {
         let value: Value = serde_json::from_slice(pack.bytes()).unwrap();
         assert_eq!(value["locales"]["de"][id], format!("de {template}"));
         assert_eq!(memory.get(id), Some(tagged(template)));
+    }
+
+    #[test]
+    fn keeps_each_admitted_locale_and_retries_only_until_every_locale_fits() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = catalog_of(&[("Greets people.", 80)]);
+        let (id, template) = catalog.templates().next().unwrap();
+        let fake = Fake::new(|template, call| {
+            let mut texts = tagged(template);
+            // The first answer overshoots French, the second German; together they fit every locale.
+            let long = if call == 0 { "fr" } else { "de" };
+            texts.insert(long.to_owned(), "x".repeat(81));
+            Ok(texts)
+        });
+        let pack = translate_in(&catalog, directory.path(), &fake, 1).unwrap();
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        let value: Value = serde_json::from_slice(pack.bytes()).unwrap();
+        assert_eq!(value["locales"]["fr"][id], format!("fr {template}"));
+        assert_eq!(value["locales"]["de"][id], format!("de {template}"));
+    }
+
+    #[test]
+    fn asks_a_tighter_budget_on_each_retry_but_never_none() {
+        assert_eq!(
+            (0..ATTEMPTS)
+                .map(|attempt| requested(80, attempt))
+                .collect::<Vec<_>>(),
+            [80, 72, 64, 56, 48]
+        );
+        assert_eq!(requested(1, 2), 1);
     }
 
     #[test]

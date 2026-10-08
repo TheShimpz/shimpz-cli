@@ -29,7 +29,7 @@ fn catalog_digest() -> String {
 }
 
 /// The pinned policy of packs translated from the workstation and of packs that show the English text.
-const TRANSLATED_POLICY: &str = "a155c476af22c11e8ca76522ce00a8c15fc0cb04d664cb7c0de661e4d3403747";
+const TRANSLATED_POLICY: &str = "777f9b28b25a5837f257ef702bca76e5a2971a42d720a00bda11097ac5003948";
 const SOURCE_TEXT_POLICY: &str = "52855d44158b34c730d32bdc597e690db42f0af37c26839d507f1f87210145ff";
 
 /// The canonical pack showing `text` for the summary in every interface language under `policy`.
