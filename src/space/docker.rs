@@ -935,40 +935,57 @@ fn socket_probe_arguments(
     gid: Option<u32>,
     script: &str,
 ) -> Vec<OsString> {
-    let mut arguments = [
-        "run",
-        "--rm",
-        "--platform",
+    let gid = gid.map(|gid| gid.to_string());
+    let options = gid
+        .as_deref()
+        .map_or_else(Vec::new, |gid| vec!["--group-add", gid]);
+    python_helper_arguments(
         platform,
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges:true",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
-    if let Some(gid) = gid {
-        arguments.extend([
-            OsString::from("--group-add"),
-            OsString::from(gid.to_string()),
-        ]);
-    }
-    arguments.extend(
-        [
+        cpuset,
+        "64m",
+        &options,
+        mount,
+        team_image,
+        &["-c", script],
+    )
+}
+
+/// One-shot Python helper container: removed on exit, never pulled, offline, with a read-only root, no capabilities,
+/// and no privilege gain, inside the Space cpuset with one CPU, `memory` without swap, 32 processes, a
+/// non-executable `/tmp`, and exactly one `mount`. `options` holds only the helper's own name, labels, stdin, and
+/// identity.
+fn python_helper_arguments(
+    platform: &str,
+    cpuset: &str,
+    memory: &str,
+    options: &[&str],
+    mount: &str,
+    image: &str,
+    command: &[&str],
+) -> Vec<OsString> {
+    ["run", "--rm"]
+        .into_iter()
+        .chain(options.iter().copied())
+        .chain([
+            "--platform",
+            platform,
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
             "--cpuset-cpus",
             cpuset,
             "--cpus",
             HELPER_CPUS,
             "--memory",
-            "64m",
+            memory,
             "--memory-swap",
-            "64m",
+            memory,
             "--pids-limit",
             "32",
             "--tmpfs",
@@ -977,14 +994,11 @@ fn socket_probe_arguments(
             mount,
             "--entrypoint",
             "/opt/venv/bin/python",
-            team_image,
-            "-c",
-            script,
-        ]
-        .into_iter()
-        .map(OsString::from),
-    );
-    arguments
+            image,
+        ])
+        .chain(command.iter().copied())
+        .map(OsString::from)
+        .collect()
 }
 
 /// The longest Compose progress line kept; anything beyond it on the same line is dropped.
@@ -1160,51 +1174,24 @@ fn admin_authentication_probe_arguments(
     admin_image: &str,
     container: &str,
 ) -> Vec<OsString> {
-    [
-        "run",
-        "--rm",
-        "--name",
-        container,
-        "--label",
-        "com.shimpz.local.managed=1",
-        "--label",
-        "com.shimpz.local.kind=admin-authentication-probe",
-        "--platform",
+    python_helper_arguments(
         platform,
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges:true",
-        "--user",
-        "1000:1000",
-        "--cpuset-cpus",
         cpuset,
-        "--cpus",
-        HELPER_CPUS,
-        "--memory",
         "256m",
-        "--memory-swap",
-        "256m",
-        "--pids-limit",
-        "32",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=8m",
-        "--mount",
+        &[
+            "--name",
+            container,
+            "--label",
+            "com.shimpz.local.managed=1",
+            "--label",
+            "com.shimpz.local.kind=admin-authentication-probe",
+            "--user",
+            "1000:1000",
+        ],
         mount,
-        "--entrypoint",
-        "/opt/venv/bin/python",
         admin_image,
-        "-m",
-        "authentication_state",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
+        &["-m", "authentication_state"],
+    )
 }
 
 fn status_projection_arguments(
@@ -1214,46 +1201,15 @@ fn status_projection_arguments(
     admin_image: &str,
 ) -> Vec<OsString> {
     let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
-    [
-        "run",
-        "--rm",
-        "--interactive",
-        "--platform",
+    python_helper_arguments(
         platform,
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges:true",
-        "--user",
-        "1000:1000",
-        "--cpuset-cpus",
         cpuset,
-        "--cpus",
-        HELPER_CPUS,
-        "--memory",
         "64m",
-        "--memory-swap",
-        "64m",
-        "--pids-limit",
-        "32",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=8m",
-        "--mount",
+        &["--interactive", "--user", "1000:1000"],
         mount,
-        "--entrypoint",
-        "/opt/venv/bin/python",
         admin_image,
-        "-c",
-        script,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
+        &["-c", script],
+    )
 }
 
 fn reset_capability_write_script() -> &'static str {
@@ -1272,49 +1228,20 @@ fn reset_capability_arguments(
     interactive: bool,
     script: &str,
 ) -> Vec<OsString> {
-    let mut arguments = vec![OsString::from("run"), OsString::from("--rm")];
-    if interactive {
-        arguments.push(OsString::from("--interactive"));
-    }
-    arguments.extend(
-        [
-            "--platform",
-            platform,
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--user",
-            "1000:1000",
-            "--cpuset-cpus",
-            cpuset,
-            "--cpus",
-            HELPER_CPUS,
-            "--memory",
-            "64m",
-            "--memory-swap",
-            "64m",
-            "--pids-limit",
-            "32",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=8m",
-            "--mount",
-            mount,
-            "--entrypoint",
-            "/opt/venv/bin/python",
-            admin_image,
-            "-c",
-            script,
-        ]
-        .into_iter()
-        .map(OsString::from),
-    );
-    arguments
+    let options: &[&str] = if interactive {
+        &["--interactive", "--user", "1000:1000"]
+    } else {
+        &["--user", "1000:1000"]
+    };
+    python_helper_arguments(
+        platform,
+        cpuset,
+        "64m",
+        options,
+        mount,
+        admin_image,
+        &["-c", script],
+    )
 }
 
 pub(crate) fn validate_endpoint(
@@ -2336,5 +2263,128 @@ mod tests {
         assert!(arguments.iter().all(|argument| argument != "--tty"));
         assert!(reset_capability_clear_script().contains("capability.json"));
         assert!(!reset_capability_clear_script().contains("sys.stdin"));
+    }
+
+    /// The exact argument list every Python helper must produce: its own identity, the complete hardening set once,
+    /// and its own command after the image.
+    fn hardened_helper(
+        options: &[&str],
+        memory: &str,
+        image: &str,
+        command: &[&str],
+    ) -> Vec<String> {
+        ["run", "--rm"]
+            .into_iter()
+            .chain(options.iter().copied())
+            .chain([
+                "--platform",
+                "linux/amd64",
+                "--pull",
+                "never",
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges:true",
+                "--cpuset-cpus",
+                "0-3",
+                "--cpus",
+                "1",
+                "--memory",
+                memory,
+                "--memory-swap",
+                memory,
+                "--pids-limit",
+                "32",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size=8m",
+                "--mount",
+                "m",
+                "--entrypoint",
+                "/opt/venv/bin/python",
+                image,
+            ])
+            .chain(command.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn text(arguments: Vec<OsString>) -> Vec<String> {
+        arguments
+            .into_iter()
+            .map(|argument| argument.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn admin_helpers_share_one_exact_hardened_argument_list() {
+        let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
+        let (platform, cpuset) = ("linux/amd64", "0-3");
+        let user = ["--user", "1000:1000"];
+        let stdin_user = ["--interactive", "--user", "1000:1000"];
+        let admin = [
+            "--name",
+            "c",
+            "--label",
+            "com.shimpz.local.managed=1",
+            "--label",
+            "com.shimpz.local.kind=admin-authentication-probe",
+            "--user",
+            "1000:1000",
+        ];
+        assert_eq!(
+            text(admin_authentication_probe_arguments(
+                platform, cpuset, "m", &image, "c"
+            )),
+            hardened_helper(&admin, "256m", &image, &["-m", "authentication_state"])
+        );
+        assert_eq!(
+            text(reset_capability_arguments(
+                platform, cpuset, "m", &image, true, "s"
+            )),
+            hardened_helper(&stdin_user, "64m", &image, &["-c", "s"])
+        );
+        assert_eq!(
+            text(reset_capability_arguments(
+                platform, cpuset, "m", &image, false, "s"
+            )),
+            hardened_helper(&user, "64m", &image, &["-c", "s"])
+        );
+        let status = text(status_projection_arguments(platform, cpuset, "m", &image));
+        let script = status.last().unwrap().clone();
+        assert_eq!(
+            status,
+            hardened_helper(&stdin_user, "64m", &image, &["-c", &script])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_probes_share_one_exact_hardened_argument_list() {
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+        assert_eq!(
+            text(socket_probe_arguments(
+                "linux/amd64",
+                "0-3",
+                "m",
+                &image,
+                None,
+                "s"
+            )),
+            hardened_helper(&[], "64m", &image, &["-c", "s"])
+        );
+        assert_eq!(
+            text(socket_probe_arguments(
+                "linux/amd64",
+                "0-3",
+                "m",
+                &image,
+                Some(7),
+                "s"
+            )),
+            hardened_helper(&["--group-add", "7"], "64m", &image, &["-c", "s"])
+        );
     }
 }
