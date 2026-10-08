@@ -115,7 +115,25 @@ impl Catalog {
             .iter()
             .map(|param| param.max_length)
             .sum::<usize>();
-        Some((message.max_length + fields).saturating_sub(parameters))
+        Some(
+            (message.max_length + fields)
+                .saturating_sub(parameters)
+                .min(MAX_TEMPLATE_CHARACTERS),
+        )
+    }
+
+    /// The characters every translation of message `id` keeps unchanged: its written placeholders.
+    pub(crate) fn placeholder_characters(&self, id: &str) -> usize {
+        self.entries
+            .iter()
+            .find(|message| message.id == id)
+            .map_or(0, |message| {
+                message
+                    .params
+                    .iter()
+                    .map(|param| param.name.len() + 2)
+                    .sum()
+            })
     }
 
     /// The first reason `text` is not an admissible translation of message `id`, mirroring the protocol codes.
@@ -404,6 +422,26 @@ pub(crate) mod tests {
             Some(429)
         );
         assert_eq!(catalog.template_budget("unknown"), None);
+        assert_eq!(
+            catalog.placeholder_characters(&hex_sha256(DESCRIPTION.as_bytes())),
+            13
+        );
+        // A budget never exceeds the 500-character template limit, whatever its parameters' budgets leave.
+        let template = "Zone {zone_identifier_long_name}";
+        let wide = Catalog::from_document(
+            &json!({
+                "messages": [message(template, 500, &json!([
+                    {"name": "zone_identifier_long_name", "kind": "integer", "max_length": 1}
+                ]))],
+                "summary": template
+            })
+            .to_string(),
+        )
+        .expect("valid catalog");
+        assert_eq!(
+            wide.template_budget(&hex_sha256(template.as_bytes())),
+            Some(MAX_TEMPLATE_CHARACTERS)
+        );
         let at_budget = format!("{} {{name}} {{count}}", "x".repeat(429 - 15));
         assert_eq!(at_budget.chars().count(), 429);
         assert_eq!(

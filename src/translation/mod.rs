@@ -388,6 +388,7 @@ fn translate_message(
     let budget = catalog
         .template_budget(id)
         .unwrap_or_else(|| template.chars().count());
+    let floor = catalog.placeholder_characters(id);
     // A text admitted for a locale is kept, so a retry only has to bring the locales still refused within bounds.
     let mut admitted = Texts::new();
     for attempt in 0..ATTEMPTS {
@@ -395,24 +396,23 @@ fn translate_message(
             return Outcome::Cancelled;
         }
         reason = match translator
-            .translate(template, requested(budget, attempt))
+            .translate(template, requested(budget, floor, attempt))
             .map(composed)
         {
-            Ok(texts) => match refusal_reason(catalog, id, &texts) {
-                None => return Outcome::Translated(texts),
-                refused if texts.keys().map(String::as_str).eq(LOCALES) => {
-                    for (locale, text) in texts {
-                        if catalog.translation_error(id, &text).is_none() {
-                            admitted.entry(locale).or_insert(text);
-                        }
+            // Every complete answer adds the locales it fits; one already admitted keeps its earlier text.
+            Ok(texts) if texts.keys().map(String::as_str).eq(LOCALES) => {
+                let refused = refusal_reason(catalog, id, &texts);
+                for (locale, text) in texts {
+                    if catalog.translation_error(id, &text).is_none() {
+                        admitted.entry(locale).or_insert(text);
                     }
-                    if admitted.keys().map(String::as_str).eq(LOCALES) {
-                        return Outcome::Translated(admitted);
-                    }
-                    refused
                 }
-                refused => refused,
-            },
+                if admitted.keys().map(String::as_str).eq(LOCALES) {
+                    return Outcome::Translated(admitted);
+                }
+                refused
+            }
+            Ok(texts) => refusal_reason(catalog, id, &texts),
             Err(ProviderError::Refused) => Some(MALFORMED.to_owned()),
             Err(error) => return Outcome::Failed(error),
         };
@@ -421,9 +421,10 @@ fn translate_message(
 }
 
 /// The budget asked of attempt `attempt`: the full budget first, then a tenth tighter per retry, because a model
-/// that overshot once tends to overshoot by a little again; admission still checks the full budget.
-fn requested(budget: usize, attempt: usize) -> usize {
-    (budget * (10 - attempt.min(5)) / 10).max(1)
+/// that overshot once tends to overshoot by a little again, never below the written placeholders every translation
+/// keeps; admission still checks the full budget.
+fn requested(budget: usize, floor: usize, attempt: usize) -> usize {
+    (budget * (10 - attempt.min(5)) / 10).max(floor).max(1)
 }
 
 #[cfg(test)]
@@ -589,11 +590,38 @@ mod tests {
     fn asks_a_tighter_budget_on_each_retry_but_never_none() {
         assert_eq!(
             (0..ATTEMPTS)
-                .map(|attempt| requested(80, attempt))
+                .map(|attempt| requested(80, 0, attempt))
                 .collect::<Vec<_>>(),
             [80, 72, 64, 56, 48]
         );
-        assert_eq!(requested(1, 2), 1);
+        assert_eq!(requested(1, 0, 2), 1);
+        // A retry never asks for fewer characters than the placeholders every translation keeps.
+        assert_eq!(
+            (0..ATTEMPTS)
+                .map(|attempt| requested(34, 34, attempt))
+                .collect::<Vec<_>>(),
+            [34, 34, 34, 34, 34]
+        );
+    }
+
+    #[test]
+    fn a_later_fully_valid_answer_never_replaces_a_locale_already_admitted() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = catalog_of(&[("Greets people.", 80)]);
+        let (id, template) = catalog.templates().next().unwrap();
+        let fake = Fake::new(|template, call| {
+            if call == 0 {
+                let mut texts = tagged(template);
+                texts.insert("fr".to_owned(), "x".repeat(81));
+                Ok(texts)
+            } else {
+                Ok(tagged("Greets everyone."))
+            }
+        });
+        let pack = translate_in(&catalog, directory.path(), &fake, 1).unwrap();
+        let value: Value = serde_json::from_slice(pack.bytes()).unwrap();
+        assert_eq!(value["locales"]["de"][id], format!("de {template}"));
+        assert_eq!(value["locales"]["fr"][id], "fr Greets everyone.");
     }
 
     #[test]
