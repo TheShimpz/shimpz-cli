@@ -15,7 +15,7 @@ use ureq::Agent;
 use zeroize::Zeroizing;
 
 use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
-use crate::output;
+use crate::output::{self, Withheld};
 
 use super::deploy;
 use super::docker::{Engine, ResolvedRelease};
@@ -269,6 +269,9 @@ struct Context {
     /// Whether this run emptied the runtime state, directly or through the release-bound CLI it handed off to.
     recreated: Cell<bool>,
 }
+
+/// The Team controller's Docker socket and its group, or why the controller cannot use it.
+type ControllerSocket = Result<(PathBuf, u32), String>;
 
 struct RuntimeSnapshot {
     components: Vec<status_report::Observation>,
@@ -610,7 +613,7 @@ impl Context {
             return Ok(ApplyOutcome::Deferred);
         }
         let port = state::selected_port(installed)?;
-        let (docker_socket, docker_gid) = controller_socket?;
+        let (docker_socket, docker_gid) = controller_socket.release()?;
         let previous = installed
             .map(|_| backup_current(&self.paths, self.profile))
             .transpose()?;
@@ -716,14 +719,15 @@ impl Context {
 
     /// Make every release image available, check the existing Supervisor authentication against a changed Admin,
     /// and probe the Team controller's Docker socket access. The Admin check and the socket probe are independent
-    /// one-shot helpers, so they run beside the downloads, the probe once the exact Team image is admitted; every
-    /// answer is judged in the former sequential order. The socket probe's own answer is returned for the caller to
-    /// judge where it did before: after the activity deferral and the port selection.
+    /// one-shot helpers, so they run beside the downloads, the probe once the exact Team image is admitted. Each
+    /// check's warnings are withheld with its result and every answer is judged, and reported, in the former
+    /// sequential order; the socket probe's is returned for the caller to judge where it did before: after the
+    /// activity deferral and the port selection.
     fn download_and_admit_candidate(
         &self,
         release: &ResolvedRelease,
         installed: Option<&Installed>,
-    ) -> Result<Result<(PathBuf, u32), String>, String> {
+    ) -> Result<Withheld<ControllerSocket>, String> {
         output::progress("Downloading Shimpz Space (1/4): Admin...");
         self.engine
             .pull_exact(&release.metadata.admin, release::ADMIN)?;
@@ -735,22 +739,37 @@ impl Context {
         let (authentication, downloads, controller_socket) = thread::scope(|scope| {
             let authentication = changed_admin.then(|| {
                 output::progress("Checking existing Supervisor authentication...");
-                scope.spawn(|| engine.admin_authentication_state(&release.metadata.admin))
+                scope.spawn(|| {
+                    output::withhold(|| engine.admin_authentication_state(&release.metadata.admin))
+                })
             });
             output::progress("Downloading Shimpz Space (2/4): Team...");
-            let team = engine.pull_exact(&release.metadata.team, release::TEAM);
-            let controller_socket = team
-                .is_ok()
-                .then(|| scope.spawn(|| engine.controller_socket(profile, &release.metadata.team)));
-            let downloads = team
-                .and_then(|()| {
-                    output::progress("Downloading Shimpz Space (3/4): Brain...");
-                    engine.pull_exact(&release.metadata.brain, release::BRAIN)
+            let team =
+                output::withhold(|| engine.pull_exact(&release.metadata.team, release::TEAM));
+            let controller_socket = team.value().is_ok().then(|| {
+                scope.spawn(|| {
+                    output::withhold(|| engine.controller_socket(profile, &release.metadata.team))
                 })
-                .and_then(|()| {
-                    output::progress("Downloading Shimpz Space (4/4): network boundaries...");
-                    engine.pull_exact(&release.metadata.egress, release::EGRESS)
-                });
+            });
+            let mut downloads = vec![team];
+            for (progress, image, package) in [
+                (
+                    "Downloading Shimpz Space (3/4): Brain...",
+                    &release.metadata.brain,
+                    release::BRAIN,
+                ),
+                (
+                    "Downloading Shimpz Space (4/4): network boundaries...",
+                    &release.metadata.egress,
+                    release::EGRESS,
+                ),
+            ] {
+                if downloads.iter().any(|download| download.value().is_err()) {
+                    break;
+                }
+                output::progress(progress);
+                downloads.push(output::withhold(|| engine.pull_exact(image, package)));
+            }
             (
                 authentication.map(joined),
                 downloads,
@@ -759,7 +778,9 @@ impl Context {
         });
         if let Some(authentication) = authentication {
             let authentication_state = admin_authentication_state_probe_response(
-                &authentication.map_err(|error: String| candidate_admission_error(&error))?,
+                &authentication
+                    .release()
+                    .map_err(|error: String| candidate_admission_error(&error))?,
             )
             .map_err(|error| candidate_admission_error(&error))?;
             if authentication_state == AdminAuthenticationState::RecoveryRequired {
@@ -768,9 +789,10 @@ impl Context {
                 ));
             }
         }
-        downloads?;
-        Ok(controller_socket
-            .unwrap_or_else(|| Err("the Team controller socket probe did not run".into())))
+        for download in downloads {
+            download.release()?;
+        }
+        controller_socket.ok_or_else(|| "the Team controller socket probe did not run".into())
     }
 
     fn reset(&self) -> Result<String, String> {
@@ -2341,10 +2363,12 @@ fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, S
 }
 
 /// The answer of one concurrent helper; a worker that panicked answered nothing, which refuses the release.
-fn joined<T>(handle: thread::ScopedJoinHandle<'_, Result<T, String>>) -> Result<T, String> {
+fn joined<T>(
+    handle: thread::ScopedJoinHandle<'_, Withheld<Result<T, String>>>,
+) -> Withheld<Result<T, String>> {
     handle
         .join()
-        .unwrap_or_else(|_| Err("a Local release check failed".into()))
+        .unwrap_or_else(|_| output::withhold(|| Err("a Local release check failed".into())))
 }
 
 fn candidate_admission_error(error: &str) -> String {
@@ -3298,17 +3322,20 @@ mod tests {
         let candidate = release(2, 'b');
         let unchanged = installed_from(&release(1, 'a'));
         // The stand-in's empty inspection proves nothing present, so members are pulled; no probe runs. The Team
-        // socket probe runs beside the downloads, and its refusal is returned for the caller to judge.
+        // socket probe's refusal, whether the host has no socket or the stand-in refuses the probe, is returned for
+        // the caller to judge.
         let controller_socket = context
             .download_and_admit_candidate(&candidate, Some(&unchanged))
             .unwrap();
         assert_eq!(
-            controller_socket,
+            controller_socket.release(),
             Err("the Team controller cannot access the local Docker socket".into())
         );
-        let calls = fs::read_to_string(&log).unwrap();
-        assert!(!calls.contains("authentication_state"));
-        assert!(calls.contains("dst=/var/run/docker.sock"));
+        assert!(
+            !fs::read_to_string(&log)
+                .unwrap()
+                .contains("authentication_state")
+        );
         let changed = Installed {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64)),
             ..unchanged
@@ -3322,6 +3349,41 @@ mod tests {
             fs::read_to_string(&log)
                 .unwrap()
                 .contains("authentication_state")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_admission_reports_the_admin_refusal_before_a_failed_later_download() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        // Admin downloads; the Team download fails at once while the Admin check is still running and then fails.
+        let docker = home.path().join("docker");
+        crate::fake_tool::write(
+            &docker,
+            "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) case \"$*\" in *shimpz-admin*) exit 0 ;; *) exit 1 ;; esac ;;\n  run) sleep 0.2; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: true,
+            recreated: Cell::new(false),
+        };
+        let changed = Installed {
+            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64)),
+            ..installed_from(&release(1, 'a'))
+        };
+        let Err(error) = context.download_and_admit_candidate(&release(2, 'b'), Some(&changed))
+        else {
+            panic!("a refused Admin check admitted the release");
+        };
+        assert_eq!(
+            error,
+            candidate_admission_error(
+                "the selected Admin could not inspect the existing Supervisor authentication record"
+            )
         );
     }
 

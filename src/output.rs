@@ -1,5 +1,7 @@
 //! Accessible semantic terminal output.
 
+use std::cell::RefCell;
+
 use anstyle::{AnsiColor, Style};
 
 const ERROR: Style = AnsiColor::Red.on_default().bold();
@@ -12,8 +14,51 @@ pub(crate) fn error(message: &str) {
     anstream::eprintln!("{}", labeled(ERROR, "error", message));
 }
 
+thread_local! {
+    /// Warnings this thread withholds while it runs one check of a concurrent phase.
+    static WITHHELD: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
 pub(crate) fn warning(message: &str) {
-    anstream::eprintln!("{}", labeled(WARNING, "warning", message));
+    let withheld = WITHHELD.with_borrow_mut(|withheld| {
+        withheld
+            .as_mut()
+            .map(|warnings| warnings.push(message.to_owned()))
+            .is_some()
+    });
+    if !withheld {
+        anstream::eprintln!("{}", labeled(WARNING, "warning", message));
+    }
+}
+
+/// A check's result with the warnings it emitted, withheld until the caller judges it, so concurrent checks report
+/// in the order a sequential run would and a check that is never judged reports nothing.
+pub(crate) struct Withheld<T> {
+    value: T,
+    warnings: Vec<String>,
+}
+
+impl<T> Withheld<T> {
+    /// The result, for a decision that must not report it yet.
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Emit the withheld warnings, then hand over the result.
+    pub(crate) fn release(self) -> T {
+        for message in &self.warnings {
+            warning(message);
+        }
+        self.value
+    }
+}
+
+/// Run `check` on this thread, withholding every warning it emits.
+pub(crate) fn withhold<T>(check: impl FnOnce() -> T) -> Withheld<T> {
+    let outer = WITHHELD.replace(Some(Vec::new()));
+    let value = check();
+    let warnings = WITHHELD.replace(outer).unwrap_or_default();
+    Withheld { value, warnings }
 }
 
 pub(crate) fn success(message: &str) {
@@ -93,6 +138,19 @@ mod tests {
             assert!(rendered.ends_with(" message"));
             assert!(rendered.contains("\u{1b}["));
         }
+    }
+
+    #[test]
+    fn a_withheld_check_keeps_its_warnings_until_released_and_restores_direct_output() {
+        let withheld = super::withhold(|| {
+            super::warning("first");
+            let inner = super::withhold(|| super::warning("inner"));
+            super::warning("second");
+            inner
+        });
+        assert_eq!(withheld.warnings, ["first", "second"]);
+        assert_eq!(withheld.value.warnings, ["inner"]);
+        assert!(super::WITHHELD.with_borrow(Option::is_none));
     }
 
     #[test]
