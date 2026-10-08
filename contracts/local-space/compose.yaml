@@ -563,11 +563,12 @@ services:
     memswap_limit: 512m
     pids_limit: 128
     stop_grace_period: 15s
+    # Admin reads Team's bearer per request and needs neither Team nor Brain healthy to boot, so it waits only for
+    # Team to be created and started (Docker seeds Team's shared volumes at creation); the final health gate still
+    # requires every service healthy before an apply commits.
     depends_on:
       team:
-        condition: service_healthy
-      brain:
-        condition: service_healthy
+        condition: service_started
     logging:
       driver: none
     networks:
