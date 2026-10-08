@@ -837,6 +837,23 @@ impl Engine {
         }
     }
 
+    /// Remove stopped containers by id, keeping every volume they mount.
+    pub(crate) fn remove_containers(&self, containers: &[String]) -> Result<(), String> {
+        if containers.is_empty() {
+            return Ok(());
+        }
+        let mut arguments = vec![OsString::from("rm")];
+        arguments.extend(containers.iter().map(OsString::from));
+        if self
+            .run_quiet_status("Docker replaced container removal", arguments)?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err("could not remove every replaced Local container".into())
+        }
+    }
+
     fn pull(&self, reference: &str) -> Result<(), String> {
         let result = self.run_quiet_status(
             "Docker image download",

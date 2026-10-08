@@ -679,6 +679,7 @@ impl Context {
             .map_err(Some)?;
         state::clear_stopped(&self.paths).map_err(Some)?;
         output::progress("Starting the Shimpz Space...");
+        self.remove_replaced_containers(release).map_err(Some)?;
         let (started, timings) = self.engine.compose_up(&self.paths).map_err(Some)?;
         for timing in &timings {
             output::progress(timing);
@@ -715,6 +716,24 @@ impl Context {
             .map_err(|_| None)?;
         // The local success record is the commit's last write: it and the live environment prove the commit.
         state::write_private(&self.paths.status, &status).map_err(Some)
+    }
+
+    /// Stop, then remove, at once every Space container whose image the candidate replaces. Compose would otherwise
+    /// recreate them one after another in dependency order (create, stop, remove, rename each) before it starts any;
+    /// now it creates them fresh. Only containers the inventory proves are this project's are touched, each stop
+    /// honors the container's own stop timeout, no volume is removed, and Compose still reconciles every service.
+    /// This runs after the candidate replaced the live configuration, so any failure rolls back.
+    fn remove_replaced_containers(&self, release: &ResolvedRelease) -> Result<(), String> {
+        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
+        let records = resources::inspect_containers(
+            &self.engine,
+            &inventory.project_containers,
+            "{{.Name}}|{{.Config.Image}}",
+            "Local container image",
+        )?;
+        let replaced = replaced_containers(&inventory.project_containers, &records, release)?;
+        self.engine.stop_containers(&replaced)?;
+        self.engine.remove_containers(&replaced)
     }
 
     /// Make every release image available, check the existing Supervisor authentication against a changed Admin,
@@ -2362,6 +2381,42 @@ fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, S
     }
 }
 
+/// The long-running Space containers, among `identifiers` and their `name|image` records, whose image `release`
+/// replaces. The one-shot initializer is left to Compose, and any record that is not exactly a name and an image
+/// refuses the selection.
+fn replaced_containers(
+    identifiers: &[String],
+    records: &[String],
+    release: &ResolvedRelease,
+) -> Result<Vec<String>, String> {
+    let malformed = || "a Local container image record is malformed".to_owned();
+    if identifiers.len() != records.len() {
+        return Err(malformed());
+    }
+    let mut replaced = Vec::new();
+    for (identifier, record) in identifiers.iter().zip(records) {
+        let (name, image) = record.split_once('|').ok_or_else(malformed)?;
+        let candidate = match name {
+            "/shimpz-admin" => &release.metadata.admin,
+            "/shimpz-team" => &release.metadata.team,
+            "/shimpz-brain" => &release.metadata.brain,
+            "/shimpz-brain-egress"
+            | "/shimpz-assistant-egress"
+            | "/shimpz-assistant-release"
+            | "/shimpz-account-egress" => &release.metadata.egress,
+            "/shimpz-account-egress-init" => continue,
+            _ => return Err(malformed()),
+        };
+        if image.is_empty() {
+            return Err(malformed());
+        }
+        if image != candidate {
+            replaced.push(identifier.clone());
+        }
+    }
+    Ok(replaced)
+}
+
 /// The answer of one concurrent helper; a worker that panicked answered nothing, which refuses the release.
 fn joined<T>(
     handle: thread::ScopedJoinHandle<'_, Withheld<Result<T, String>>>,
@@ -3350,6 +3405,32 @@ mod tests {
                 .unwrap()
                 .contains("authentication_state")
         );
+    }
+
+    #[test]
+    fn only_long_running_containers_whose_image_the_release_replaces_are_removed_first() {
+        let candidate = release(2, 'b');
+        let old = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64));
+        let identifiers: Vec<String> = ["a", "t", "b", "e", "i"].map(String::from).to_vec();
+        let records = vec![
+            format!("/shimpz-admin|{old}"),
+            format!("/shimpz-team|{}", candidate.metadata.team),
+            format!("/shimpz-brain|{old}"),
+            format!("/shimpz-account-egress|{}", candidate.metadata.egress),
+            format!("/shimpz-account-egress-init|{old}"),
+        ];
+        assert_eq!(
+            replaced_containers(&identifiers, &records, &candidate).unwrap(),
+            ["a", "b"]
+        );
+        for refused in [
+            vec!["/shimpz-admin".to_owned()],
+            vec!["/shimpz-unknown|image".to_owned()],
+            vec!["/shimpz-admin|".to_owned()],
+        ] {
+            assert!(replaced_containers(&identifiers[..1], &refused, &candidate).is_err());
+        }
+        assert!(replaced_containers(&identifiers, &records[..4], &candidate).is_err());
     }
 
     #[cfg(unix)]
