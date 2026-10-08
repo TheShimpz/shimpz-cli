@@ -17,6 +17,9 @@ const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 const MAX_INVOCATION_BYTES: usize = 512 * 1_024;
 const MIN_PROTECTED_VALUE_CHARACTERS: usize = 8;
 const MAX_SECRET_INSPECTION_DEPTH: usize = 32;
+/// The most Stored Inputs one Action may use, and the most replay responses one Action may receive.
+const MAX_STORED_INPUTS: usize = 8;
+const MAX_HUMAN_RESPONSES: usize = 8;
 
 struct Invocation(Value);
 
@@ -30,6 +33,23 @@ impl Invocation {
             .as_array_mut()
             .ok_or_else(|| "Action invocation is invalid".to_owned())?
             .push(response);
+        Ok(())
+    }
+
+    /// Hold one answered Stored Input for the rest of this run, injected as Team would after sealing it.
+    fn insert_stored_input(&mut self, stored_input: &str, value: Value) -> Result<(), String> {
+        let stored_inputs = self
+            .0
+            .get_mut("stored_inputs")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "Action invocation is invalid".to_owned())?;
+        if stored_inputs.contains_key(stored_input) {
+            return Err("Action requested a Stored Input it was already given".into());
+        }
+        if stored_inputs.len() >= MAX_STORED_INPUTS || !value.is_string() {
+            return Err("Action invocation is invalid".into());
+        }
+        stored_inputs.insert(stored_input.to_owned(), value);
         Ok(())
     }
 
@@ -158,7 +178,8 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
     let integrations = integration_tokens(&integration_ids)?;
     let mut request = request(input, &integrations)?;
     let mut secret_answered = false;
-    for _ in 0..=8 {
+    // Each round answers one request: at most every replay response and every Stored Input, then the result.
+    for _ in 0..=(MAX_HUMAN_RESPONSES + MAX_STORED_INPUTS) {
         let serialized = request.serialized()?;
         let output = assistant.invoke(action_id, serialized.as_slice())?;
         let response = parse_response(&output)?;
@@ -180,9 +201,14 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
             }
             ActionResponse::Request(frame) => {
                 let display = frame.display(&assistant.render(&frame.frame())?)?;
-                let response = answer(&frame, &display)?;
-                request.push_response(response)?;
-                secret_answered = frame.contains_secret_input();
+                let mut response = answer(&frame, &display)?;
+                // A Stored Input is answered by injection, never as a replay response, as Team seals it (ADR-0059).
+                if let Some(stored_input) = frame.stored_input() {
+                    request.insert_stored_input(stored_input, response["value"].take())?;
+                } else {
+                    request.push_response(response)?;
+                    secret_answered = frame.contains_secret_input();
+                }
             }
             ActionResponse::StoredInputRejected(stored_input) => {
                 return Err(format!("Action rejected Stored Input {stored_input}"));
@@ -403,6 +429,47 @@ mod tests {
                 "files": {},
                 "operation_id": operation_id
             })
+        );
+    }
+
+    #[test]
+    fn injects_each_answered_stored_input_once_and_protects_it() {
+        let integrations = BTreeMap::new();
+        let mut invocation =
+            request(&Input::Inline("{}".into()), &integrations).expect("valid invocation");
+        invocation
+            .insert_stored_input("meta-access-token", Value::String("test-token".into()))
+            .expect("first slot");
+        invocation
+            .insert_stored_input("meta-app-secret", Value::String("test-secret".into()))
+            .expect("second slot");
+        assert_eq!(
+            invocation.0["stored_inputs"],
+            serde_json::json!({
+                "meta-access-token": "test-token",
+                "meta-app-secret": "test-secret"
+            })
+        );
+        assert!(invocation.0.get("responses").is_none());
+        assert!(invocation.response_exposes_secret(&serde_json::json!({"echo": "test-secret"})));
+        assert_eq!(
+            invocation.insert_stored_input("meta-app-secret", Value::String("again".into())),
+            Err("Action requested a Stored Input it was already given".into())
+        );
+        assert!(
+            invocation
+                .insert_stored_input("other-slot", Value::Bool(true))
+                .is_err()
+        );
+        for index in 2..MAX_STORED_INPUTS {
+            invocation
+                .insert_stored_input(&format!("slot-{index}"), Value::String("value".into()))
+                .expect("up to eight slots");
+        }
+        assert!(
+            invocation
+                .insert_stored_input("slot-ninth", Value::String("value".into()))
+                .is_err()
         );
     }
 

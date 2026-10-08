@@ -82,6 +82,11 @@ impl HumanRequest {
         self.kind == "input:password"
     }
 
+    /// The declared Stored Input a password request names, which Team answers only by injection.
+    pub(crate) fn stored_input(&self) -> Option<&str> {
+        self.frame.get("stored_input").and_then(Value::as_str)
+    }
+
     /// The exact canonical frame, for the SDK's English rendering.
     pub(crate) fn frame(&self) -> Value {
         Value::Object(self.frame.clone())
