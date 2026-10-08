@@ -3029,6 +3029,39 @@ mod tests {
         assert!(!context.paths.home.join("release.env.tmp").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_resolution_reports_an_unreadable_copy_together_with_its_failed_cleanup() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let developer_release = developer(9, '1');
+        let docker = developer_docker(home.path(), &developer_release);
+        // The copy leaves a directory where the metadata belongs: it can be neither read nor unlinked.
+        let copy = format!(
+            "cat '{}' > \"$3\"",
+            home.path().join("developer.env").display()
+        );
+        let script = fs::read_to_string(&docker).unwrap();
+        assert!(script.contains(&copy));
+        crate::fake_tool::write(&docker, script.replace(&copy, "mkdir \"$3\""));
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+        let Err(error) = context.resolve(Some(&developer_release.reference)) else {
+            panic!("an unreadable release metadata copy was admitted");
+        };
+        assert!(
+            error.starts_with("could not read Local release metadata: ")
+                && error.contains("; could not remove temporary release metadata: "),
+            "{error}"
+        );
+    }
+
     /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set.
     #[cfg(unix)]
     fn channel_docker(
@@ -3728,16 +3761,29 @@ mod tests {
                 .start_or_roll_back(&candidate, Some(backup))
                 .is_err()
         );
-        // The candidate reached Compose: nothing was replaced, so nothing was stopped or removed first.
+        // The candidate's own Compose up ran first; the rollback then took the Space down and brought the previous
+        // release up. Nothing was replaced, so nothing was stopped or removed first.
         let calls = fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+        let candidate_up = lines.iter().position(|line| {
+            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+        });
+        let rollback_down = lines.iter().position(|line| {
+            line.starts_with("compose ") && line.ends_with(" down --remove-orphans")
+        });
+        let restoration_up = lines.iter().rposition(|line| {
+            line.starts_with("compose --project-directory ") && line.contains(" up -d ")
+        });
         assert!(
-            calls
-                .lines()
-                .any(|line| line.starts_with("compose ") && line.contains(" up -d "))
+            matches!(
+                (candidate_up, rollback_down, restoration_up),
+                (Some(up), Some(down), Some(restored)) if up < down && down < restored
+            ),
+            "{calls}"
         );
         assert!(
-            !calls
-                .lines()
+            !lines
+                .iter()
                 .any(|line| line.starts_with("stop ") || line.starts_with("rm "))
         );
 

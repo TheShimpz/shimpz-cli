@@ -190,9 +190,14 @@ impl Engine {
                 Err(cleanup) => format!("{failure}; {cleanup}"),
             });
         }
-        let document =
-            document.ok_or_else(|| "Local release metadata was not copied".to_owned())??;
-        cleaned?;
+        let document = match (
+            document.unwrap_or_else(|| Err("Local release metadata was not copied".into())),
+            cleaned,
+        ) {
+            (Ok(document), Ok(())) => document,
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+            (Err(error), Err(cleanup)) => return Err(format!("{error}; {cleanup}")),
+        };
         let state_epoch = self.run_output([
             "image",
             "inspect",
