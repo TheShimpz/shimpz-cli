@@ -114,7 +114,7 @@ pub(crate) fn parse_state_epoch(value: &str) -> Result<u32, String> {
 
 /// The base64 P-256 `SubjectPublicKeyInfo` whose private half, held only by `publish.yml`, signs every published
 /// release set; `docs/static/install.sh` and `.scripts/local-release/signing-key.pem` pin the same key.
-pub(crate) const PUBLISHED_SIGNING_KEY: &str = "OWNER-PROVIDED-P256-SPKI-BASE64";
+pub(crate) const PUBLISHED_SIGNING_KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsiSmhIGW2Txt7M3SuXQEEJZWqPQjlNkkH59ClG3czSQKkziiKEvnRwYqaVYk5Yosa6AUalFtdQz5XknSlGHPLw==";
 
 /// The uncompressed P-256 point of a base64 `SubjectPublicKeyInfo`.
 fn public_point(key: &str) -> Option<Vec<u8>> {
