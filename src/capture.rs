@@ -333,7 +333,7 @@ mod tests {
     fn a_host_command_past_its_deadline_is_terminated_and_reaped() {
         let started = std::time::Instant::now();
         let failure = super::bounded_within(
-            std::process::Command::new("/bin/sh").args(["-c", "sleep 60"]),
+            std::process::Command::new("/bin/sh").args(["-c", "exec sleep 60"]),
             16,
             16,
             std::time::Duration::from_millis(200),
@@ -349,10 +349,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_host_command_that_ignores_termination_is_killed_after_the_grace() {
+        // In its own group, so the kill also ends the loop's current sleep and the test leaves no process behind.
         let mut child = super::spawn_in(
             std::process::Command::new("/bin/sh")
                 .args(["-c", "trap '' TERM; while :; do sleep 1; done"]),
-            false,
+            true,
         )
         .unwrap();
         let started = std::time::Instant::now();
@@ -370,9 +371,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_deadline_bounds_a_stream_a_descendant_keeps_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let record = directory.path().join("descendant");
         let started = std::time::Instant::now();
         let failure = super::bounded_within(
-            std::process::Command::new("/bin/sh").args(["-c", "sleep 5 & exit 0"]),
+            std::process::Command::new("/bin/sh").args([
+                "-c",
+                "sleep 60 & echo $! > \"$1\"; exit 0",
+                "holder",
+                record.to_str().unwrap(),
+            ]),
             16,
             16,
             std::time::Duration::from_millis(300),
@@ -383,6 +391,17 @@ mod tests {
             super::Failure::TimedOut { stopped: true }
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // The descendant shares this test's process group, so only the test itself can end it.
+        let descendant: i32 = std::fs::read_to_string(&record)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(descendant).unwrap(),
+            rustix::process::Signal::KILL,
+        )
+        .unwrap();
     }
 
     /// In its own process group, a host command's descendants are stopped with it.

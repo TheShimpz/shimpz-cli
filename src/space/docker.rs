@@ -2610,7 +2610,7 @@ mod tests {
     #[test]
     fn a_docker_call_past_its_deadline_is_stopped_and_reported() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 60"]);
+        command.args(["-c", "exec sleep 60"]);
         let started = Instant::now();
 
         let error = quiet_status(
