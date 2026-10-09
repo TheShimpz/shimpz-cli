@@ -78,8 +78,10 @@
   `install`, `reset`, `start`, `status`, `stop`, `update`, and `upgrade`; help and version flags are syntax, not product
   resources.
   Expanding this set requires an explicit ontology and authority review plus parser tests that prove the resulting
-  closed set. The `space` alias is retired and rejected.
+  closed set.
 - CLI placement never transfers domain authority. Preserve the producing service, authorizing principal, exact
   target, response binding, and fail-closed ambiguity checks behind every command.
-- Retired command spellings are rejected rather than accepted through aliases, fallbacks, or hidden compatibility
-  parsing.
+- The closed parser rejects every command spelling outside the current set; never accept a former spelling through
+  an alias, fallback, or hidden compatibility parsing. Tests cover only the current contract and its security
+  boundaries: no migration, transition, or retirement-absence test. Prove a removal by deleting the code and the
+  tests that exist solely for it; generic validation and security coverage stay.
