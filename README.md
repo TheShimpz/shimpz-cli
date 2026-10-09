@@ -26,7 +26,7 @@ shimpz assistant develop claude hello-assistant --yolo
 shimpz assistant check
 shimpz assistant run create-dns --input '{"zone":"example.com"}'
 shimpz assistant stage
-shimpz assistant publish --visibility public
+shimpz assistant publish
 shimpz install
 shimpz status
 shimpz start

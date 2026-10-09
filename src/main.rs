@@ -89,10 +89,9 @@ fn run(command: &Command) -> ExitCode {
         Command::Assistant(AssistantCommand::Unstage { project }) => {
             (unstage::run(project), Presentation::Success)
         }
-        Command::Assistant(AssistantCommand::Publish {
-            project,
-            visibility,
-        }) => (publish::run(project, *visibility), Presentation::Success),
+        Command::Assistant(AssistantCommand::Publish { project }) => {
+            (publish::run(project), Presentation::Success)
+        }
         Command::Install(options) => (
             space::lifecycle::install(options),
             if options.print_graph.is_some() {

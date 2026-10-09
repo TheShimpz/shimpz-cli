@@ -90,7 +90,7 @@ fn each_assistant_command_prints_its_own_help() {
         (
             &["assistant", "publish", "--help"][..],
             "shimpz assistant publish\n",
-            "shimpz assistant publish --visibility <private|public> [--project <path>]",
+            "shimpz assistant publish [--project <path>]",
         ),
     ]);
 }

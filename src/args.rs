@@ -92,7 +92,6 @@ pub(crate) enum AssistantCommand {
     },
     Publish {
         project: PathBuf,
-        visibility: PublicationVisibility,
     },
 }
 
@@ -107,21 +106,6 @@ pub(crate) enum AuthAction {
     Login,
     Status,
     Logout,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PublicationVisibility {
-    Private,
-    Public,
-}
-
-impl PublicationVisibility {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::Public => "public",
-        }
-    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -477,39 +461,9 @@ fn parse_assistant_publish(arguments: &[String]) -> Result<Invocation, String> {
     if arguments == ["--help"] || arguments == ["-h"] {
         return Ok(Invocation::Help(Topic::AssistantPublish));
     }
-    let mut project = PathBuf::from(".");
-    let mut project_seen = false;
-    let mut visibility = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        let option = &arguments[index];
-        let value = arguments
-            .get(index + 1)
-            .ok_or_else(|| format!("{option} requires a value"))?;
-        match option.as_str() {
-            "--project" if !project_seen => {
-                project = PathBuf::from(value);
-                project_seen = true;
-            }
-            "--visibility" if visibility.is_none() => {
-                visibility = Some(match value.as_str() {
-                    "private" => PublicationVisibility::Private,
-                    "public" => PublicationVisibility::Public,
-                    _ => return Err("visibility must be private or public".into()),
-                });
-            }
-            "--project" | "--visibility" => return Err(format!("{option} was repeated")),
-            _ => return Err(format!("unknown option {option}")),
-        }
-        index += 2;
-    }
-    let visibility =
-        visibility.ok_or_else(|| "assistant publish requires --visibility".to_owned())?;
+    let project = project_option(arguments, "publish")?;
     Ok(Invocation::Execute(Command::Assistant(
-        AssistantCommand::Publish {
-            project,
-            visibility,
-        },
+        AssistantCommand::Publish { project },
     )))
 }
 
@@ -836,32 +790,18 @@ mod tests {
     #[test]
     fn parses_publish_with_a_project_or_current_directory() {
         assert_eq!(
-            parse(strings(&[
-                "assistant",
-                "publish",
-                "--visibility",
-                "private",
-            ])),
+            parse(strings(&["assistant", "publish"])),
             Ok(Invocation::Execute(Command::Assistant(
                 AssistantCommand::Publish {
                     project: PathBuf::from("."),
-                    visibility: PublicationVisibility::Private,
                 }
             )))
         );
         assert_eq!(
-            parse(strings(&[
-                "assistant",
-                "publish",
-                "--project",
-                "hello",
-                "--visibility",
-                "public"
-            ])),
+            parse(strings(&["assistant", "publish", "--project", "hello"])),
             Ok(Invocation::Execute(Command::Assistant(
                 AssistantCommand::Publish {
                     project: PathBuf::from("hello"),
-                    visibility: PublicationVisibility::Public,
                 }
             )))
         );
@@ -870,14 +810,8 @@ mod tests {
             Err("--project requires a value".into())
         );
         assert_eq!(
-            parse(strings(&["assistant", "publish"])),
-            Err("assistant publish requires --visibility".into())
-        );
-        assert_eq!(
-            parse(strings(
-                &["assistant", "publish", "--visibility", "listed",]
-            )),
-            Err("visibility must be private or public".into())
+            parse(strings(&["assistant", "publish", "--visibility", "public"])),
+            Err("assistant publish accepts only --project <path>".into())
         );
     }
 

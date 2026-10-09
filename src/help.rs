@@ -104,8 +104,8 @@ Assistant development:
                                          Stage an unpublished snapshot for Local Admin.
   shimpz assistant unstage [--project <path>]
                                          Permanently remove its Local snapshots.
-  shimpz assistant publish --visibility <private|public> [--project <path>]
-                                         Publish an immutable Assistant release.
+  shimpz assistant publish [--project <path>]
+                                         Publish an immutable public Assistant release.
 
 Creator account:
   shimpz auth [login|status|logout]       Manage Creator authentication.
@@ -146,8 +146,7 @@ Operations:
   run <action-id> [options]              Run one Action locally.
   stage [--project <path>]               Stage an unpublished Local snapshot.
   unstage [--project <path>]             Permanently remove its Local snapshots.
-  publish --visibility <private|public> [--project <path>]
-                                         Publish an immutable release.
+  publish [--project <path>]             Publish an immutable public release.
 
 Run 'shimpz assistant <operation> --help' for operation details.
 ";
@@ -247,14 +246,15 @@ Uninstall the Assistant from every Local Team first. Run 'shimpz assistant stage
 const ASSISTANT_PUBLISH: &str = "\
 shimpz assistant publish
 
-Publish an immutable Assistant release.
+Publish an immutable public Assistant release.
 
 Usage:
-  shimpz assistant publish --visibility <private|public> [--project <path>]
+  shimpz assistant publish [--project <path>]
 
 Options:
-  --visibility <private|public>          Set the publication visibility.
   --project <path>                       Project directory. Defaults to the current directory.
+
+Install a published Assistant into a Local Team from authenticated Local Admin.
 ";
 
 const AUTH: &str = "\
