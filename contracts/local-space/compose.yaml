@@ -482,11 +482,13 @@ services:
     healthcheck:
       start_period: 5s
       start_interval: 250ms
+    # Brain does no startup work and reads Team's runtime bearer per request, so it waits only for Team and its egress
+    # proxy to start; the final health gate still requires every service healthy before an apply commits.
     depends_on:
       team:
-        condition: service_healthy
+        condition: service_started
       shimpz-brain-egress:
-        condition: service_healthy
+        condition: service_started
     logging:
       driver: none
     networks:
