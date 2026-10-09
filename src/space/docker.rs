@@ -7,6 +7,7 @@ use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,6 +42,56 @@ const DOCKER_COMPOSE: Duration = Duration::from_mins(10);
 const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
 /// How long a reader may take to deliver a stream after Docker exited, before its output is treated as unavailable.
 const STREAM_GRACE: Duration = Duration::from_secs(5);
+/// Distinguishes the one-shot helper containers this process names.
+static HELPER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A container name owned by this process for one helper of `kind`, so a helper whose Docker client was stopped can
+/// still be removed: stopping the client never stops its container.
+fn helper_name(kind: &str) -> String {
+    format!(
+        "shimpz-{kind}-{}-{}",
+        std::process::id(),
+        HELPER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Run one quick Docker call with every stream closed, within its deadline.
+fn silent_status<const N: usize>(
+    docker: &Path,
+    arguments: [&str; N],
+) -> Result<ExitStatus, String> {
+    let mut child = capture::spawn(
+        Command::new(docker)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|error| format!("could not execute Docker: {error}"))?;
+    capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
+        .map_err(|failure| wait_failure(DOCKER_QUICK, failure))
+}
+
+/// Remove a helper container by its exact name and prove it absent: Docker answers successfully that no container,
+/// running or stopped, has that name.
+fn remove_helper(docker: &Path, name: &str) -> Result<(), String> {
+    let _ = silent_status(docker, ["rm", "--force", name]);
+    match output(
+        docker,
+        [
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            &format!("name=^/{name}$"),
+        ],
+    ) {
+        Ok(listed) if listed.trim().is_empty() => Ok(()),
+        _ => Err(format!(
+            "the helper container {name} could not be proved removed and may still be running; run docker rm --force {name}"
+        )),
+    }
+}
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 /// The most output one captured Docker command may return on either stream before it is stopped.
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -83,6 +134,8 @@ pub(crate) struct Engine {
 /// helper reads an empty input, which its script refuses before opening any file.
 pub(crate) struct PendingStatus {
     child: Option<Child>,
+    docker: PathBuf,
+    name: String,
 }
 
 /// Why a status projection did not complete: the helper refused or failed the write and was reaped, or it could not
@@ -120,10 +173,19 @@ impl PendingStatus {
             capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
             sent,
         ) {
-            (Err(capture::Failure::TimedOut { stopped: true }), _) => Err(
-                ProjectionFailure::NotProjected(docker_timed_out(DOCKER_QUICK, true)),
-            ),
+            // The stopped client leaves its container behind, which could still write the document later; it is
+            // removed, and proved gone, before anything else may project a status.
+            (Err(capture::Failure::TimedOut { stopped: true }), _) => {
+                match remove_helper(&self.docker, &self.name) {
+                    Ok(()) => Err(ProjectionFailure::NotProjected(docker_timed_out(
+                        DOCKER_QUICK,
+                        true,
+                    ))),
+                    Err(cause) => Err(ProjectionFailure::Unreaped(cause)),
+                }
+            }
             (Err(failure), sent) => {
+                let _ = remove_helper(&self.docker, &self.name);
                 let unreaped = format!(
                     "the Local release status helper could not be reaped: {}",
                     wait_failure(DOCKER_QUICK, failure)
@@ -148,7 +210,10 @@ impl PendingStatus {
         };
         drop(child.stdin.take());
         match capture::wait(&mut child, Instant::now() + DOCKER_QUICK) {
-            Ok(_) | Err(capture::Failure::TimedOut { stopped: true }) => Ok(()),
+            Ok(_) => Ok(()),
+            Err(capture::Failure::TimedOut { stopped: true }) => {
+                remove_helper(&self.docker, &self.name)
+            }
             Err(failure) => Err(format!(
                 "the unused Local release status helper could not be reaped: {}",
                 wait_failure(DOCKER_QUICK, failure)
@@ -162,7 +227,9 @@ impl Drop for PendingStatus {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             drop(child.stdin.take());
-            let _ = capture::wait(&mut child, Instant::now() + DOCKER_QUICK);
+            if capture::wait(&mut child, Instant::now() + DOCKER_QUICK).is_err() {
+                let _ = remove_helper(&self.docker, &self.name);
+            }
         }
     }
 }
@@ -462,32 +529,23 @@ impl Engine {
             RUNTIME_STATE_RESET_CONTAINER,
             volumes,
         );
-        let status = match self.run_quiet_status_within(
+        let cause = match self.run_quiet_status_within(
             "Docker runtime state reset",
             DOCKER_STATE_RESET,
             arguments,
         ) {
-            Ok(status) => status,
-            // A stopped Docker client does not stop its container, so the deletion is ended here and proved gone
-            // before anything may start on these volumes again.
-            Err(error) => return Err(self.end_runtime_state_reset(error)),
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => "the Local runtime state could not be recreated".to_owned(),
+            Err(error) => error,
         };
-        if status.success() {
-            Ok(())
-        } else {
-            Err("the Local runtime state could not be recreated".into())
-        }
-    }
-
-    /// Remove the runtime state reset helper after its run failed, and prove it absent.
-    fn end_runtime_state_reset(&self, cause: String) -> String {
-        let _ = self.silent_status(["rm", "--force", RUNTIME_STATE_RESET_CONTAINER]);
-        match self.silent_status(["container", "inspect", RUNTIME_STATE_RESET_CONTAINER]) {
-            Ok(status) if !status.success() => cause,
-            _ => format!(
-                "{cause}; the runtime state reset container may still be running; run docker rm --force {RUNTIME_STATE_RESET_CONTAINER}"
-            ),
-        }
+        // A stopped or failed Docker client does not prove its container ended, so the deletion is ended here and
+        // proved gone before anything may start on these volumes again.
+        Err(
+            match remove_helper(&self.docker, RUNTIME_STATE_RESET_CONTAINER) {
+                Ok(()) => cause,
+                Err(cleanup) => format!("{cause}; {cleanup}"),
+            },
+        )
     }
 
     /// Whether this daemon's store holds exactly `reference` as a repository digest for this Space's platform.
@@ -610,27 +668,10 @@ impl Engine {
     }
 
     fn remove_authentication_probe(&self, container: &str) -> Result<bool, String> {
-        if !self
-            .silent_status(["container", "inspect", container])?
-            .success()
-        {
+        if !silent_status(&self.docker, ["container", "inspect", container])?.success() {
             return Ok(true);
         }
-        Ok(self.silent_status(["rm", "--force", container])?.success())
-    }
-
-    /// Run one quick Docker call with every stream closed, within its deadline.
-    fn silent_status<const N: usize>(&self, arguments: [&str; N]) -> Result<ExitStatus, String> {
-        let mut child = capture::spawn(
-            Command::new(&self.docker)
-                .args(arguments)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-        capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
-            .map_err(|failure| wait_failure(DOCKER_QUICK, failure))
+        Ok(silent_status(&self.docker, ["rm", "--force", container])?.success())
     }
 
     #[cfg(unix)]
@@ -735,6 +776,7 @@ impl Engine {
             .stderr
             .take()
             .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
+        let group = capture::Target::of(&child);
         let (sender, receiver) = mpsc::channel();
         // The reader is never joined: a process Compose started may still hold its stream after a stop.
         thread::spawn(move || {
@@ -748,7 +790,11 @@ impl Engine {
         })?;
         let (timings, diagnostic) =
             capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
-                .unwrap_or_else(|| Err("Docker Compose progress could not be read".to_owned()))?;
+                .unwrap_or_else(|| {
+                    // A descendant still holds the stream after Compose exited; it ends with Compose's own group.
+                    group.kill_remaining_group();
+                    Err("Docker Compose progress could not be read".to_owned())
+                })?;
         if !status.success() {
             crate::output::warning(&format!(
                 "Docker Compose failed; Docker returned {status}: {}",
@@ -888,8 +934,9 @@ impl Engine {
             return Err("the Local release status volume is not owned by this Space".into());
         }
         let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
+        let name = helper_name("release-status");
         let arguments =
-            status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image);
+            status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image, &name);
         let child = capture::spawn(
             Command::new(&self.docker)
                 .args(arguments)
@@ -898,7 +945,11 @@ impl Engine {
                 .stderr(Stdio::null()),
         )
         .map_err(|error| format!("could not execute Docker: {error}"))?;
-        Ok(Some(PendingStatus { child: Some(child) }))
+        Ok(Some(PendingStatus {
+            child: Some(child),
+            docker: self.docker.clone(),
+            name,
+        }))
     }
 
     pub(crate) fn project_reset_capability(
@@ -913,6 +964,7 @@ impl Engine {
         let mount = format!(
             "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
         );
+        let name = helper_name("reset-capability");
         let arguments = reset_capability_arguments(
             self.platform,
             &self.cpuset,
@@ -920,6 +972,7 @@ impl Engine {
             admin_image,
             true,
             reset_capability_write_script(),
+            &name,
         );
         let mut child = capture::spawn(
             Command::new(&self.docker)
@@ -937,9 +990,16 @@ impl Engine {
                     "the Local reset capability could not be sent to Docker".to_owned()
                 })
             });
-        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped.
-        let status = capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
-            .map_err(|failure| wait_failure(DOCKER_QUICK, failure))?;
+        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped, and its
+        // container, which a stopped client leaves behind, is removed and proved gone.
+        let status =
+            capture::wait(&mut child, Instant::now() + DOCKER_QUICK).map_err(|failure| {
+                let cause = wait_failure(DOCKER_QUICK, failure);
+                match remove_helper(&self.docker, &name) {
+                    Ok(()) => cause,
+                    Err(cleanup) => format!("{cause}; {cleanup}"),
+                }
+            })?;
         sent?;
         if status.success() {
             Ok(())
@@ -956,6 +1016,7 @@ impl Engine {
         let mount = format!(
             "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
         );
+        let name = helper_name("reset-capability");
         let arguments = reset_capability_arguments(
             self.platform,
             &self.cpuset,
@@ -963,11 +1024,15 @@ impl Engine {
             admin_image,
             false,
             reset_capability_clear_script(),
+            &name,
         );
-        if self
-            .run_quiet_status("Docker reset capability cleanup", arguments)?
-            .success()
-        {
+        let cleared = self
+            .run_quiet_status("Docker reset capability cleanup", arguments)
+            .map_err(|cause| match remove_helper(&self.docker, &name) {
+                Ok(()) => cause,
+                Err(cleanup) => format!("{cause}; {cleanup}"),
+            })?;
+        if cleared.success() {
             Ok(())
         } else {
             Err("the Local reset capability could not be removed".into())
@@ -1444,13 +1509,14 @@ fn status_projection_arguments(
     cpuset: &str,
     mount: &str,
     admin_image: &str,
+    name: &str,
 ) -> Vec<OsString> {
     let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
     python_helper_arguments(
         platform,
         cpuset,
         "64m",
-        &["--interactive", "--user", "1000:1000"],
+        &["--interactive", "--user", "1000:1000", "--name", name],
         mount,
         admin_image,
         &["-c", script],
@@ -1472,11 +1538,12 @@ fn reset_capability_arguments(
     admin_image: &str,
     interactive: bool,
     script: &str,
+    name: &str,
 ) -> Vec<OsString> {
     let options: &[&str] = if interactive {
-        &["--interactive", "--user", "1000:1000"]
+        &["--interactive", "--user", "1000:1000", "--name", name]
     } else {
-        &["--user", "1000:1000"]
+        &["--user", "1000:1000", "--name", name]
     };
     python_helper_arguments(
         platform,
@@ -1613,6 +1680,7 @@ fn execute_quiet(command: &mut Command, budget: Duration) -> Result<(ExitStatus,
         .stderr
         .take()
         .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
+    let group = capture::Target::of(&child);
     let (sender, receiver) = mpsc::channel();
     // The reader is never joined: a process Docker started may still hold its stream after a stop.
     thread::spawn(move || {
@@ -1621,7 +1689,11 @@ fn execute_quiet(command: &mut Command, budget: Duration) -> Result<(ExitStatus,
     let status =
         capture::wait(&mut child, deadline).map_err(|failure| wait_failure(budget, failure))?;
     let captured = capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
-        .unwrap_or_else(|| Err("Docker diagnostic output could not be read".to_owned()))?;
+        .unwrap_or_else(|| {
+            // A descendant still holds the stream after Docker exited; it ends with Docker's own group.
+            group.kill_remaining_group();
+            Err("Docker diagnostic output could not be read".to_owned())
+        })?;
     let diagnostic = render_diagnostic(&captured);
     Ok((status, diagnostic))
 }
@@ -1668,6 +1740,7 @@ fn execute_bounded_stdout(
         .stdout
         .take()
         .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
+    let group = capture::Target::of(&child);
     let (sender, receiver) = mpsc::channel();
     // The reader is never joined: a process Docker started may still hold its stream after a stop.
     thread::spawn(move || {
@@ -1680,6 +1753,8 @@ fn execute_bounded_stdout(
     };
     let captured =
         capture::receive(&receiver, Instant::now() + STREAM_GRACE).unwrap_or_else(|| {
+            // A descendant still holds the stream after Docker exited; it ends with Docker's own group.
+            group.kill_remaining_group();
             Err("Docker authentication-state output could not be read".to_owned())
         })?;
     Ok(BoundedOutput::Completed {
@@ -2489,45 +2564,46 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    /// A stopped Docker client does not stop the deletion container it ran, so a failed runtime state reset removes
-    /// it and reports success only once Docker proves it gone.
+    /// A stopped Docker client does not stop the container it ran, so a helper whose run failed is removed by its
+    /// owned name, and only Docker's successful answer that no container has that name proves it gone.
     #[cfg(unix)]
     #[test]
-    fn a_failed_runtime_state_reset_removes_its_container_and_proves_it_gone() {
+    fn a_failed_helper_is_removed_by_name_and_proved_gone() {
         let temporary = tempfile::tempdir().unwrap();
         let docker = temporary.path().join("docker");
         let calls = temporary.path().join("calls");
-        for (inspect, expected) in [
-            ("1", "timed out".to_owned()),
-            (
-                "0",
-                format!(
-                    "timed out; the runtime state reset container may still be running; run docker rm --force {RUNTIME_STATE_RESET_CONTAINER}"
-                ),
-            ),
+        let gone = "the helper container shimpz-x-1-0 could not be proved removed and may still be running; run docker rm --force shimpz-x-1-0";
+        for (listing, expected) in [
+            ("exit 0", Ok(())),
+            ("echo 0123456789ab", Err(gone.to_owned())),
+            ("exit 1", Err(gone.to_owned())),
         ] {
             crate::fake_tool::write(
                 &docker,
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in container) exit {inspect} ;; esac\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in ps) {listing} ;; *) exit 1 ;; esac\n",
                     calls.display()
                 ),
             );
             let _ = fs::remove_file(&calls);
-            let engine = Engine::with_docker(docker.clone());
 
-            assert_eq!(engine.end_runtime_state_reset("timed out".into()), expected);
+            assert_eq!(
+                remove_helper(&docker, "shimpz-x-1-0"),
+                expected,
+                "{listing}"
+            );
             assert_eq!(
                 fs::read_to_string(&calls)
                     .unwrap()
                     .lines()
                     .collect::<Vec<_>>(),
                 [
-                    format!("rm --force {RUNTIME_STATE_RESET_CONTAINER}"),
-                    format!("container inspect {RUNTIME_STATE_RESET_CONTAINER}"),
+                    "rm --force shimpz-x-1-0",
+                    "ps --all --quiet --filter name=^/shimpz-x-1-0$",
                 ]
             );
         }
+        assert_ne!(helper_name("x"), helper_name("x"));
     }
 
     #[cfg(unix)]
@@ -2606,6 +2682,7 @@ mod tests {
             "0-3",
             "type=volume,src=release,dst=/run/release,volume-nocopy",
             &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
+            "shimpz-release-status-1-0",
         );
 
         assert_eq!(arguments[0], "run");
@@ -2629,6 +2706,7 @@ mod tests {
             &image,
             true,
             reset_capability_write_script(),
+            "shimpz-reset-capability-1-0",
         );
 
         for required in [
@@ -2662,6 +2740,7 @@ mod tests {
             &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
             false,
             reset_capability_clear_script(),
+            "shimpz-reset-capability-1-1",
         );
 
         assert!(arguments.iter().all(|argument| argument != "--interactive"));
@@ -2727,8 +2806,8 @@ mod tests {
     fn admin_helpers_share_one_exact_hardened_argument_list() {
         let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
         let (platform, cpuset) = ("linux/amd64", "0-3");
-        let user = ["--user", "1000:1000"];
-        let stdin_user = ["--interactive", "--user", "1000:1000"];
+        let user = ["--user", "1000:1000", "--name", "n"];
+        let stdin_user = ["--interactive", "--user", "1000:1000", "--name", "n"];
         let admin = [
             "--name",
             "c",
@@ -2747,17 +2826,19 @@ mod tests {
         );
         assert_eq!(
             text(reset_capability_arguments(
-                platform, cpuset, "m", &image, true, "s"
+                platform, cpuset, "m", &image, true, "s", "n"
             )),
             hardened_helper(&stdin_user, "64m", &image, &["-c", "s"])
         );
         assert_eq!(
             text(reset_capability_arguments(
-                platform, cpuset, "m", &image, false, "s"
+                platform, cpuset, "m", &image, false, "s", "n"
             )),
             hardened_helper(&user, "64m", &image, &["-c", "s"])
         );
-        let status = text(status_projection_arguments(platform, cpuset, "m", &image));
+        let status = text(status_projection_arguments(
+            platform, cpuset, "m", &image, "n",
+        ));
         let script = status.last().unwrap().clone();
         assert_eq!(
             status,

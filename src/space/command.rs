@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::capture;
@@ -39,8 +40,27 @@ const STORAGE_TOOL_BUDGET: Duration = Duration::from_mins(5);
 const PRIVILEGED_KILL_AFTER: Duration = Duration::from_secs(5);
 /// How long past a privileged tool's own deadline this process waits for `sudo` before reporting it may remain.
 const PRIVILEGED_REAP_MARGIN: Duration = Duration::from_mins(1);
-/// The exit statuses `timeout` reports when it terminated (124) or killed (128 + 9) the tool it ran.
-const PRIVILEGED_TIMED_OUT: [i32; 2] = [124, 137];
+/// The exit status `timeout` reports once the tool it terminated at its deadline has ended.
+const PRIVILEGED_TIMED_OUT: i32 = 124;
+/// The exit status of a `timeout` that had to kill its whole process group, itself included: the tool was sent
+/// SIGKILL, but nothing observed it end.
+const PRIVILEGED_KILLED: i32 = 137;
+
+/// Whether a privileged tool ended at or past its deadline without proof that it stopped. Destructive storage
+/// compensation refuses to run after that, since the operation may still be using what it would remove.
+static PRIVILEGED_UNSETTLED: AtomicBool = AtomicBool::new(false);
+
+/// A privileged tool of this run may still be running: it outlived its deadline without being proved stopped, or
+/// was ended by a signal.
+pub(crate) fn privileged_unsettled() -> bool {
+    PRIVILEGED_UNSETTLED.load(Ordering::SeqCst)
+}
+
+/// Record a privileged tool that may still be running, and return the diagnostic that says so.
+fn unsettled(diagnostic: String) -> String {
+    PRIVILEGED_UNSETTLED.store(true, Ordering::SeqCst);
+    diagnostic
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostOs {
@@ -308,7 +328,7 @@ where
     let mut child = capture::spawn(command.args(arguments).stdin(Stdio::null()))
         .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
     let status = capture::wait(&mut child, privileged_reap_deadline(tool))
-        .map_err(|failure| wait_failure(&program, tool.budget(), failure))?;
+        .map_err(|failure| unsettled(wait_failure(&program, tool.budget(), failure)))?;
     privileged_outcome(&program, tool, status)
 }
 
@@ -340,7 +360,7 @@ where
                 .map_err(|_| "privileged command input failed".to_owned())
         });
     let status = capture::wait(&mut child, privileged_reap_deadline(tool))
-        .map_err(|failure| wait_failure(&program, tool.budget(), failure))?;
+        .map_err(|failure| unsettled(wait_failure(&program, tool.budget(), failure)))?;
     write_result?;
     privileged_outcome(&program, tool, status)
 }
@@ -352,7 +372,7 @@ where
 {
     let (program, mut command) = privileged_command(tool)?;
     let budget = privileged_reap_deadline(tool).saturating_duration_since(Instant::now());
-    let result = bounded(&program, command.args(arguments), budget)?;
+    let result = bounded(&program, command.args(arguments), budget).map_err(unsettled)?;
     let status = privileged_outcome(&program, tool, result.status)?;
     if !status.success() {
         return Err(format!(
@@ -388,19 +408,38 @@ fn privileged_reap_deadline(tool: Tool) -> Instant {
     Instant::now() + tool.budget() + PRIVILEGED_KILL_AFTER + PRIVILEGED_REAP_MARGIN
 }
 
-/// The privileged tool's own status, or the refusal of one `timeout` stopped at its deadline.
+/// The privileged tool's own status, or the refusal of one `timeout` ended at its deadline. Only a terminated tool
+/// that `timeout` saw end is proved stopped; a killed group, or an end by a signal, leaves the run unsettled.
 fn privileged_outcome(
     program: &Path,
     tool: Tool,
     status: ExitStatus,
 ) -> Result<ExitStatus, String> {
-    if status
-        .code()
-        .is_some_and(|code| PRIVILEGED_TIMED_OUT.contains(&code))
-    {
-        Err(timed_out(program, tool.budget(), true))
-    } else {
-        Ok(status)
+    let (outcome, settled) = classify_privileged(program, tool, status);
+    if !settled {
+        PRIVILEGED_UNSETTLED.store(true, Ordering::SeqCst);
+    }
+    outcome
+}
+
+/// The outcome of a privileged tool's status, and whether the tool is proved to have ended.
+fn classify_privileged(
+    program: &Path,
+    tool: Tool,
+    status: ExitStatus,
+) -> (Result<ExitStatus, String>, bool) {
+    match status.code() {
+        Some(PRIVILEGED_TIMED_OUT) => (Err(timed_out(program, tool.budget(), true)), true),
+        Some(PRIVILEGED_KILLED) => (
+            Err(format!(
+                "host command did not finish within {} s and was killed; it may not have ended: {}",
+                tool.budget().as_secs(),
+                program.display()
+            )),
+            false,
+        ),
+        Some(_) => (Ok(status), true),
+        None => (Ok(status), false),
     }
 }
 
@@ -469,18 +508,47 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
 
         let program = Path::new("/usr/sbin/cryptsetup");
-        for code in [124, 137] {
-            assert_eq!(
-                privileged_outcome(program, Tool::Luks, ExitStatus::from_raw(code << 8)),
-                Err("host command did not finish within 300 s; it was stopped: /usr/sbin/cryptsetup".into())
-            );
-        }
+        assert_eq!(
+            classify_privileged(program, Tool::Luks, ExitStatus::from_raw(124 << 8)),
+            (
+                Err(
+                    "host command did not finish within 300 s; it was stopped: /usr/sbin/cryptsetup"
+                        .into()
+                ),
+                true
+            )
+        );
         for code in [0, 1, 5] {
             let status = ExitStatus::from_raw(code << 8);
-            assert_eq!(privileged_outcome(program, Tool::Luks, status), Ok(status));
+            assert_eq!(
+                classify_privileged(program, Tool::Luks, status),
+                (Ok(status), true)
+            );
         }
         assert_eq!(Tool::Mount.budget(), Duration::from_mins(2));
         assert_eq!(Tool::MkfsExt4.budget(), Duration::from_mins(5));
+    }
+
+    /// A killed process group, or a tool ended by a signal, is not proved stopped: the run is left unsettled, which
+    /// withholds destructive storage compensation.
+    #[cfg(unix)]
+    #[test]
+    fn a_privileged_tool_killed_at_its_deadline_is_not_proved_stopped() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let program = Path::new("/usr/sbin/cryptsetup");
+        assert_eq!(
+            classify_privileged(program, Tool::Luks, ExitStatus::from_raw(137 << 8)),
+            (
+                Err("host command did not finish within 300 s and was killed; it may not have ended: /usr/sbin/cryptsetup".into()),
+                false
+            )
+        );
+        let signalled = ExitStatus::from_raw(9);
+        assert_eq!(
+            classify_privileged(program, Tool::Luks, signalled),
+            (Ok(signalled), false)
+        );
     }
 
     #[test]

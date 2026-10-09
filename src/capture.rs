@@ -100,16 +100,17 @@ pub(crate) fn stop(child: &mut Child) -> bool {
     false
 }
 
-/// What a stop signals: the child alone, or the process group it leads, decided before it is reaped.
+/// What a stop signals: the child alone, or the process group it leads, decided before it is reaped. A caller that
+/// reaps the child itself keeps this to end a descendant still holding the child's streams.
 #[cfg(unix)]
-struct Target {
+pub(crate) struct Target {
     pid: rustix::process::Pid,
     group: bool,
 }
 
 #[cfg(unix)]
 impl Target {
-    fn of(child: &Child) -> Self {
+    pub(crate) fn of(child: &Child) -> Self {
         let pid = rustix::process::Pid::from_child(child);
         Self {
             pid,
@@ -131,7 +132,8 @@ impl Target {
         };
     }
 
-    fn kill_remaining_group(&self) {
+    /// Kill whatever remains of the group the child led; nothing when it led none.
+    pub(crate) fn kill_remaining_group(&self) {
         if self.group {
             let _ = rustix::process::kill_process_group(self.pid, rustix::process::Signal::KILL);
         }
@@ -139,11 +141,11 @@ impl Target {
 }
 
 #[cfg(not(unix))]
-struct Target;
+pub(crate) struct Target;
 
 #[cfg(not(unix))]
 impl Target {
-    fn of(_child: &Child) -> Self {
+    pub(crate) fn of(_child: &Child) -> Self {
         Self
     }
 
@@ -151,7 +153,7 @@ impl Target {
         let _ = child.kill();
     }
 
-    fn kill_remaining_group(&self) {}
+    pub(crate) fn kill_remaining_group(&self) {}
 }
 
 /// Run `command` with stdin closed and capture at most `stdout_limit` and `stderr_limit` bytes, whatever its exit
@@ -415,6 +417,47 @@ mod tests {
         let descendant = rustix::process::Pid::from_raw(descendant).unwrap();
         // The descendant was killed; once its parent is gone it is reaped, and nothing answers its id.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rustix::process::test_kill_process(descendant).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the descendant survived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// An isolated leader that exits while a descendant still holds its stream: the group captured before the
+    /// leader was reaped still ends the descendant.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_an_isolated_leaders_stream_ends_with_its_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let record = directory.path().join("descendant");
+        let mut child = super::spawn_in(
+            std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "sleep 60 >&2 & echo $! > \"$1\"",
+                    "leader",
+                    record.to_str().unwrap(),
+                ])
+                .stderr(std::process::Stdio::piped()),
+            true,
+        )
+        .unwrap();
+        let group = super::Target::of(&child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        assert!(super::wait(&mut child, deadline).unwrap().success());
+        let descendant: i32 = std::fs::read_to_string(&record)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let descendant = rustix::process::Pid::from_raw(descendant).unwrap();
+        assert!(rustix::process::test_kill_process(descendant).is_ok());
+
+        group.kill_remaining_group();
+
         while rustix::process::test_kill_process(descendant).is_ok() {
             assert!(
                 std::time::Instant::now() < deadline,

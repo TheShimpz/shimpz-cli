@@ -698,6 +698,7 @@ impl<'a> Pool<'a> {
     }
 
     fn discard_new(&self) -> Result<(), String> {
+        require_settled()?;
         if self.is_mounted().unwrap_or(false) && self.validate_mount().is_ok() {
             Self::root(Tool::Umount, [self.paths.pool_mount.as_os_str().to_owned()])?;
         }
@@ -771,6 +772,7 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
     if !paths.security.exists() {
         return Ok(());
     }
+    require_settled()?;
     if expected_space_id.is_some_and(|value| !id::valid(value)) {
         return Err("the Local Space identity is invalid".into());
     }
@@ -1099,6 +1101,15 @@ fn reset_mapping_identity(
         return Err("the encrypted Local storage mapping identity does not match the Space".into());
     }
     Ok(identity)
+}
+
+/// Refuse to remove or close owned storage while a privileged operation of this run may still be using it.
+fn require_settled() -> Result<(), String> {
+    if command::privileged_unsettled() {
+        Err("a privileged storage operation outlived its deadline and may still be running, so the encrypted Local storage was left untouched; once no cryptsetup, mkfs, or mount process remains, rerun the same shimpz command".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn remove_pool_files(paths: &Paths) -> Result<(), String> {
