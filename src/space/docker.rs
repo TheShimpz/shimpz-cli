@@ -75,14 +75,6 @@ pub(crate) enum ProjectionFailure {
     Unreaped(String),
 }
 
-impl ProjectionFailure {
-    pub(crate) fn message(self) -> String {
-        match self {
-            Self::NotProjected(message) | Self::Unreaped(message) => message,
-        }
-    }
-}
-
 impl PendingStatus {
     /// Send the status document and wait for the helper to write it. A helper that could not be reaped is reported
     /// apart from one that refused or failed the write, so its cause is never lost.
@@ -781,11 +773,15 @@ impl Engine {
         &self,
         admin_image: &str,
         document: &[u8],
-    ) -> Result<(), String> {
-        self.begin_release_status(admin_image)?
-            .ok_or_else(|| "the Local release status volume does not exist".to_owned())?
+    ) -> Result<(), ProjectionFailure> {
+        self.begin_release_status(admin_image)
+            .map_err(ProjectionFailure::NotProjected)?
+            .ok_or_else(|| {
+                ProjectionFailure::NotProjected(
+                    "the Local release status volume does not exist".into(),
+                )
+            })?
             .commit(document)
-            .map_err(ProjectionFailure::message)
     }
 
     /// Start the hardened helper that projects the Local release status into this Space's owned volume, before the

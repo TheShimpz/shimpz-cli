@@ -799,19 +799,17 @@ impl Context {
         let status = state::status_document(release, release_outcome(release, candidate.installed))
             .map_err(Some)?;
         match pending.take() {
-            // A helper that could not be reaped is reported before the rollback outcome; any other failure to
-            // project leaves the rollback outcome to describe it.
-            Some(pending) => pending
-                .commit(status.as_bytes())
-                .map_err(|failure| match failure {
-                    ProjectionFailure::Unreaped(cause) => Some(cause),
-                    ProjectionFailure::NotProjected(_) => None,
-                }),
+            Some(pending) => pending.commit(status.as_bytes()),
             None => self
                 .engine
-                .project_release_status(&release.metadata.admin, status.as_bytes())
-                .map_err(|_| None),
-        }?;
+                .project_release_status(&release.metadata.admin, status.as_bytes()),
+        }
+        // A helper that could not be reaped is reported before the rollback outcome; any other failure to project
+        // leaves the rollback outcome to describe it.
+        .map_err(|failure| match failure {
+            ProjectionFailure::Unreaped(cause) => Some(cause),
+            ProjectionFailure::NotProjected(_) => None,
+        })?;
         Ok(status)
     }
 
@@ -1441,16 +1439,11 @@ impl Context {
         // Persist and project independently: a failed local write must not leave Admin reporting the abandoned release.
         let status = state::status_document(release, "rollback-needed")?;
         let persisted = state::write_private(&self.paths.status, &status);
-        if restored
-            && self
-                .engine
-                .project_release_status(&release.metadata.admin, status.as_bytes())
-                .is_err()
-        {
-            output::warning(
-                "the previous release was restored, but Admin could not receive the rollback status",
-            );
-        }
+        let unreaped = if restored {
+            self.project_rollback_status(release, &status)
+        } else {
+            None
+        };
         // The restoration's own outcome leads; failed-release memory and scheduler diagnostics only follow it.
         let primary = if restored {
             "the update failed; the previous healthy release was restored"
@@ -1461,10 +1454,31 @@ impl Context {
             Ok(()) => primary.to_owned(),
             Err(error) => format!("{primary}; the rollback status could not be recorded: {error}"),
         };
+        // A status helper that could not be reaped may remain, so its cause follows the outcome.
+        let primary = match unreaped {
+            Some(cause) => format!("{primary}; {cause}"),
+            None => primary,
+        };
         if memory_error.is_some() {
             return Err(format!("{primary}; {}", self.disable_automatic_updates()));
         }
         Err(primary)
+    }
+
+    /// Project the rollback status to the restored Admin, warning when it cannot receive it, and return the cause of
+    /// a status helper that could not be reaped, which may remain.
+    fn project_rollback_status(&self, release: &ResolvedRelease, status: &str) -> Option<String> {
+        let failure = self
+            .engine
+            .project_release_status(&release.metadata.admin, status.as_bytes())
+            .err()?;
+        output::warning(
+            "the previous release was restored, but Admin could not receive the rollback status",
+        );
+        match failure {
+            ProjectionFailure::Unreaped(cause) => Some(cause),
+            ProjectionFailure::NotProjected(_) => None,
+        }
     }
 
     fn disable_automatic_updates(&self) -> String {
