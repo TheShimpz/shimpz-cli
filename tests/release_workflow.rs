@@ -1,20 +1,20 @@
 //! Static contracts for the standalone CLI release transaction.
 
-use serde_yaml::Value;
+use serde_norway::Value;
 
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 
 fn workflow() -> Value {
-    serde_yaml::from_str(RELEASE_WORKFLOW).expect("release workflow must be valid YAML")
+    serde_norway::from_str(RELEASE_WORKFLOW).expect("release workflow must be valid YAML")
 }
 
-fn jobs(document: &Value) -> &serde_yaml::Mapping {
+fn jobs(document: &Value) -> &serde_norway::Mapping {
     document["jobs"]
         .as_mapping()
         .expect("release workflow must define jobs")
 }
 
-fn job<'a>(jobs: &'a serde_yaml::Mapping, name: &str) -> &'a Value {
+fn job<'a>(jobs: &'a serde_norway::Mapping, name: &str) -> &'a Value {
     jobs.get(Value::String(name.to_owned()))
         .unwrap_or_else(|| panic!("release workflow must define {name}"))
 }
@@ -40,25 +40,25 @@ fn standalone_release_closes_registry_draft_and_latest_in_order() {
 
     assert_eq!(
         registry["needs"],
-        serde_yaml::from_str::<Value>("[metadata, build, publish]").unwrap()
+        serde_norway::from_str::<Value>("[metadata, build, publish]").unwrap()
     );
     assert!(run_steps(registry).contains(".yanked == false"));
     assert_eq!(
         release["needs"],
-        serde_yaml::from_str::<Value>("[metadata, build, registry-satisfied]").unwrap()
+        serde_norway::from_str::<Value>("[metadata, build, registry-satisfied]").unwrap()
     );
     assert!(run_steps(release).contains("--draft"));
     assert!(run_steps(release).contains("exactly six target archives"));
     assert_eq!(
         draft["needs"],
-        serde_yaml::from_str::<Value>("[metadata, release]").unwrap()
+        serde_norway::from_str::<Value>("[metadata, release]").unwrap()
     );
     assert_eq!(draft["permissions"]["contents"], "write");
     assert!(run_steps(draft).contains("sha256sum --check SHA256SUMS"));
     assert!(run_steps(draft).contains("gh attestation verify"));
     assert_eq!(
         finalize["needs"],
-        serde_yaml::from_str::<Value>("[metadata, verify-draft]").unwrap()
+        serde_norway::from_str::<Value>("[metadata, verify-draft]").unwrap()
     );
     assert!(run_steps(finalize).contains("--draft=false --latest"));
     assert!(run_steps(finalize).contains("/releases/latest"));

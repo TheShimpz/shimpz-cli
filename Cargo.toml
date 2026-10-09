@@ -45,7 +45,7 @@ winapi-util = "0.1.11"
 
 [dev-dependencies]
 flate2 = "1"
-serde_yaml = "0.9.34"
+serde_norway = "0.9.42"
 tar = "0.4"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 

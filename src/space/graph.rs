@@ -107,7 +107,7 @@ pub(crate) fn render(profile: StorageProfile) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use serde_yaml::Value;
+    use serde_norway::Value;
 
     use super::*;
 
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn the_graph_holds_exactly_the_init_and_the_long_running_services() {
-        let graph: Value = serde_yaml::from_str(&render(StorageProfile::LinuxLuks)).unwrap();
+        let graph: Value = serde_norway::from_str(&render(StorageProfile::LinuxLuks)).unwrap();
         let services: BTreeSet<_> = graph["services"]
             .as_mapping()
             .unwrap()
@@ -172,7 +172,7 @@ mod tests {
             (StorageProfile::LinuxLuks, true),
             (StorageProfile::ManagedDisk, false),
         ] {
-            let document: Value = serde_yaml::from_str(&render(profile)).unwrap();
+            let document: Value = serde_norway::from_str(&render(profile)).unwrap();
             let services = document["services"].as_mapping().unwrap();
             let mut sources = BTreeSet::new();
             let mut mount_count = 0;
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn team_receives_exactly_the_pinned_assistant_egress_image() {
-        let document: Value = serde_yaml::from_str(&render(StorageProfile::ManagedDisk)).unwrap();
+        let document: Value = serde_norway::from_str(&render(StorageProfile::ManagedDisk)).unwrap();
         let services = &document["services"];
         let pinned = services["shimpz-assistant-egress"]["image"]
             .as_str()
