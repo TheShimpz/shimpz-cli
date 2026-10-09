@@ -40,7 +40,7 @@ class HelloWorldResult(TypedDict):
     message: str
 
 
-@action(human_requests=[\"approval\"])
+@action(description=\"Send a Hello World greeting to one person.\", human_requests=[\"approval\"])
 async def run(name: Name, *, ctx: Context) -> HelloWorldResult:
     # Request copy is English shimpz.text; Shimpz shows it in each person's interface language.
     ctx.request_approval(
@@ -105,6 +105,7 @@ id = \"{name}\"
 version = \"0.1.0\"
 name = \"{display_name}\"
 summary = \"A Hello World Assistant for Shimpz.\"
+description = \"Greets people by name after they approve. Replace this with one paragraph that tells people what your Assistant does for them.\"
 creators = [\"@your-github-username\"]
 github = \"https://github.com/your-github-username/{name}\"
 genesis = \"\"\"
@@ -250,6 +251,9 @@ mod tests {
         let manifest = fs::read_to_string(root.join("shimpz.toml")).unwrap();
         assert!(manifest.contains("id = \"hello-assistant\""));
         assert!(manifest.contains("name = \"Hello Assistant\""));
+        assert!(manifest.contains("description = \"Greets people by name after they approve."));
+        crate::manifest::PublicationIdentity::parse(manifest.as_bytes())
+            .expect("valid generated manifest identity and description");
         let readme = fs::read_to_string(root.join("README.md")).unwrap();
         assert!(readme.contains("shimpz assistant check"));
         assert!(readme.contains("shimpz assistant run hello-world"));
@@ -271,7 +275,9 @@ mod tests {
                 .contains("return {\"message\": hello(name)}")
         );
         let action = fs::read_to_string(root.join("actions/hello_world.py")).unwrap();
-        assert!(action.contains("@action(human_requests=[\"approval\"])"));
+        assert!(action.contains(
+            "@action(description=\"Send a Hello World greeting to one person.\", human_requests=[\"approval\"])"
+        ));
         assert!(action.contains("title=text(\"Send a greeting\")"));
         assert!(action.contains("name=identifier(name, max_length=80)"));
         assert!(readme.contains("shimpz assistant stage"));

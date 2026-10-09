@@ -7,6 +7,6 @@ class Greeting(TypedDict):
     message: str
 
 
-@action()
+@action(description="Greet one person by name.")
 async def run(name: str) -> Greeting:
     return {"message": f"Hello, {name}"}
