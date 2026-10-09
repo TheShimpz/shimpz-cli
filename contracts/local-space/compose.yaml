@@ -224,8 +224,7 @@ services:
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /policy
       SHIMPZ_ASSISTANT_EGRESS_AUDIT_LOG: /var/log/assistant-egress/audit.jsonl
       SHIMPZ_ASSISTANT_EGRESS_MAX_CONCURRENCY: "64"
-      # Team is the only source of Assistant provider calls (ADR-0106).
-      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "64"
+      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
       SHIMPZ_ASSISTANT_EGRESS_LISTEN_BACKLOG: "16"
     volumes:
       - type: volume
