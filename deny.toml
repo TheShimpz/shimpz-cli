@@ -1,0 +1,50 @@
+# Supply-chain policy for the shimpz CLI, the self-updating host binary that holds the Local storage passphrase:
+# known advisories, licenses, banned crates, and sources. The umbrella gate runs it (.scripts/gate/rust
+# cli-advisories) and its dependency audits run it for every pushed revision and daily.
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+exceptions = [
+    # Ureq/Rustls consumes this package only as public CA root data.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "native-tls", reason = "the CLI uses rustls for outbound TLS" },
+    { crate = "openssl", reason = "the CLI uses rustls for outbound TLS" },
+    { crate = "openssl-sys", reason = "the CLI uses rustls for outbound TLS" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
