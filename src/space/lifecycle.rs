@@ -18,7 +18,7 @@ use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
 
 use super::deploy;
-use super::docker::{Engine, PendingStatus, ResolvedRelease};
+use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::paths::Paths;
@@ -736,11 +736,10 @@ impl Context {
         // An installed Space already holds the owned release status volume, so its helper starts now and waits only
         // for the document; a fresh Space's volume exists only once Compose created it, so it projects afterwards.
         let mut pending = match candidate.installed {
-            Some(_) => Some(
-                self.engine
-                    .begin_release_status(&release.metadata.admin)
-                    .map_err(Some)?,
-            ),
+            Some(_) => self
+                .engine
+                .begin_release_status(&release.metadata.admin)
+                .map_err(Some)?,
             None => None,
         };
         let started = self.start_candidate(candidate, init_current, &mut pending);
@@ -800,12 +799,19 @@ impl Context {
         let status = state::status_document(release, release_outcome(release, candidate.installed))
             .map_err(Some)?;
         match pending.take() {
-            Some(pending) => pending.commit(status.as_bytes()),
+            // A helper that could not be reaped is reported before the rollback outcome; any other failure to
+            // project leaves the rollback outcome to describe it.
+            Some(pending) => pending
+                .commit(status.as_bytes())
+                .map_err(|failure| match failure {
+                    ProjectionFailure::Unreaped(cause) => Some(cause),
+                    ProjectionFailure::NotProjected(_) => None,
+                }),
             None => self
                 .engine
-                .project_release_status(&release.metadata.admin, status.as_bytes()),
-        }
-        .map_err(|_| None)?;
+                .project_release_status(&release.metadata.admin, status.as_bytes())
+                .map_err(|_| None),
+        }?;
         Ok(status)
     }
 
@@ -3669,15 +3675,32 @@ mod tests {
     /// with the given statuses. Every call is logged.
     #[cfg(unix)]
     fn replacing_docker(home: &Path, stop: u8, remove: u8, compose: u8) -> (PathBuf, PathBuf) {
+        replacing_docker_with(home, stop, remove, compose, true)
+    }
+
+    /// `replacing_docker`, whose release status volume exists only when `status_volume` is set.
+    #[cfg(unix)]
+    fn replacing_docker_with(
+        home: &Path,
+        stop: u8,
+        remove: u8,
+        compose: u8,
+        status_volume: bool,
+    ) -> (PathBuf, PathBuf) {
         let log = home.join("docker.log");
         let docker = home.join("replacing-docker");
         let installed = release(1, 'a').metadata;
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2\" in inspect) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space_release_status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 status = home.join("status.log").display(),
+                status_volume = if status_volume {
+                    "printf '%s|shimpz-space|release_status\\n' \"$5\""
+                } else {
+                    "exit 1"
+                },
                 admin_id = ADMIN_ID,
                 team_id = TEAM_ID,
                 brain_id = BRAIN_ID,
@@ -3805,21 +3828,44 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("stop ") || line.starts_with("rm "))
         );
-        // The status helper started before the candidate's Compose up and, never committed, received no document.
+        // The status helper ran beside the candidate's Compose up and, never committed, received no document; it was
+        // reaped before the rollback took the Space down.
         let helper = lines
             .iter()
             .position(|line| line.starts_with("run --rm --interactive "));
-        let candidate_up = lines.iter().position(|line| {
-            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+        let rollback_down = lines.iter().position(|line| {
+            line.starts_with("compose ") && line.ends_with(" down --remove-orphans")
         });
         assert!(
-            matches!((helper, candidate_up), (Some(helper), Some(up)) if helper < up),
+            matches!((helper, rollback_down), (Some(helper), Some(down)) if helper < down),
             "{calls}"
         );
         assert_eq!(
             fs::read_to_string(home.path().join("status.log")).unwrap(),
             ""
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_installed_space_without_its_status_volume_projects_after_compose_instead() {
+        let home = tempfile::tempdir().unwrap();
+        let (docker, log) = replacing_docker_with(home.path(), 0, 0, 1, false);
+        let (error, _context) = failed_start(home.path(), docker, &replacing_release(false));
+
+        // An interrupted installation whose status volume Compose has not created yet still reaches Compose.
+        assert!(
+            error.contains("the update and its rollback both failed"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(calls.lines().any(|line| {
+            line.starts_with("volume ls --quiet --filter name=^shimpz-space_release_status$")
+        }));
+        assert!(!calls.lines().any(|line| line.starts_with("run ")));
+        assert!(calls.lines().any(|line| {
+            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+        }));
     }
 
     /// An installed, marked Space under `home` whose Docker is `docker`.

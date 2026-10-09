@@ -67,13 +67,29 @@ pub(crate) struct PendingStatus {
     child: Option<Child>,
 }
 
+/// Why a status projection did not complete: the helper refused or failed the write and was reaped, or it could not
+/// be reaped and may remain.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionFailure {
+    NotProjected(String),
+    Unreaped(String),
+}
+
+impl ProjectionFailure {
+    pub(crate) fn message(self) -> String {
+        match self {
+            Self::NotProjected(message) | Self::Unreaped(message) => message,
+        }
+    }
+}
+
 impl PendingStatus {
-    /// Send the status document and wait for the helper to write it.
-    pub(crate) fn commit(mut self, document: &[u8]) -> Result<(), String> {
-        let mut child = self
-            .child
-            .take()
-            .ok_or_else(|| "the Local release status helper is unavailable".to_owned())?;
+    /// Send the status document and wait for the helper to write it. A helper that could not be reaped is reported
+    /// apart from one that refused or failed the write, so its cause is never lost.
+    pub(crate) fn commit(mut self, document: &[u8]) -> Result<(), ProjectionFailure> {
+        let mut child = self.child.take().ok_or_else(|| {
+            ProjectionFailure::NotProjected("the Local release status helper is unavailable".into())
+        })?;
         let sent = if document.len() > 1_024 {
             Err("the Local release status projection is invalid".to_owned())
         } else {
@@ -89,14 +105,20 @@ impl PendingStatus {
         };
         // The input is closed by now, so the helper always ends and is reaped, even when nothing was sent.
         drop(child.stdin.take());
-        let status = child
-            .wait()
-            .map_err(|error| format!("could not execute Docker: {error}"));
-        sent?;
-        if status?.success() {
-            Ok(())
-        } else {
-            Err("the Local release status could not be projected to Admin".into())
+        match (child.wait(), sent) {
+            (Err(error), sent) => {
+                let unreaped =
+                    format!("the Local release status helper could not be reaped: {error}");
+                Err(ProjectionFailure::Unreaped(match sent {
+                    Ok(()) => unreaped,
+                    Err(cause) => format!("{cause}; {unreaped}"),
+                }))
+            }
+            (Ok(_), Err(cause)) => Err(ProjectionFailure::NotProjected(cause)),
+            (Ok(status), Ok(())) if status.success() => Ok(()),
+            (Ok(_), Ok(())) => Err(ProjectionFailure::NotProjected(
+                "the Local release status could not be projected to Admin".into(),
+            )),
         }
     }
 
@@ -760,23 +782,47 @@ impl Engine {
         admin_image: &str,
         document: &[u8],
     ) -> Result<(), String> {
-        self.begin_release_status(admin_image)?.commit(document)
+        self.begin_release_status(admin_image)?
+            .ok_or_else(|| "the Local release status volume does not exist".to_owned())?
+            .commit(document)
+            .map_err(ProjectionFailure::message)
     }
 
     /// Start the hardened helper that projects the Local release status into this Space's owned volume, before the
     /// status is known: it waits on its input, so an apply can commit the status as soon as the candidate is healthy.
-    pub(crate) fn begin_release_status(&self, admin_image: &str) -> Result<PendingStatus, String> {
+    /// `None` when the volume provably does not exist yet; Compose creates it, and the status is projected after.
+    pub(crate) fn begin_release_status(
+        &self,
+        admin_image: &str,
+    ) -> Result<Option<PendingStatus>, String> {
         if !ADMIN.admits(admin_image) {
             return Err("the Local release status projection is invalid".into());
         }
         let volume = "shimpz-space_release_status";
-        let identity = self.run_output([
+        let identity = match self.run_output([
             "volume",
             "inspect",
             "--format",
             "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
             volume,
-        ])?;
+        ]) {
+            Ok(identity) => identity,
+            // A failed inspection is absence only when the daemon lists no volume of exactly that name.
+            Err(error) => {
+                let listed = self.run_output([
+                    "volume",
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    &format!("name=^{volume}$"),
+                ])?;
+                return if listed.lines().any(|name| name == volume) {
+                    Err(error)
+                } else {
+                    Ok(None)
+                };
+            }
+        };
         if identity.trim() != "shimpz-space_release_status|shimpz-space|release_status" {
             return Err("the Local release status volume is not owned by this Space".into());
         }
@@ -790,7 +836,7 @@ impl Engine {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("could not execute Docker: {error}"))?;
-        Ok(PendingStatus { child: Some(child) })
+        Ok(Some(PendingStatus { child: Some(child) }))
     }
 
     pub(crate) fn project_reset_capability(
@@ -1995,18 +2041,21 @@ mod tests {
         engine
             .begin_release_status(&admin)
             .unwrap()
+            .unwrap()
             .commit(b"{}")
             .unwrap();
         assert_eq!(fs::read_to_string(&received).unwrap(), "{}");
         engine
             .begin_release_status(&admin)
             .unwrap()
+            .unwrap()
             .abandon()
             .unwrap();
-        drop(engine.begin_release_status(&admin).unwrap());
+        drop(engine.begin_release_status(&admin).unwrap().unwrap());
         assert!(
             engine
                 .begin_release_status(&admin)
+                .unwrap()
                 .unwrap()
                 .commit(&[b'x'; 1_025])
                 .is_err()
@@ -2021,6 +2070,19 @@ mod tests {
             "#!/bin/sh\ncase \"$1\" in\n  volume) echo other ;;\n  *) exit 9 ;;\nesac\n",
         );
         assert!(engine.begin_release_status(&admin).is_err());
+        // A volume Docker cannot inspect is absent only when it is not listed; then nothing starts until Compose made it.
+        for (listed, absent) in [("", true), ("shimpz-space_release_status\n", false)] {
+            crate::fake_tool::write(
+                &command,
+                format!(
+                    "#!/bin/sh\ncase \"$1 $2\" in\n  'volume inspect') exit 1 ;;\n  'volume ls') printf '{listed}' ;;\n  *) exit 9 ;;\nesac\n"
+                ),
+            );
+            let begun = engine.begin_release_status(&admin);
+            assert_eq!(matches!(begun, Ok(None)), absent);
+            assert_eq!(begun.is_err(), !absent);
+        }
+        assert!(engine.project_release_status(&admin, b"{}").is_err());
         assert!(
             engine
                 .begin_release_status("localhost/other:latest")
