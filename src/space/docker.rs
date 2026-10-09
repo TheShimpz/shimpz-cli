@@ -339,14 +339,14 @@ impl Engine {
         let (compose, daemon, processors) = thread::scope(|scope| {
             let compose = scope.spawn(|| output(&docker, ["compose", "version", "--short"]));
             // `docker version` fails unless the daemon answers, so one call proves it reachable and reports its
-            // versions.
+            // versions, including the runc of its default runtime.
             let daemon = scope.spawn(|| {
                 output(
                     &docker,
                     [
                         "version",
                         "--format",
-                        "{{.Server.Version}}|{{.Server.APIVersion}}",
+                        "{{.Server.Version}}|{{.Server.APIVersion}}|{{range .Server.Components}}{{if eq .Name \"runc\"}}{{.Version}}{{end}}{{end}}",
                     ],
                 )
             });
@@ -1774,14 +1774,20 @@ fn validate_managed_endpoint(
     }
 }
 
-/// The daemon answered `<engine>|<api>` and Compose its short version; each must meet the supported floor.
+/// The daemon answered `<engine>|<api>|<runc>` and Compose its short version; each must meet the supported floor.
 fn require_engine_versions(daemon: &str, compose: &str) -> Result<(), String> {
-    let (server, api) = daemon.trim().split_once('|').unwrap_or((daemon.trim(), ""));
+    let mut fields = daemon.trim().splitn(3, '|');
+    let (server, api, runc) = (
+        fields.next().unwrap_or_default(),
+        fields.next().unwrap_or_default(),
+        fields.next().unwrap_or_default(),
+    );
     if !version_at_least(server, (25, 0, 0)) || !version_at_least(api, (1, 44, 0)) {
         return Err(format!(
             "Docker Engine 25.0 or newer with API 1.44 is required (Engine {server}, API {api})"
         ));
     }
+    super::runc::require_patched(runc)?;
     if !version_at_least(compose.trim(), (2, 20, 2)) {
         return Err(format!(
             "Docker Compose 2.20.2 or newer is required (found {})",
@@ -2742,16 +2748,19 @@ mod tests {
 
     #[test]
     fn engine_versions_meet_the_supported_floors() {
-        assert_eq!(require_engine_versions("29.8.2|1.52\n", "5.6.0\n"), Ok(()));
         assert_eq!(
-            require_engine_versions("24.0.9|1.43\n", "5.6.0\n"),
+            require_engine_versions("29.8.2|1.52|1.3.3\n", "5.6.0\n"),
+            Ok(())
+        );
+        assert_eq!(
+            require_engine_versions("24.0.9|1.43|1.3.3\n", "5.6.0\n"),
             Err(
                 "Docker Engine 25.0 or newer with API 1.44 is required (Engine 24.0.9, API 1.43)"
                     .into()
             )
         );
         assert_eq!(
-            require_engine_versions("29.8.2|1.43\n", "5.6.0\n"),
+            require_engine_versions("29.8.2|1.43|1.3.3\n", "5.6.0\n"),
             Err(
                 "Docker Engine 25.0 or newer with API 1.44 is required (Engine 29.8.2, API 1.43)"
                     .into()
@@ -2765,9 +2774,13 @@ mod tests {
             )
         );
         assert_eq!(
-            require_engine_versions("29.8.2|1.52\n", "2.20.1\n"),
+            require_engine_versions("29.8.2|1.52|1.3.3\n", "2.20.1\n"),
             Err("Docker Compose 2.20.2 or newer is required (found 2.20.1)".into())
         );
+        for daemon in ["29.8.2|1.52|1.3.2\n", "29.8.2|1.52|\n", "29.8.2|1.52\n"] {
+            let refusal = require_engine_versions(daemon, "5.6.0\n").unwrap_err();
+            assert!(refusal.contains("runc"), "{daemon}");
+        }
     }
 
     #[cfg(unix)]
