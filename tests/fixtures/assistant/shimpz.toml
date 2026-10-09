@@ -4,6 +4,7 @@ id = "cli-smoke"
 version = "0.1.0"
 name = "CLI Smoke Assistant"
 summary = "Verify local file-backed Action execution."
+description = "Runs deterministic Actions so the CLI can verify local file-backed execution end to end."
 creators = ["@roxygens"]
 github = "https://github.com/TheShimpz/shimpz-cli"
 genesis = "Return a deterministic greeting for CLI verification."
