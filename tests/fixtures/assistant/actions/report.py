@@ -1,12 +1,20 @@
+import os
 from typing import TypedDict
 
-from shimpz import Context, action
+from shimpz import Context, FetchError, action
 
 
 class Report(TypedDict):
-    token_length: int
+    outcome: str
 
 
-@action(description="Report the length of the Cloudflare access token.", integrations=["cloudflare"])
-async def run(*, ctx: Context) -> Report:
-    return {"token_length": len(ctx.integrations.cloudflare.access_token)}
+@action(description="Ask for one provider call and report how it ended.", integrations=["cloudflare"])
+async def run(url: str, *, ctx: Context) -> Report:
+    # The CLI makes the call and adds the Integration bearer itself; the Action never holds a credential (ADR-0106).
+    if hasattr(ctx, "integrations") or any(name.startswith("SHIMPZ_INTEGRATION_") for name in os.environ):
+        return {"outcome": "credential-exposed"}
+    try:
+        response = await ctx.fetch("GET", url)
+    except FetchError as error:
+        return {"outcome": error.code}
+    return {"outcome": f"status {response.status}"}
