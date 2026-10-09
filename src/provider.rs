@@ -237,8 +237,6 @@ fn parse(frame: &Value, hosts: &BTreeSet<String>) -> Result<Call, &'static str> 
     };
     let body = match fields.get("body") {
         None => None,
-        // ureq sends no body on a method without request-body semantics.
-        Some(_) if matches!(method, "GET" | "HEAD") => return Err("refused"),
         Some(value) => Some(
             value
                 .as_str()
@@ -416,10 +414,13 @@ fn send(call: &Call) -> Result<Received, &'static str> {
     for (name, value) in &call.headers {
         request = request.header(name.as_str(), value.as_str());
     }
-    let request = request
-        .body(call.body.clone().unwrap_or_default())
-        .map_err(|_| "refused")?;
-    let mut response = agent.run(request).map_err(|_| "unavailable")?;
+    let sent = match &call.body {
+        Some(body) => request.body(body.clone()).map(|request| agent.run(request)),
+        None => request.body(()).map(|request| agent.run(request)),
+    };
+    let mut response = sent
+        .map_err(|_| "refused")?
+        .map_err(|error| unsent(&error))?;
     let mut headers = Vec::new();
     for (name, value) in response.headers() {
         headers.push((
@@ -427,12 +428,7 @@ fn send(call: &Call) -> Result<Received, &'static str> {
             value.to_str().map_err(|_| "failed")?.to_owned(),
         ));
     }
-    let encoding = response
-        .headers()
-        .get("content-encoding")
-        .and_then(|value| value.to_str().ok())
-        .map_or(String::new(), |value| value.trim().to_ascii_lowercase());
-    if !matches!(encoding.as_str(), "" | "identity")
+    if !identity_encoded(response.headers())
         || headers
             .iter()
             .map(|(name, value)| name.len() + value.len())
@@ -450,61 +446,103 @@ fn send(call: &Call) -> Result<Received, &'static str> {
     Ok((response.status().as_u16(), headers, body))
 }
 
-/// Refuse a response that carries any injected value in a common encoding or inside a decoded JSON string.
+/// Every Content-Encoding occurrence is identity, so a compressed body never passes the echo scan.
+fn identity_encoded(headers: &ureq::http::HeaderMap) -> bool {
+    headers
+        .get_all("content-encoding")
+        .iter()
+        .all(|value| matches!(value.to_str().map(str::trim), Ok("" | "identity")))
+}
+
+/// `unavailable` only when the call cannot have reached the provider; any later failure may follow a sent request,
+/// so it is `failed` and a mutation stays uncertain, as Team reports it.
+fn unsent(error: &ureq::Error) -> &'static str {
+    match error {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::ConnectProxyFailed(_)
+        | ureq::Error::RequireHttpsOnly(_)
+        | ureq::Error::BadUri(_)
+        | ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => "unavailable",
+        _ => "failed",
+    }
+}
+
+/// Refuse a response that carries any injected value in a common encoding, in any header or the body.
+///
+/// The body is read as UTF-8 text and with its JSON string escapes decoded, whether or not it parses, so an escaped
+/// or duplicated JSON member cannot carry a value past the scan; every comparison ignores case.
 fn require_clean(
     headers: &[(String, String)],
     body: &[u8],
     credentials: &[Credential],
 ) -> Result<(), &'static str> {
-    let secrets: Vec<&str> = credentials
+    let forms: Vec<Zeroizing<String>> = credentials
         .iter()
         .flat_map(|credential| credential.protected.iter())
-        .map(|secret| secret.as_str())
         .filter(|secret| !secret.is_empty())
-        .collect();
-    let forms: Vec<Zeroizing<String>> = secrets
-        .iter()
         .flat_map(|secret| encodings(secret))
         .map(|form| Zeroizing::new(form.to_lowercase()))
         .collect();
-    let text = Zeroizing::new(String::from_utf8_lossy(body).to_lowercase());
-    let echoed = headers
+    let text = Zeroizing::new(String::from_utf8_lossy(body).into_owned());
+    let mut texts: Vec<Zeroizing<String>> = headers
         .iter()
-        .map(|(_, value)| value.to_lowercase())
-        .chain(std::iter::once(text.as_str().to_owned()))
-        .any(|text| forms.iter().any(|form| text.contains(form.as_str())));
-    let decoded = serde_json::from_slice::<Value>(body)
-        .is_ok_and(|document| json_echoes(&document, &secrets));
-    if echoed || decoded {
+        .map(|(name, value)| Zeroizing::new(format!("{name}: {value}").to_lowercase()))
+        .collect();
+    texts.push(Zeroizing::new(text.to_lowercase()));
+    texts.push(Zeroizing::new(json_unescaped(&text).to_lowercase()));
+    if texts
+        .iter()
+        .any(|text| forms.iter().any(|form| text.contains(form.as_str())))
+    {
         Err("failed")
     } else {
         Ok(())
     }
 }
 
-fn json_echoes(document: &Value, secrets: &[&str]) -> bool {
-    let mut pending = vec![document];
-    while let Some(current) = pending.pop() {
-        match current {
-            Value::String(text) => {
-                if secrets.iter().any(|secret| text.contains(secret)) {
-                    return true;
+/// Decode every JSON string escape in `text`; a surrogate pair decodes to its one character.
+fn json_unescaped(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('u') => {
+                let unit = |characters: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+                    let hex: String = characters.by_ref().take(4).collect();
+                    u16::from_str_radix(&hex, 16).ok()
+                };
+                let Some(first) = unit(&mut characters) else {
+                    continue;
+                };
+                let mut units = vec![first];
+                if (0xd800..0xdc00).contains(&first) && characters.peek() == Some(&'\\') {
+                    let mut lookahead = characters.clone();
+                    lookahead.next();
+                    if lookahead.next() == Some('u')
+                        && let Some(second) = unit(&mut lookahead)
+                        && (0xdc00..0xe000).contains(&second)
+                    {
+                        units.push(second);
+                        characters = lookahead;
+                    }
                 }
+                decoded.extend(char::decode_utf16(units).map(|unit| unit.unwrap_or('\u{fffd}')));
             }
-            Value::Object(fields) => {
-                if fields
-                    .keys()
-                    .any(|key| secrets.iter().any(|secret| key.contains(secret)))
-                {
-                    return true;
-                }
-                pending.extend(fields.values());
-            }
-            Value::Array(items) => pending.extend(items),
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            Some('b') => decoded.push('\u{8}'),
+            Some('f') => decoded.push('\u{c}'),
+            Some('n') => decoded.push('\n'),
+            Some('r') => decoded.push('\r'),
+            Some('t') => decoded.push('\t'),
+            Some(other) => decoded.push(other),
+            None => decoded.push('\\'),
         }
     }
-    false
+    decoded
 }
 
 /// The value and its JSON, percent, hexadecimal, and base64 encodings, base64 at each byte alignment so the value is
@@ -764,5 +802,85 @@ mod tests {
             Err("failed")
         );
         assert_eq!(require_clean(&[], br#"{"id":"1"}"#, &credentials), Ok(()));
+    }
+
+    #[test]
+    fn refuses_echoes_in_header_names_escaped_or_duplicated_json_and_unicode_text() {
+        let mut broker = meta();
+        broker.hold("meta-access-token", Zeroizing::new("tök€n-value".into()));
+        broker.hold("meta-app-secret", Zeroizing::new("secret-1".into()));
+        let (credentials, _) = broker.credentials("graph.facebook.com");
+        let escaped: String =
+            "tök€n-value"
+                .encode_utf16()
+                .fold(String::new(), |mut escaped, unit| {
+                    let _ = write!(escaped, "\\u{unit:04X}");
+                    escaped
+                });
+        for body in [
+            format!(r#"{{"a":"{escaped}"}}"#),
+            format!(r#"{{"a":"safe","a":"{escaped}"}}"#),
+            format!(r#"not json "{escaped}""#),
+            "plain TÖK€N-VALUE".to_owned(),
+        ] {
+            assert_eq!(
+                require_clean(&[], body.as_bytes(), &credentials),
+                Err("failed"),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            require_clean(&[("x-tök€n-value".into(), "1".into())], b"{}", &credentials),
+            Err("failed")
+        );
+        assert_eq!(
+            json_unescaped(r#"\ud83d\ude00 \"q\" \/"#),
+            "\u{1f600} \"q\" /"
+        );
+    }
+
+    #[test]
+    fn every_content_encoding_occurrence_must_be_identity() {
+        let mut headers = ureq::http::HeaderMap::new();
+        assert!(identity_encoded(&headers));
+        headers.append("content-encoding", "identity".parse().unwrap());
+        assert!(identity_encoded(&headers));
+        headers.append("content-encoding", "gzip".parse().unwrap());
+        assert!(!identity_encoded(&headers));
+        let mut joined = ureq::http::HeaderMap::new();
+        joined.append("content-encoding", "identity, gzip".parse().unwrap());
+        assert!(!identity_encoded(&joined));
+    }
+
+    #[test]
+    fn only_a_call_that_cannot_have_been_sent_is_unavailable() {
+        assert_eq!(unsent(&ureq::Error::HostNotFound), "unavailable");
+        assert_eq!(unsent(&ureq::Error::ConnectionFailed), "unavailable");
+        assert_eq!(
+            unsent(&ureq::Error::Timeout(ureq::Timeout::Connect)),
+            "unavailable"
+        );
+        for error in [
+            ureq::Error::Timeout(ureq::Timeout::RecvResponse),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::Io(std::io::Error::other("reset")),
+            ureq::Error::BodyStalled,
+        ] {
+            assert_eq!(unsent(&error), "failed", "{error}");
+        }
+    }
+
+    #[test]
+    fn admits_a_body_on_any_admitted_method() {
+        let broker = meta();
+        let hosts = broker.hosts.clone();
+        for method in METHODS {
+            let frame = json!({"type": "fetch", "method": method, "url": "https://api.example.com/v1",
+                "headers": [], "body": STANDARD.encode(b"x=1")});
+            assert_eq!(
+                parse(&frame, &hosts).expect("admitted").body.as_deref(),
+                Some(&b"x=1"[..])
+            );
+        }
     }
 }

@@ -191,6 +191,9 @@ fn command<const SIZE: usize>(
 }
 
 /// Run one invocation process to its end; the child is always reaped, and killed when the exchange fails.
+///
+/// A dedicated thread writes the invocation line and then each reply in order, so reading the child's output never
+/// waits on a write: a child that writes before it reads, or that stops reading, cannot block the exchange.
 fn conversation(
     mut command: Command,
     input: &[u8],
@@ -198,12 +201,30 @@ fn conversation(
 ) -> Result<String, String> {
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
-    let outcome = converse(&mut child, input, answer);
+    let (Some(destination), Some(source), Some(errors)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Python SDK execution failed".into());
+    };
+    let stderr = std::thread::spawn(move || drain(errors, true).1);
+    let (lines_out, lines_in) = std::sync::mpsc::channel::<Zeroizing<Vec<u8>>>();
+    let writer = std::thread::spawn(move || write_lines(destination, &lines_in));
+    let mut first = Zeroizing::new(input.to_vec());
+    first.push(b'\n');
+    let outcome = lines_out
+        .send(first)
+        .map_err(|_| "Action input cannot be sent".to_owned())
+        .and_then(|()| converse(BufReader::new(source), &lines_out, answer));
+    drop(lines_out);
     if outcome.is_err() {
         let _ = child.kill();
     }
     let status = child.wait().map_err(|_| "Python SDK execution failed")?;
-    let (terminal, stderr) = match outcome {
+    let _ = writer.join();
+    let stderr = stderr.join().unwrap_or(1);
+    let terminal = match outcome {
         // A process that ended without its terminal frame reports only its exit status, like any private bridge.
         Err(reason) if reason == PRIVATE_BRIDGE_FAILURE && !status.success() => {
             return Err(bridge_failure(
@@ -228,63 +249,51 @@ fn conversation(
     }
 }
 
-/// Write the invocation line on its own thread, answer each provider-call line in order, and return the terminal
-/// frame and the count of stderr bytes. Output after the terminal frame is refused, as Team refuses it.
-fn converse(
-    child: &mut Child,
-    input: &[u8],
-    answer: &mut dyn FnMut(&Value) -> Zeroizing<Vec<u8>>,
-) -> Result<(Vec<u8>, u64), String> {
-    let stderr = child
-        .stderr
-        .take()
-        .map(|stream| std::thread::spawn(move || drain(stream, true).1));
-    let (Some(mut destination), Some(source)) = (child.stdin.take(), child.stdout.take()) else {
-        return Err("Python SDK execution failed".into());
-    };
-    let mut lines = BufReader::new(source);
-    let terminal = std::thread::scope(|scope| {
-        // The child reads the whole invocation line before it writes anything a reply could depend on, so the writer
-        // finishes before the first provider call needs stdin again.
-        let writer = scope.spawn(move || {
-            destination
-                .write_all(input)
-                .and_then(|()| destination.write_all(b"\n"))
-                .and_then(|()| destination.flush())
-                .map(|()| destination)
-        });
-        let mut line = read_line(&mut lines, MAX_CALL_BYTES)?;
-        let mut destination = writer
-            .join()
-            .ok()
-            .and_then(Result::ok)
-            .ok_or("Action input cannot be sent")?;
-        loop {
-            let frame: Option<Value> = serde_json::from_slice(&line).ok();
-            if frame
-                .as_ref()
-                .and_then(|frame| frame.get("type"))
-                .and_then(Value::as_str)
-                != Some("fetch")
-            {
-                return Ok::<_, String>(line);
-            }
-            let reply = answer(frame.as_ref().unwrap_or(&Value::Null));
-            destination
-                .write_all(&reply)
-                .and_then(|()| destination.write_all(b"\n"))
-                .and_then(|()| destination.flush())
-                .map_err(|_| "Action provider reply cannot be sent".to_owned())?;
-            line = read_line(&mut lines, MAX_CALL_BYTES)?;
+/// Write each queued line in order until the queue closes or the child stops reading.
+fn write_lines(
+    mut destination: std::process::ChildStdin,
+    lines: &std::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
+) {
+    while let Ok(line) = lines.recv() {
+        if destination
+            .write_all(&line)
+            .and_then(|()| destination.flush())
+            .is_err()
+        {
+            return;
         }
-    })?;
-    let mut rest = Vec::new();
-    let tail = (&mut lines).take(1).read_to_end(&mut rest);
-    if terminal.len() as u64 > MAX_RESPONSE_BYTES || !matches!(tail, Ok(0)) {
-        return Err("Python SDK response frame is invalid or larger than 512 KiB".into());
     }
-    let stderr = stderr.and_then(|reader| reader.join().ok()).unwrap_or(1);
-    Ok((terminal, stderr))
+}
+
+/// Answer each provider-call line in order and return the terminal frame; output after it is refused, as Team
+/// refuses it.
+fn converse(
+    mut lines: BufReader<std::process::ChildStdout>,
+    replies: &std::sync::mpsc::Sender<Zeroizing<Vec<u8>>>,
+    answer: &mut dyn FnMut(&Value) -> Zeroizing<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    loop {
+        let line = read_line(&mut lines, MAX_CALL_BYTES)?;
+        let frame: Option<Value> = serde_json::from_slice(&line).ok();
+        if frame
+            .as_ref()
+            .and_then(|frame| frame.get("type"))
+            .and_then(Value::as_str)
+            != Some("fetch")
+        {
+            let mut rest = Vec::new();
+            let tail = (&mut lines).take(1).read_to_end(&mut rest);
+            if line.len() as u64 > MAX_RESPONSE_BYTES || !matches!(tail, Ok(0)) {
+                return Err("Python SDK response frame is invalid or larger than 512 KiB".into());
+            }
+            return Ok(line);
+        }
+        let mut reply = answer(frame.as_ref().unwrap_or(&Value::Null));
+        reply.push(b'\n');
+        replies
+            .send(reply)
+            .map_err(|_| "Action provider reply cannot be sent".to_owned())?;
+    }
 }
 
 /// One newline-terminated line of at most `limit` bytes, without its newline; the end of output is a fault.
@@ -576,6 +585,7 @@ mod tests {
     fn converse_within_deadline(
         script: &'static str,
         reply: &'static [u8],
+        input: Vec<u8>,
     ) -> Result<String, String> {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -588,11 +598,7 @@ mod tests {
                 assert_eq!(frame["type"], "fetch");
                 zeroize::Zeroizing::new(reply.to_vec())
             };
-            let _ = sender.send(super::conversation(
-                command,
-                br#"{"input":{}}"#,
-                &mut answer,
-            ));
+            let _ = sender.send(super::conversation(command, &input, &mut answer));
         });
         receiver
             .recv_timeout(std::time::Duration::from_secs(30))
@@ -605,6 +611,7 @@ mod tests {
         let result = converse_within_deadline(
             r#"read -r invocation; for n in 1 2; do printf '{"type":"fetch","n":%s}\n' $n; read -r reply; done; printf '{"invocation":%s,"reply":%s}\n' "$invocation" "$reply""#,
             br#"{"status":204,"headers":[],"body":""}"#,
+            br#"{"input":{}}"#.to_vec(),
         );
 
         assert_eq!(
@@ -625,8 +632,30 @@ mod tests {
             r#"read -r invocation; printf '{"type":"fetch"}\n'; read -r reply; exit 0"#,
             r#"read -r invocation; printf '{"type":"result"'; exit 0"#,
         ] {
-            assert!(converse_within_deadline(script, b"{}").is_err(), "{script}");
+            let input = br#"{"input":{}}"#.to_vec();
+            assert!(
+                converse_within_deadline(script, b"{}", input).is_err(),
+                "{script}"
+            );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_writes_before_reading_a_large_invocation_never_blocks_the_exchange() {
+        let large = [
+            b"{\"input\":\"".as_slice(),
+            &vec![b'a'; 1024 * 1024],
+            b"\"}",
+        ]
+        .concat();
+        let answered = converse_within_deadline(
+            r#"printf '{"type":"fetch"}\n'; read -r invocation; read -r reply; printf '{"reply":%s}\n' "$reply""#,
+            br#"{"status":204}"#,
+            large.clone(),
+        );
+        assert_eq!(answered, Ok(r#"{"reply":{"status":204}}"#.to_owned()));
+        assert!(converse_within_deadline(r"printf 'garbage\n'", b"{}", large).is_err());
     }
 
     #[test]
