@@ -60,8 +60,6 @@ services:
       SHIMPZ_LOCAL_CHAT_CONTINUATIONS_KEY_PATH: /var/lib/shimpz-local/chat-continuations/key/aes256.key
       SHIMPZ_OAUTH_BROKER_PROXY_HOST: shimpz-account-egress
       SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
-      SHIMPZ_ASSISTANT_EGRESS_CONTAINER: shimpz-assistant-egress
-      SHIMPZ_ASSISTANT_EGRESS_IMAGE: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /var/lib/shimpz-local/assistant-egress
     volumes:
       - type: bind
@@ -199,6 +197,7 @@ services:
       - brain_runtime
       - account_egress
       - assistant_release
+      - assistant_egress
 
   shimpz-assistant-egress:
     container_name: shimpz-assistant-egress
@@ -225,7 +224,8 @@ services:
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /policy
       SHIMPZ_ASSISTANT_EGRESS_AUDIT_LOG: /var/log/assistant-egress/audit.jsonl
       SHIMPZ_ASSISTANT_EGRESS_MAX_CONCURRENCY: "64"
-      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
+      # Team is the only source of Assistant provider calls (ADR-0106).
+      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "64"
       SHIMPZ_ASSISTANT_EGRESS_LISTEN_BACKLOG: "16"
     volumes:
       - type: volume
@@ -261,6 +261,7 @@ services:
     logging:
       driver: none
     networks:
+      - assistant_egress
       - assistant_egress_out
 
   shimpz-assistant-release:
@@ -595,6 +596,9 @@ networks:
     internal: true
   brain_egress_out:
     driver: bridge
+  assistant_egress:
+    driver: bridge
+    internal: true
   assistant_egress_out:
     driver: bridge
   assistant_release:

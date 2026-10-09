@@ -22,7 +22,7 @@ pub(crate) const RESERVED: [&str; 8] = [
     "shimpz-account-egress",
     "shimpz-account-egress-init",
 ];
-const NETWORKS: [&str; 10] = [
+const NETWORKS: [&str; 11] = [
     "egress",
     "control",
     "brain_runtime",
@@ -30,6 +30,7 @@ const NETWORKS: [&str; 10] = [
     "brain_egress_out",
     "assistant_release",
     "assistant_release_out",
+    "assistant_egress",
     "assistant_egress_out",
     "account_egress",
     "account_egress_out",
