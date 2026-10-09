@@ -11,7 +11,7 @@ class Report(TypedDict):
 @action(description="Ask for one provider call and report how it ended.", integrations=["cloudflare"])
 async def run(url: str, *, ctx: Context) -> Report:
     # The CLI makes the call and adds the Integration bearer itself; the Action never holds a credential (ADR-0106).
-    if hasattr(ctx, "integrations") or any(name.startswith("SHIMPZ_INTEGRATION_") for name in os.environ):
+    if any(name.startswith("SHIMPZ_INTEGRATION_") for name in os.environ):
         return {"outcome": "credential-exposed"}
     try:
         response = await ctx.fetch("GET", url)

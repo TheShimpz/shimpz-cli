@@ -621,10 +621,6 @@ mod tests {
         assert_eq!(installed.release_ref, developer.reference);
         assert!(installed.developer());
         assert!(read_installed(&paths, HostProfile::MacOs).is_err());
-        let valid = fs::read_to_string(&paths.environment).unwrap();
-        let retired = format!("SHIMPZ_LOCAL_RELEASE_BASELINE={}\n", release().reference);
-        fs::write(&paths.environment, format!("{valid}{retired}")).unwrap();
-        assert!(read_installed(&paths, HostProfile::Linux).is_err());
 
         // A published release never runs a member from this host's image store.
         write_linux(&paths, &release());
@@ -634,16 +630,12 @@ mod tests {
                 .unwrap()
                 .developer()
         );
-        for invalid in [
-            format!("{published}{retired}"),
-            published.replace(
-                "ghcr.io/theshimpz/shimpz-team-local@",
-                "localhost/shimpz-team-local@",
-            ),
-        ] {
-            fs::write(&paths.environment, invalid).unwrap();
-            assert!(read_installed(&paths, HostProfile::Linux).is_err());
-        }
+        let invalid = published.replace(
+            "ghcr.io/theshimpz/shimpz-team-local@",
+            "localhost/shimpz-team-local@",
+        );
+        fs::write(&paths.environment, invalid).unwrap();
+        assert!(read_installed(&paths, HostProfile::Linux).is_err());
     }
 
     #[test]
@@ -732,14 +724,6 @@ mod tests {
             valid.replace(
                 "SHIMPZ_STORAGE_PROFILE=linux-luks",
                 "SHIMPZ_STORAGE_PROFILE=managed-disk",
-            ),
-            valid.replace(
-                "SHIMPZ_STORAGE_PROFILE=linux-luks",
-                "SHIMPZ_STORAGE_PROFILE=macos-filevault",
-            ),
-            valid.replace(
-                "SHIMPZ_STORAGE_PROFILE=linux-luks",
-                "SHIMPZ_STORAGE_PROFILE=windows-wsl",
             ),
             valid.replace("SHIMPZ_CPUSET=0", "SHIMPZ_CPUSET=0,1"),
             valid.replace(

@@ -513,14 +513,12 @@ mod tests {
         };
         assert!(session.validate().is_ok());
         assert!(session.has_scope("assistant:publish"));
-        for retired in ["teams:read", "assistant:install"] {
-            let retired_session = AuthSession {
-                authenticated: true,
-                account_id: "a".repeat(32),
-                scopes: vec!["identity:read".into(), retired.into()],
-            };
-            assert!(retired_session.validate().is_err(), "{retired}");
-        }
+        let unknown_scope = AuthSession {
+            authenticated: true,
+            account_id: "a".repeat(32),
+            scopes: vec!["identity:read".into(), "unknown:scope".into()],
+        };
+        assert!(unknown_scope.validate().is_err());
     }
 
     #[test]

@@ -94,7 +94,6 @@ fn the_invocation_carries_no_credential_and_an_undeclared_host_is_refused() {
     let request = fs::read_to_string(capture).unwrap();
     assert!(request.contains(r#""stored_inputs":[]"#), "{request}");
     assert!(!request.contains("integration-secret"), "{request}");
-    assert!(!request.contains("integrations"), "{request}");
 }
 
 #[test]

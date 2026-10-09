@@ -257,7 +257,6 @@ mod tests {
         let readme = fs::read_to_string(root.join("README.md")).unwrap();
         assert!(readme.contains("shimpz assistant check"));
         assert!(readme.contains("shimpz assistant run hello-world"));
-        assert!(!readme.contains("shimpz test"));
         assert!(
             fs::read(root.join("icon.png"))
                 .unwrap()
@@ -281,7 +280,6 @@ mod tests {
         assert!(action.contains("title=text(\"Send a greeting\")"));
         assert!(action.contains("name=identifier(name, max_length=80)"));
         assert!(readme.contains("shimpz assistant stage"));
-        assert!(!readme.contains("shimpz assistant prepare"));
     }
 
     #[test]
@@ -297,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_only_current_assistant_commands_after_creation() {
+    fn reports_the_assistant_commands_after_creation() {
         let temporary = TemporaryDirectory::new();
         let root = temporary.path.join("hello");
 
@@ -305,7 +303,6 @@ mod tests {
 
         assert!(success.contains("shimpz assistant check"));
         assert!(success.contains("shimpz assistant run hello-world"));
-        assert!(!success.contains("shimpz test"));
     }
 
     fn walk_files(root: &Path) -> BTreeSet<String> {

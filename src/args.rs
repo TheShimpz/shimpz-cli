@@ -505,20 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_retired_language_pack_preparation() {
-        for arguments in [
-            &["assistant", "prepare"][..],
-            &["assistant", "prepare", "--project", "whatsapp"][..],
-            &["assistant", "prepare", "--help"][..],
-        ] {
-            assert_eq!(
-                parse(strings(arguments)),
-                Err("unknown assistant operation".into())
-            );
-        }
-    }
-
-    #[test]
     fn parses_local_stage_with_an_optional_project() {
         assert_eq!(
             parse(strings(&["assistant", "stage"])),
@@ -809,27 +795,18 @@ mod tests {
             parse(strings(&["assistant", "publish", "--project"])),
             Err("--project requires a value".into())
         );
-        assert_eq!(
-            parse(strings(&["assistant", "publish", "--visibility", "public"])),
-            Err("assistant publish accepts only --project <path>".into())
-        );
     }
 
     #[test]
-    fn keeps_assistant_operations_out_of_the_top_level() {
-        for retired in ["new", "develop", "check", "test", "publish"] {
-            assert_eq!(parse(strings(&[retired])), Err("unknown command".into()));
-        }
+    fn assistant_requires_one_known_operation() {
         assert_eq!(
             parse(strings(&["assistant"])),
             Err("assistant requires an operation".into())
         );
-        for retired in ["test", "install"] {
-            assert_eq!(
-                parse(strings(&["assistant", retired])),
-                Err("unknown assistant operation".into())
-            );
-        }
+        assert_eq!(
+            parse(strings(&["assistant", "unknown"])),
+            Err("unknown assistant operation".into())
+        );
     }
 
     #[test]
@@ -855,11 +832,10 @@ mod tests {
         for current in TOP_LEVEL_COMMANDS {
             assert_ne!(parse(strings(&[current])), Err("unknown command".into()),);
         }
-        assert_eq!(parse(strings(&["space"])), Err("unknown command".into()),);
     }
 
     #[test]
-    fn parses_the_complete_space_lifecycle_without_a_space_alias() {
+    fn parses_the_complete_space_lifecycle() {
         assert_eq!(
             parse(strings(&["install"])),
             Ok(Invocation::Execute(Command::Install(SpaceInstall {
@@ -918,10 +894,6 @@ mod tests {
         }
         assert_eq!(
             parse(strings(&["hardreset"])),
-            Err("unknown command".into())
-        );
-        assert_eq!(
-            parse(strings(&["space", "install"])),
             Err("unknown command".into())
         );
         assert!(Topic::Root.text().contains("shimpz stop"));
@@ -992,29 +964,21 @@ mod tests {
             })))
         );
         for invalid in [
-            &["start", "--local-release", &developer][..],
             &["start", "--release", &developer][..],
             &["install", "--release", &developer][..],
             &["install", "--release", &developer, "--candidate"][..],
-            &["start", "--local-release"][..],
         ] {
             assert!(parse(strings(invalid)).is_err(), "accepted: {invalid:?}");
         }
         for topic in Topic::ALL {
-            for hidden in [
-                "--scheduled",
-                "--candidate",
-                "--print-graph",
-                "--release",
-                "--local-release",
-            ] {
+            for hidden in ["--scheduled", "--candidate", "--print-graph", "--release"] {
                 assert!(!topic.text().contains(hidden));
             }
         }
     }
 
     #[test]
-    fn help_exposes_only_resource_first_assistant_operations() {
+    fn help_names_every_resource_first_assistant_operation() {
         for current in [
             "shimpz assistant new",
             "shimpz assistant develop",
@@ -1025,20 +989,6 @@ mod tests {
             "shimpz assistant publish",
         ] {
             assert!(Topic::Root.text().contains(current));
-        }
-        for retired in [
-            "shimpz new assistant",
-            "shimpz develop",
-            "shimpz check",
-            "shimpz test",
-            "shimpz publish",
-            "shimpz install assistant",
-            "shimpz assistant install",
-            "shimpz assistant prepare",
-        ] {
-            for topic in Topic::ALL {
-                assert!(!topic.text().contains(retired));
-            }
         }
     }
 

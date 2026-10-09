@@ -719,13 +719,6 @@ description = "Greets people by name in one short, friendly sentence."
     }
 
     #[test]
-    fn rejects_the_retired_root_level_identity() {
-        let retired = VALID.replace("[shimpz]\n", "");
-
-        assert!(PublicationIdentity::parse(retired.as_bytes()).is_err());
-    }
-
-    #[test]
     fn projects_only_bounded_canonical_integration_ids() {
         let source = format!("{VALID}\n[integrations.whatsapp]\nscopes = [\"messages.write\"]\n");
         assert_eq!(

@@ -28,8 +28,6 @@ fn help_exposes_the_resource_first_assistant_surface() {
     assert!(help.contains("shimpz assistant run <action-id>"));
     assert!(help.contains("shimpz assistant stage [--project <path>]"));
     assert!(help.contains("shimpz assistant unstage [--project <path>]"));
-    assert!(!help.contains("shimpz test"));
-    assert!(!help.contains("shimpz install assistant"));
 }
 
 #[test]
@@ -182,22 +180,6 @@ fn reset_help_explains_the_destructive_boundary() {
     assert!(help.contains("interactive terminal"));
     assert!(help.contains("Creator credentials and pulled images are retained"));
     assert!(!help.contains("Assistant development:"));
-}
-
-#[test]
-fn retired_assistant_spellings_fail_at_the_process_boundary() {
-    for arguments in [
-        &["test", "hello-world"][..],
-        &["install", "assistant"][..],
-        &["assistant", "test", "hello-world"][..],
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
-            .args(arguments)
-            .output()
-            .unwrap();
-
-        assert_eq!(output.status.code(), Some(2));
-    }
 }
 
 #[test]

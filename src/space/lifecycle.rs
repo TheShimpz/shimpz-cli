@@ -4655,7 +4655,7 @@ mod tests {
             (
                 200,
                 serde_json::json!({
-                    "profile": "hosted",
+                    "profile": "unknown",
                     "authenticated": false,
                     "initialized": true,
                     "authentication_state": "configured",

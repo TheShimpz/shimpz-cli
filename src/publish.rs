@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_publication_response_with_the_retired_visibility_field() {
+    fn refuses_a_publication_response_with_an_unknown_field() {
         let mut response = serde_json::json!({
             "assistant_id": "hello-world",
             "version": "0.1.0",
@@ -658,7 +658,7 @@ mod tests {
             "blocked": false,
         });
         assert!(serde_json::from_value::<Publication>(response.clone()).is_ok());
-        response["visibility"] = "public".into();
+        response["unexpected"] = "value".into();
         assert!(serde_json::from_value::<Publication>(response).is_err());
     }
 
@@ -683,12 +683,12 @@ mod tests {
         assert!(invalid.validate(DIGEST).is_err());
         invalid = ready_publication();
         invalid.image_reference = Some(
-            "ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "ghcr.io/example/assistant@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
         );
         assert!(invalid.validate(DIGEST).is_err());
         invalid = ready_publication();
         invalid.signature_reference =
-            Some("ghcr.io/theshimpz/shimpz-assistants@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+            Some("ghcr.io/example/assistant@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
         assert!(invalid.validate(DIGEST).is_err());
         invalid = ready_publication();
         invalid.workflow_run_id = Some(0);

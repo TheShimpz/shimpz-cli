@@ -615,8 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_request_fields_and_legacy_results() {
-        assert!(parse_response(r#"{"ok":true}"#).is_err());
+    fn rejects_a_response_without_its_type() {
+        assert!(parse_response("{}").is_err());
     }
 
     #[test]

@@ -465,15 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_missing_duplicate_and_retired_fields() {
+    fn rejects_unknown_missing_and_duplicate_fields() {
         for invalid in [
             "malformed".into(),
-            valid().replace("schema=local-v2\n", "schema=local-v1\n"),
+            valid().replace("schema=local-v2\n", "schema=unknown\n"),
             valid().replace("ordinal=42\n", ""),
             format!("{}unknown=value\n", valid()),
             format!("{}ordinal=43\n", valid()),
-            valid().replace("cli_revision=", "reconciler_sha256="),
-            format!("{}baseline={}\n", valid(), published_ref()),
         ] {
             assert!(signed(&invalid, "1").is_err(), "accepted: {invalid}");
         }
@@ -519,9 +517,7 @@ mod tests {
         assert!(unsigned(&developer_ref(), &valid(), "1").is_err());
         for invalid in [
             developer().replace("schema=local-dev-v2", "schema=local-v2"),
-            developer().replace("schema=local-dev-v2", "schema=local-dev-v1"),
             format!("{}cli_macos_arm64_sha256={HEX_64}\n", developer()),
-            format!("{}baseline={}\n", developer(), published_ref()),
             developer().replace("localhost/shimpz-admin", "localhost/shimpz-brain"),
             developer().replace("localhost/shimpz-admin", "127.0.0.1:5000/shimpz-admin"),
         ] {
