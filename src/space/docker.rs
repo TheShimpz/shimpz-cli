@@ -167,10 +167,16 @@ const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
 /// Team and Brain, the only writers of the runtime state volumes, both run as this identity, so the reset runs as it
 /// too and needs no capability.
 const RUNTIME_STATE_OWNER: &str = "10001:10001";
-/// First proves every volume root and every entry below it belongs to that owner, never following a link; a
+const RUNTIME_STATE_OWNER_UID: u32 = 10001;
+
+/// First proves every volume root below `root` and every entry below it belongs to `owner`, never following a link; a
 /// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
 /// and empty its own directories, leaving every file mode unchanged, and delete everything below the volume roots.
-const RUNTIME_STATE_RESET_SCRIPT: &str = "set -eu; foreign=$(find /state -mindepth 1 ! -user 10001 -print -quit); test -z \"$foreign\"; find /state -mindepth 2 -type d ! -perm -u=rwx -exec chmod u+rwx {} +; find /state -mindepth 2 -delete; sync";
+fn runtime_state_reset_script(owner: u32, root: &str) -> String {
+    format!(
+        "set -eu; foreign=$(find {root} -mindepth 1 ! -user {owner} -print -quit); test -z \"$foreign\"; find {root} -mindepth 2 -type d ! -perm -u=rwx -exec chmod u+rwx {{}} +; find {root} -mindepth 2 -delete; sync"
+    )
+}
 
 /// The key a published release set must be signed with: the published pin, or the key the test build generates.
 #[cfg(not(test))]
@@ -1588,15 +1594,10 @@ fn clear_volumes_arguments(
     }
     // Depth 1 holds the volume roots themselves, which stay; everything below them is removed, and the deletions
     // reach the disk where they ran, inside Docker's own machine, before the new epoch is recorded.
-    for value in [
-        "--entrypoint",
-        "/bin/sh",
-        image,
-        "-c",
-        RUNTIME_STATE_RESET_SCRIPT,
-    ] {
+    for value in ["--entrypoint", "/bin/sh", image, "-c"] {
         arguments.push(value.into());
     }
+    arguments.push(runtime_state_reset_script(RUNTIME_STATE_OWNER_UID, "/state").into());
     arguments
 }
 
@@ -2519,6 +2520,62 @@ mod tests {
         assert_eq!(timings.summary().len(), MAX_COMPOSE_CONTAINERS);
     }
 
+    /// The reset script itself, run by the host shell on a real tree: it refuses a foreign owner or an untraversable
+    /// directory before changing anything, never follows a link out of the roots, keeps the roots, and changes no
+    /// file mode.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_state_reset_proves_ownership_before_it_deletes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let run = |root: &Path, owner: u32| {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(runtime_state_reset_script(
+                    owner,
+                    &root.display().to_string(),
+                ))
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let state = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = state.path().join("controller_routine_state");
+        let nested = root.join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("key"), "test-token").unwrap();
+        fs::set_permissions(nested.join("key"), fs::Permissions::from_mode(0o400)).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::write(outside.path().join("kept"), "kept").unwrap();
+        symlink(outside.path(), root.join("link")).unwrap();
+        let owner = fs::metadata(state.path()).unwrap().uid();
+
+        // Another owner: every entry is foreign, so nothing changes.
+        assert!(!run(state.path(), owner + 1));
+        assert!(nested.join("key").exists());
+        // An untraversable directory stops the proof before any repair or deletion.
+        let blocked = root.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(!run(state.path(), owner));
+        assert_eq!(
+            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
+            0o500
+        );
+        assert!(nested.join("key").exists());
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        // The owner's own tree: emptied below the root, the root kept, the link's target untouched.
+        assert!(run(state.path(), owner));
+        assert!(root.is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_to_string(outside.path().join("kept")).unwrap(),
+            "kept"
+        );
+    }
+
     /// Every helper container the CLI starts runs as one explicit non-root identity with every capability dropped.
     #[cfg(unix)]
     #[test]
@@ -2592,7 +2649,8 @@ mod tests {
             .iter()
             .map(|argument| argument.to_str().unwrap())
             .collect();
-        let tail = [image.as_str(), "-c", RUNTIME_STATE_RESET_SCRIPT];
+        let script = runtime_state_reset_script(10001, "/state");
+        let tail = [image.as_str(), "-c", script.as_str()];
         assert_eq!(&arguments[arguments.len() - tail.len()..], tail);
         for pair in [
             ["--network", "none"],
