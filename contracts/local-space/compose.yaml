@@ -182,15 +182,18 @@ services:
       start_interval: 250ms
     logging:
       driver: none
+    # Team boots without either proxy healthy: it reads the Account egress capability and reaches the release proxy
+    # per request, so it waits only for them to start (Docker seeds their shared volumes at creation). The initializer
+    # must still complete, and the final health gate still requires every service healthy before an apply commits.
     depends_on:
       shimpz-account-egress-init:
         condition: service_completed_successfully
       shimpz-assistant-egress:
         condition: service_started
       shimpz-assistant-release:
-        condition: service_healthy
+        condition: service_started
       shimpz-account-egress:
-        condition: service_healthy
+        condition: service_started
     networks:
       - control
       - brain_runtime
