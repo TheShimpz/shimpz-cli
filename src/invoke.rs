@@ -117,7 +117,10 @@ fn zeroize_strings(value: &mut Value) {
 pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
     let declaration = action_declaration(&assistant.contract()?, action_id)?;
-    let mut broker = broker(project, &declaration)?;
+    let manifest = fs::read(project.join("shimpz.toml"))
+        .map_err(|_| "Assistant manifest is unavailable".to_owned())?;
+    let mut broker = broker(&manifest, &declaration)?;
+    let help = manifest::stored_input_help(&manifest)?;
     let mut request = request(input)?;
     // Each round answers one request: at most every replay response and every Stored Input, then the result.
     for _ in 0..=(MAX_HUMAN_RESPONSES + MAX_STORED_INPUTS) {
@@ -136,7 +139,11 @@ pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<Stri
             }
             ActionResponse::Request(frame) => {
                 let display = frame.display(&assistant.render(&frame.frame())?)?;
-                let mut response = answer(&frame, &display)?;
+                // A Stored Input request says what the secret is, how to get it, and where (ADR-0090).
+                let shown_help = frame
+                    .stored_input()
+                    .and_then(|stored_input| help.get(stored_input));
+                let mut response = answer(&frame, &display, shown_help)?;
                 // A Stored Input stays with the broker, as Team keeps it sealed; the Action learns only its id.
                 if let Some(stored_input) = frame.stored_input() {
                     let Value::String(value) = response["value"].take() else {
@@ -199,10 +206,8 @@ fn action_declaration(contract: &str, action_id: &str) -> Result<ActionDeclarati
 
 /// The broker for one Action: the manifest's hosts and the Action's own placements, and the Creator's token for each
 /// declared Integration when its `SHIMPZ_INTEGRATION_<ID>` is set.
-fn broker(project: &Path, declaration: &ActionDeclaration) -> Result<provider::Broker, String> {
-    let bytes = fs::read(project.join("shimpz.toml"))
-        .map_err(|_| "Assistant manifest is unavailable".to_owned())?;
-    let (hosts, mut placements) = manifest::call_policy(&bytes)?;
+fn broker(manifest: &[u8], declaration: &ActionDeclaration) -> Result<provider::Broker, String> {
+    let (hosts, mut placements) = manifest::call_policy(manifest)?;
     placements.retain(|id, _| declaration.stored_inputs.contains(id));
     let integrations = declaration
         .integrations

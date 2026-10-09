@@ -333,6 +333,28 @@ pub(crate) fn call_policy(
     Ok((manifest.network.allowed_hosts, manifest.stored_inputs))
 }
 
+/// What a person reads before entering one Stored Input: its help text and the page where the value is made.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct StoredInputHelp {
+    pub(crate) description: String,
+    pub(crate) help_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HelpManifest {
+    #[serde(default)]
+    stored_inputs: BTreeMap<String, StoredInputHelp>,
+}
+
+/// Every Stored Input's help of a manifest the SDK has already validated, by id.
+pub(crate) fn stored_input_help(bytes: &[u8]) -> Result<BTreeMap<String, StoredInputHelp>, String> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|source| toml::from_str::<HelpManifest>(source).ok())
+        .map(|manifest| manifest.stored_inputs)
+        .ok_or_else(|| "Assistant manifest Stored Inputs are invalid".to_owned())
+}
+
 /// The manifest schema's display-text rule: trimmed, bounded in code points, and free of control characters and of
 /// invisible bidirectional, zero-width, and format characters.
 fn valid_display_text(value: &str, maximum: usize) -> bool {
@@ -378,7 +400,7 @@ fn valid_creators(creators: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicationIdentity, integration_ids};
+    use super::{PublicationIdentity, StoredInputHelp, integration_ids, stored_input_help};
 
     const VALID: &str = r#"
 [shimpz]
@@ -453,6 +475,27 @@ description = "Greets people by name in one short, friendly sentence."
         format!(
             "{VALID}\n[stored_inputs.exa-api-key]\nkind = \"password\"\nlabel = \"Exa API key\"\n{fields}\n"
         )
+    }
+
+    #[test]
+    fn projects_each_stored_input_help_by_id_for_the_local_prompt() {
+        let source = with_stored_input(&format!(
+            "description = \"{HELP}\"\nhelp_url = \"{HELP_URL}\"\nhost = \"api.exa.ai\"\nheader = \"x-api-key\""
+        ));
+        let help = stored_input_help(source.as_bytes()).expect("help");
+        assert_eq!(
+            help.get("exa-api-key"),
+            Some(&StoredInputHelp {
+                description: HELP.into(),
+                help_url: HELP_URL.into()
+            })
+        );
+        assert!(
+            stored_input_help(VALID.as_bytes())
+                .expect("no Stored Inputs")
+                .is_empty()
+        );
+        assert!(stored_input_help(b"[stored_inputs.key]\nkind = 1\n").is_err());
     }
 
     #[test]

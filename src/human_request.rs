@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::action_failure::ActionFailure;
+use crate::manifest::StoredInputHelp;
 use crate::{digest, identifier, output};
 
 const BASE_FIELDS: [&str; 5] = ["kind", "ordinal", "fingerprint", "title", "description"];
@@ -134,11 +135,20 @@ impl HumanRequest {
     }
 }
 
-pub(crate) fn answer(request: &HumanRequest, display: &Display) -> Result<Value, String> {
+/// Ask the person for one request. A Stored Input request first says what the secret is and how to get it, and where.
+pub(crate) fn answer(
+    request: &HumanRequest,
+    display: &Display,
+    help: Option<&StoredInputHelp>,
+) -> Result<Value, String> {
     output::request(&display.title);
     output::request(&display.description);
     if let Some(label) = &display.label {
         output::request(label);
+    }
+    if let Some(help) = help {
+        output::request(&help.description);
+        output::request(&format!("How to get it: {}", help.help_url));
     }
     let value = match request.kind.as_str() {
         "approval" => Value::Bool(confirm("Approve this action? [y/N]")?),
