@@ -361,8 +361,10 @@ where
         });
     let status = capture::wait(&mut child, privileged_reap_deadline(tool))
         .map_err(|failure| unsettled(wait_failure(&program, tool.budget(), failure)))?;
+    // The status is judged first, so a tool that may not have ended is recorded even when its input also failed.
+    let outcome = privileged_outcome(&program, tool, status);
     write_result?;
-    privileged_outcome(&program, tool, status)
+    outcome
 }
 
 pub(crate) fn privileged_output<I, S>(tool: Tool, arguments: I) -> Result<String, String>

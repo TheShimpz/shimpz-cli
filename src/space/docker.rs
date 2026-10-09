@@ -44,6 +44,47 @@ const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
 const STREAM_GRACE: Duration = Duration::from_secs(5);
 /// Distinguishes the one-shot helper containers this process names.
 static HELPER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// The kind label, and name stem, of the helper that projects the Local release status.
+const RELEASE_STATUS_HELPER: &str = "release-status";
+/// The kind label, and name stem, of the helpers that project or clear the reset capability.
+const RESET_CAPABILITY_HELPER: &str = "reset-capability";
+
+/// Remove every Space-managed helper container of `kind` an earlier run left, and prove none remains: a helper whose
+/// removal could not be proved may still write what a new one would, so no new one starts until it is gone.
+fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
+    let list = || {
+        output(
+            docker,
+            [
+                "ps",
+                "--all",
+                "--quiet",
+                "--filter",
+                "label=com.shimpz.local.managed=1",
+                "--filter",
+                &format!("label=com.shimpz.local.kind={kind}"),
+            ],
+        )
+    };
+    let left = list()?;
+    if left.trim().is_empty() {
+        return Ok(());
+    }
+    let mut arguments = vec!["rm", "--force"];
+    arguments.extend(left.split_whitespace());
+    let _ = quiet_status(
+        Command::new(docker).args(&arguments),
+        "Docker helper container removal",
+        DOCKER_QUICK,
+    );
+    if list()?.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "an earlier {kind} helper container could not be removed; run docker rm --force on the containers labelled com.shimpz.local.kind={kind}"
+        ))
+    }
+}
 
 /// A container name owned by this process for one helper of `kind`, so a helper whose Docker client was stopped can
 /// still be removed: stopping the client never stops its container.
@@ -169,38 +210,38 @@ impl PendingStatus {
         // The input is closed by now, so the helper ends and is reaped, even when nothing was sent; one that outlives
         // its deadline is stopped.
         drop(child.stdin.take());
-        match (
+        let outcome = match (
             capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
             sent,
         ) {
-            // The stopped client leaves its container behind, which could still write the document later; it is
-            // removed, and proved gone, before anything else may project a status.
+            (Ok(status), Ok(())) if status.success() => return Ok(()),
             (Err(capture::Failure::TimedOut { stopped: true }), _) => {
-                match remove_helper(&self.docker, &self.name) {
-                    Ok(()) => Err(ProjectionFailure::NotProjected(docker_timed_out(
-                        DOCKER_QUICK,
-                        true,
-                    ))),
-                    Err(cause) => Err(ProjectionFailure::Unreaped(cause)),
-                }
+                ProjectionFailure::NotProjected(docker_timed_out(DOCKER_QUICK, true))
             }
             (Err(failure), sent) => {
-                let _ = remove_helper(&self.docker, &self.name);
                 let unreaped = format!(
                     "the Local release status helper could not be reaped: {}",
                     wait_failure(DOCKER_QUICK, failure)
                 );
-                Err(ProjectionFailure::Unreaped(match sent {
+                ProjectionFailure::Unreaped(match sent {
                     Ok(()) => unreaped,
                     Err(cause) => format!("{cause}; {unreaped}"),
-                }))
+                })
             }
-            (Ok(_), Err(cause)) => Err(ProjectionFailure::NotProjected(cause)),
-            (Ok(status), Ok(())) if status.success() => Ok(()),
-            (Ok(_), Ok(())) => Err(ProjectionFailure::NotProjected(
+            (Ok(_), Err(cause)) => ProjectionFailure::NotProjected(cause),
+            (Ok(_), Ok(())) => ProjectionFailure::NotProjected(
                 "the Local release status could not be projected to Admin".into(),
-            )),
-        }
+            ),
+        };
+        // An unsuccessful client does not prove its container ended, and that container could still write the
+        // document later: it is removed and proved gone, or the failure says it may remain.
+        Err(match (outcome, remove_helper(&self.docker, &self.name)) {
+            (outcome, Ok(())) => outcome,
+            (
+                ProjectionFailure::NotProjected(cause) | ProjectionFailure::Unreaped(cause),
+                Err(cleanup),
+            ) => ProjectionFailure::Unreaped(format!("{cause}; {cleanup}")),
+        })
     }
 
     /// End the helper without a document and reap it; an unreaped helper is reported, never ignored.
@@ -933,8 +974,10 @@ impl Engine {
         if identity.trim() != "shimpz-space_release_status|shimpz-space|release_status" {
             return Err("the Local release status volume is not owned by this Space".into());
         }
+        // A status helper an earlier projection could not prove removed may still write; no other may start first.
+        sweep_helpers(&self.docker, RELEASE_STATUS_HELPER)?;
         let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
-        let name = helper_name("release-status");
+        let name = helper_name(RELEASE_STATUS_HELPER);
         let arguments =
             status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image, &name);
         let child = capture::spawn(
@@ -961,10 +1004,11 @@ impl Engine {
             return Err("the Local reset capability projection is invalid".into());
         }
         self.validate_reset_capability_volume()?;
+        sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
         let mount = format!(
             "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
         );
-        let name = helper_name("reset-capability");
+        let name = helper_name(RESET_CAPABILITY_HELPER);
         let arguments = reset_capability_arguments(
             self.platform,
             &self.cpuset,
@@ -990,22 +1034,21 @@ impl Engine {
                     "the Local reset capability could not be sent to Docker".to_owned()
                 })
             });
-        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped, and its
-        // container, which a stopped client leaves behind, is removed and proved gone.
-        let status =
-            capture::wait(&mut child, Instant::now() + DOCKER_QUICK).map_err(|failure| {
-                let cause = wait_failure(DOCKER_QUICK, failure);
-                match remove_helper(&self.docker, &name) {
-                    Ok(()) => cause,
-                    Err(cleanup) => format!("{cause}; {cleanup}"),
-                }
-            })?;
-        sent?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err("the Local reset capability could not be projected to Admin".into())
-        }
+        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped.
+        let cause = match (
+            capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
+            sent,
+        ) {
+            (Ok(status), Ok(())) if status.success() => return Ok(()),
+            (Err(failure), _) => wait_failure(DOCKER_QUICK, failure),
+            (Ok(_), Err(cause)) => cause,
+            (Ok(_), Ok(())) => "the Local reset capability could not be projected to Admin".into(),
+        };
+        // An unsuccessful client does not prove its container ended: it is removed and proved gone.
+        Err(match remove_helper(&self.docker, &name) {
+            Ok(()) => cause,
+            Err(cleanup) => format!("{cause}; {cleanup}"),
+        })
     }
 
     pub(crate) fn clear_reset_capability(&self, admin_image: &str) -> Result<(), String> {
@@ -1013,10 +1056,11 @@ impl Engine {
             return Err("the Local reset capability cleanup is invalid".into());
         }
         self.validate_reset_capability_volume()?;
+        sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
         let mount = format!(
             "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
         );
-        let name = helper_name("reset-capability");
+        let name = helper_name(RESET_CAPABILITY_HELPER);
         let arguments = reset_capability_arguments(
             self.platform,
             &self.cpuset,
@@ -1026,17 +1070,16 @@ impl Engine {
             reset_capability_clear_script(),
             &name,
         );
-        let cleared = self
-            .run_quiet_status("Docker reset capability cleanup", arguments)
-            .map_err(|cause| match remove_helper(&self.docker, &name) {
-                Ok(()) => cause,
-                Err(cleanup) => format!("{cause}; {cleanup}"),
-            })?;
-        if cleared.success() {
-            Ok(())
-        } else {
-            Err("the Local reset capability could not be removed".into())
-        }
+        let cause = match self.run_quiet_status("Docker reset capability cleanup", arguments) {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => "the Local reset capability could not be removed".to_owned(),
+            Err(cause) => cause,
+        };
+        // An unsuccessful client does not prove its container ended: it is removed and proved gone.
+        Err(match remove_helper(&self.docker, &name) {
+            Ok(()) => cause,
+            Err(cleanup) => format!("{cause}; {cleanup}"),
+        })
     }
 
     fn validate_reset_capability_volume(&self) -> Result<(), String> {
@@ -1516,7 +1559,17 @@ fn status_projection_arguments(
         platform,
         cpuset,
         "64m",
-        &["--interactive", "--user", "1000:1000", "--name", name],
+        &[
+            "--interactive",
+            "--user",
+            "1000:1000",
+            "--name",
+            name,
+            "--label",
+            "com.shimpz.local.managed=1",
+            "--label",
+            "com.shimpz.local.kind=release-status",
+        ],
         mount,
         admin_image,
         &["-c", script],
@@ -1540,16 +1593,26 @@ fn reset_capability_arguments(
     script: &str,
     name: &str,
 ) -> Vec<OsString> {
-    let options: &[&str] = if interactive {
-        &["--interactive", "--user", "1000:1000", "--name", name]
+    let labels = [
+        "--label",
+        "com.shimpz.local.managed=1",
+        "--label",
+        "com.shimpz.local.kind=reset-capability",
+    ];
+    let identity = ["--user", "1000:1000", "--name", name];
+    let options: Vec<&str> = if interactive {
+        std::iter::once("--interactive")
+            .chain(identity)
+            .chain(labels)
+            .collect()
     } else {
-        &["--user", "1000:1000", "--name", name]
+        identity.into_iter().chain(labels).collect()
     };
     python_helper_arguments(
         platform,
         cpuset,
         "64m",
-        options,
+        &options,
         mount,
         admin_image,
         &["-c", script],
@@ -2207,7 +2270,7 @@ mod tests {
         crate::fake_tool::write(
             &command,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat >> '{}'; echo . >> '{}.runs' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat >> '{}'; echo . >> '{}.runs' ;;\n  ps) ;;\n  *) exit 1 ;;\nesac\n",
                 received.display(),
                 received.display()
             ),
@@ -2606,6 +2669,89 @@ mod tests {
         assert_ne!(helper_name("x"), helper_name("x"));
     }
 
+    /// No helper starts while one an earlier run left may still write: each is removed, and only Docker's empty
+    /// listing afterwards admits the next.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_helper_is_swept_before_another_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let docker = temporary.path().join("docker");
+        let calls = temporary.path().join("calls");
+        let listed = temporary.path().join("listed");
+        for (remains, expected) in [
+            (false, Ok(())),
+            (
+                true,
+                Err("an earlier release-status helper container could not be removed; run docker rm --force on the containers labelled com.shimpz.local.kind=release-status".to_owned()),
+            ),
+        ] {
+            fs::write(&listed, "aaa\nbbb\n").unwrap();
+            crate::fake_tool::write(
+                &docker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$1\" in\n  ps) cat '{listed}' ;;\n  rm) {clear} ;;\nesac\n",
+                    calls = calls.display(),
+                    listed = listed.display(),
+                    clear = if remains { "exit 1".to_owned() } else { format!(": > '{}'", listed.display()) },
+                ),
+            );
+            let _ = fs::remove_file(&calls);
+
+            assert_eq!(sweep_helpers(&docker, RELEASE_STATUS_HELPER), expected);
+            let listing = "ps --all --quiet --filter label=com.shimpz.local.managed=1 --filter label=com.shimpz.local.kind=release-status";
+            assert_eq!(
+                fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(),
+                [listing, "rm --force aaa bbb", listing]
+            );
+        }
+    }
+
+    /// A status helper whose client failed is removed whatever the failure; one that cannot be proved removed is
+    /// reported as possibly remaining.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_status_helper_is_removed_or_reported_as_remaining() {
+        let temporary = tempfile::tempdir().unwrap();
+        let docker = temporary.path().join("docker");
+        let admin = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
+        for (named, expected) in [
+            (
+                "",
+                ProjectionFailure::NotProjected(
+                    "the Local release status could not be projected to Admin".into(),
+                ),
+            ),
+            (
+                "echo 0123456789ab",
+                ProjectionFailure::Unreaped(String::new()),
+            ),
+        ] {
+            crate::fake_tool::write(
+                &docker,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat > /dev/null; exit 3 ;;\n  ps) case \"$*\" in *name=*) {named} ;; esac ;;\nesac\n"
+                ),
+            );
+            let engine = Engine::with_docker(docker.clone());
+            let failure = engine
+                .begin_release_status(&admin)
+                .unwrap()
+                .unwrap()
+                .commit(b"{}")
+                .unwrap_err();
+            match (&failure, &expected) {
+                (ProjectionFailure::Unreaped(cause), ProjectionFailure::Unreaped(_)) => {
+                    assert!(cause.starts_with("the Local release status could not be projected to Admin; the helper container shimpz-release-status-"), "{cause}");
+                    assert!(
+                        cause.contains(" could not be proved removed and may still be running; run docker rm --force shimpz-release-status-"),
+                        "{cause}"
+                    );
+                }
+                _ => assert_eq!(failure, expected),
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn quiet_failure_retains_a_sanitized_diagnostic() {
@@ -2806,8 +2952,28 @@ mod tests {
     fn admin_helpers_share_one_exact_hardened_argument_list() {
         let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
         let (platform, cpuset) = ("linux/amd64", "0-3");
-        let user = ["--user", "1000:1000", "--name", "n"];
-        let stdin_user = ["--interactive", "--user", "1000:1000", "--name", "n"];
+        let reset = [
+            "--user",
+            "1000:1000",
+            "--name",
+            "n",
+            "--label",
+            "com.shimpz.local.managed=1",
+            "--label",
+            "com.shimpz.local.kind=reset-capability",
+        ];
+        let stdin_reset: Vec<&str> = std::iter::once("--interactive").chain(reset).collect();
+        let stdin_status = [
+            "--interactive",
+            "--user",
+            "1000:1000",
+            "--name",
+            "n",
+            "--label",
+            "com.shimpz.local.managed=1",
+            "--label",
+            "com.shimpz.local.kind=release-status",
+        ];
         let admin = [
             "--name",
             "c",
@@ -2828,13 +2994,13 @@ mod tests {
             text(reset_capability_arguments(
                 platform, cpuset, "m", &image, true, "s", "n"
             )),
-            hardened_helper(&stdin_user, "64m", &image, &["-c", "s"])
+            hardened_helper(&stdin_reset, "64m", &image, &["-c", "s"])
         );
         assert_eq!(
             text(reset_capability_arguments(
                 platform, cpuset, "m", &image, false, "s", "n"
             )),
-            hardened_helper(&user, "64m", &image, &["-c", "s"])
+            hardened_helper(&reset, "64m", &image, &["-c", "s"])
         );
         let status = text(status_projection_arguments(
             platform, cpuset, "m", &image, "n",
@@ -2842,7 +3008,7 @@ mod tests {
         let script = status.last().unwrap().clone();
         assert_eq!(
             status,
-            hardened_helper(&stdin_user, "64m", &image, &["-c", &script])
+            hardened_helper(&stdin_status, "64m", &image, &["-c", &script])
         );
     }
 
