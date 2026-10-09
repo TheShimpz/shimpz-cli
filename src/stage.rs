@@ -901,7 +901,7 @@ mod tests {
         }
         assert!(
             validate_dependency_sources(
-                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.6.0\", \"httpx>=0.28\"]\n"
+                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.7.0\", \"httpx>=0.28\"]\n"
             )
             .is_ok()
         );
