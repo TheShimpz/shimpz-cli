@@ -164,6 +164,13 @@ const COMPOSE_UP: [&str; 9] = [
 ];
 const RUNTIME_STATE_RESET_CONTAINER: &str = "shimpz-runtime-state-reset";
 const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
+/// Team and Brain, the only writers of the runtime state volumes, both run as this identity, so the reset runs as it
+/// too and needs no capability.
+const RUNTIME_STATE_OWNER: &str = "10001:10001";
+/// First proves every volume root and every entry below it belongs to that owner, never following a link; a
+/// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
+/// and empty its own directories, leaving every file mode unchanged, and delete everything below the volume roots.
+const RUNTIME_STATE_RESET_SCRIPT: &str = "set -eu; foreign=$(find /state -mindepth 1 ! -user 10001 -print -quit); test -z \"$foreign\"; find /state -mindepth 2 -type d ! -perm -u=rwx -exec chmod u+rwx {} +; find /state -mindepth 2 -delete; sync";
 
 /// The key a published release set must be signed with: the published pin, or the key the test build generates.
 #[cfg(not(test))]
@@ -799,14 +806,17 @@ impl Engine {
                     .parse::<u32>()
                     .map_err(|_| "Docker returned an invalid Docker socket group".to_owned())?
             }
-            HostProfile::Linux | HostProfile::Wsl => path
-                .symlink_metadata()
-                .ok()
-                .filter(|metadata| metadata.file_type().is_socket())
-                .map(|metadata| metadata.gid())
-                .ok_or_else(|| {
-                    "the Team controller cannot access the local Docker socket".to_owned()
-                })?,
+            HostProfile::Linux | HostProfile::Wsl => {
+                let gid = path
+                    .symlink_metadata()
+                    .ok()
+                    .filter(|metadata| metadata.file_type().is_socket())
+                    .map(|metadata| metadata.gid())
+                    .ok_or_else(|| {
+                        "the Team controller cannot access the local Docker socket".to_owned()
+                    })?;
+                dedicated_socket_group(path, gid)?
+            }
         };
         let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
         let status = self.run_quiet_status(
@@ -1295,6 +1305,18 @@ fn stop_arguments(containers: &[String]) -> Vec<OsString> {
     arguments
 }
 
+/// Team never joins the root group on a host whose Docker socket can carry a dedicated group.
+#[cfg(unix)]
+fn dedicated_socket_group(path: &Path, gid: u32) -> Result<u32, String> {
+    if gid == 0 {
+        return Err(format!(
+            "the Docker socket {} belongs to the root group; configure Docker to give its socket a dedicated group such as docker, then rerun",
+            path.display()
+        ));
+    }
+    Ok(gid)
+}
+
 #[cfg(unix)]
 fn controller_socket_path(profile: HostProfile) -> &'static Path {
     match profile {
@@ -1347,9 +1369,11 @@ fn socket_probe_arguments(
     script: &str,
 ) -> Vec<OsString> {
     let gid = gid.map(|gid| gid.to_string());
-    let options = gid
-        .as_deref()
-        .map_or_else(Vec::new, |gid| vec!["--group-add", gid]);
+    // The probe runs as the Team controller's own identity, so it proves exactly the access Team will have.
+    let mut options = vec!["--user", "10001:10001"];
+    if let Some(gid) = gid.as_deref() {
+        options.extend(["--group-add", gid]);
+    }
     python_helper_arguments(
         platform,
         cpuset,
@@ -1539,12 +1563,10 @@ fn clear_volumes_arguments(
         "--read-only",
         "--cap-drop",
         "ALL",
-        "--cap-add",
-        "DAC_OVERRIDE",
         "--security-opt",
         "no-new-privileges:true",
         "--user",
-        "0:0",
+        RUNTIME_STATE_OWNER,
         "--cpuset-cpus",
         cpuset,
         "--memory",
@@ -1571,7 +1593,7 @@ fn clear_volumes_arguments(
         "/bin/sh",
         image,
         "-c",
-        "find /state -mindepth 2 -delete && sync",
+        RUNTIME_STATE_RESET_SCRIPT,
     ] {
         arguments.push(value.into());
     }
@@ -2497,6 +2519,65 @@ mod tests {
         assert_eq!(timings.summary().len(), MAX_COMPOSE_CONTAINERS);
     }
 
+    /// Every helper container the CLI starts runs as one explicit non-root identity with every capability dropped.
+    #[cfg(unix)]
+    #[test]
+    fn every_helper_container_runs_without_root_or_capabilities() {
+        let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
+        let helpers = [
+            clear_volumes_arguments("linux/amd64", "0", &image, "c", &["brain_runtime_state"]),
+            admin_authentication_probe_arguments("linux/amd64", "0", "m", &image, "c"),
+            status_projection_arguments("linux/amd64", "0", "m", &image, "c"),
+            reset_capability_arguments("linux/amd64", "0", "m", &image, true, "s", "c"),
+            reset_capability_arguments("linux/amd64", "0", "m", &image, false, "s", "c"),
+            socket_probe_arguments("linux/amd64", "0", "m", &image, None, "s"),
+            socket_probe_arguments("linux/amd64", "0", "m", &image, Some(989), "s"),
+        ];
+        for arguments in helpers {
+            let arguments = text(arguments);
+            let users: Vec<_> = arguments
+                .windows(2)
+                .filter(|window| window[0] == "--user")
+                .map(|window| window[1].clone())
+                .collect();
+            let [user] = users.as_slice() else {
+                panic!("one explicit identity: {arguments:?}");
+            };
+            let (uid, gid) = user.split_once(':').expect("numeric uid:gid");
+            assert!(
+                uid.parse::<u32>().unwrap() > 0 && gid.parse::<u32>().unwrap() > 0,
+                "{user}"
+            );
+            assert!(
+                arguments
+                    .windows(2)
+                    .any(|window| window == ["--cap-drop", "ALL"])
+            );
+            assert!(
+                !arguments
+                    .iter()
+                    .any(|argument| argument == "--cap-add" || argument == "--privileged")
+            );
+            assert!(
+                arguments
+                    .windows(2)
+                    .all(|window| window[0] != "--group-add" || window[1] != "0")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linux_docker_socket_in_the_root_group_is_refused() {
+        let socket = Path::new("/var/run/docker.sock");
+        assert_eq!(dedicated_socket_group(socket, 989), Ok(989));
+        assert!(
+            dedicated_socket_group(socket, 0)
+                .unwrap_err()
+                .contains("belongs to the root group")
+        );
+    }
+
     #[test]
     fn runtime_state_reset_only_deletes_below_the_named_volume_roots_offline() {
         let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
@@ -2511,17 +2592,13 @@ mod tests {
             .iter()
             .map(|argument| argument.to_str().unwrap())
             .collect();
-        let tail = [
-            image.as_str(),
-            "-c",
-            "find /state -mindepth 2 -delete && sync",
-        ];
+        let tail = [image.as_str(), "-c", RUNTIME_STATE_RESET_SCRIPT];
         assert_eq!(&arguments[arguments.len() - tail.len()..], tail);
         for pair in [
             ["--network", "none"],
             ["--pull", "never"],
             ["--cap-drop", "ALL"],
-            ["--cap-add", "DAC_OVERRIDE"],
+            ["--user", "10001:10001"],
             ["--entrypoint", "/bin/sh"],
             [
                 "--mount",
@@ -2538,13 +2615,7 @@ mod tests {
             );
         }
         assert!(arguments.contains(&"--read-only") && arguments.contains(&"--rm"));
-        assert_eq!(
-            arguments
-                .iter()
-                .filter(|argument| **argument == "--cap-add")
-                .count(),
-            1
-        );
+        assert!(!arguments.contains(&"--cap-add"));
         assert_eq!(
             arguments
                 .iter()
@@ -3083,7 +3154,7 @@ mod tests {
                 None,
                 "s"
             )),
-            hardened_helper(&[], "64m", &image, &["-c", "s"])
+            hardened_helper(&["--user", "10001:10001"], "64m", &image, &["-c", "s"])
         );
         assert_eq!(
             text(socket_probe_arguments(
@@ -3094,7 +3165,12 @@ mod tests {
                 Some(7),
                 "s"
             )),
-            hardened_helper(&["--group-add", "7"], "64m", &image, &["-c", "s"])
+            hardened_helper(
+                &["--user", "10001:10001", "--group-add", "7"],
+                "64m",
+                &image,
+                &["-c", "s"]
+            )
         );
     }
 }

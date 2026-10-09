@@ -66,7 +66,7 @@ const VOLUME_SPECS: [(&str, u32, u32, u32); 28] = [
     ("assistant_egress_policy", 10001, 10017, 0o750),
     ("assistant_egress_audit", 10005, 10005, 0o700),
     ("assistant_release_audit", 10004, 10004, 0o700),
-    ("account_egress_capability", 0, 10022, 0o750),
+    ("account_egress_capability", 10023, 10022, 0o750),
     ("account_egress_audit", 10006, 10006, 0o700),
     ("brain_egress_audit", 10001, 10001, 0o700),
     ("brain_runtime_token", 10001, 10016, 0o750),
@@ -1444,7 +1444,7 @@ mod tests {
         assert!(VOLUME_SPECS.contains(&("controller_token", 10001, 10010, 0o2750)));
         assert!(VOLUME_SPECS.contains(&("supervisor_key", 0, 10021, 0o2770)));
         assert!(VOLUME_SPECS.contains(&("assistant_egress_policy", 10001, 10017, 0o750)));
-        assert!(VOLUME_SPECS.contains(&("account_egress_capability", 0, 10022, 0o750)));
+        assert!(VOLUME_SPECS.contains(&("account_egress_capability", 10023, 10022, 0o750)));
     }
 
     #[test]

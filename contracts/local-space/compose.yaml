@@ -7,13 +7,12 @@ services:
     platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
     pull_policy: never
     restart: "no"
-    user: "0:0"
+    # The dedicated non-root capability writer; its primary group is the readers' capability group.
+    user: "10023:10022"
     network_mode: none
     read_only: true
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN
     security_opt:
       - no-new-privileges:true
     command: ["account-init"]
