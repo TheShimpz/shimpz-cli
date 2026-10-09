@@ -420,9 +420,17 @@ fn unload(profile: HostProfile, paths: &Paths) {
     }
 }
 
+/// systemd applies no start timeout to a `Type=oneshot` unit by default (systemd.service(5), `TimeoutStartSec=`), so a
+/// run that never ends would hold the lifecycle lock and stop every later update. Each host command already has its
+/// own deadline; this one backs any other hang. Three hours is far above the longest legitimate apply, whose longest
+/// measured run took under eleven minutes and whose slowest part, the image downloads, may take up to twenty minutes
+/// each before their own deadline stops them, so the CLI's own deadline and rollback always end a single hung call
+/// first. Past it systemd terminates the run's whole control group.
+const SYSTEMD_START_TIMEOUT: &str = "3h";
+
 fn systemd_service(paths: &Paths) -> Result<String, String> {
     Ok(format!(
-        "# {MARKER}\n[Unit]\nDescription=Reconcile Shimpz Local Space\nAfter=docker.service\n\n[Service]\nType=oneshot\nExecStart={} start --scheduled\n",
+        "# {MARKER}\n[Unit]\nDescription=Reconcile Shimpz Local Space\nAfter=docker.service\n\n[Service]\nType=oneshot\nTimeoutStartSec={SYSTEMD_START_TIMEOUT}\nExecStart={} start --scheduled\n",
         systemd_quote(&paths.managed_cli)?
     ))
 }
@@ -841,6 +849,8 @@ mod tests {
             service.contains("ExecStart=\"/home/Ada Space/.shimpz/bin/shimpz\" start --scheduled")
         );
         assert!(!service.contains("sh -c"));
+        // A oneshot unit has no start timeout unless it declares one, so a hung run could hold the update lock forever.
+        assert!(service.contains("\nType=oneshot\nTimeoutStartSec=3h\n"));
         let timer = systemd_timer();
         assert!(timer.contains("OnActiveSec=30s"));
         assert!(timer.contains("OnUnitActiveSec=30s"));
