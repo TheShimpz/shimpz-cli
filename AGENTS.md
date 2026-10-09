@@ -68,8 +68,8 @@
 - Command hierarchy follows the product hierarchy: write resource-owned operations as
   `shimpz <resource> <operation>`. Every Assistant operation lives below `shimpz assistant`; never add a
   top-level Assistant verb or invert the hierarchy to `<operation> assistant`.
-- Group a command by the resource it acts on, not by the resource that authorizes it. A Team still authorizes and
-  owns an Assistant installation even though the client command is `shimpz assistant install`.
+- Group a command by the resource it acts on, not by the resource that authorizes it. The CLI has no Assistant
+  install command: Assistant installation into a Local Team happens only in Local Admin, under Team authority.
 - An Action is declared by and addressed through an Assistant project. Execute one Action with
   `shimpz assistant run <action-id>`; do not create a top-level `test` or `action` namespace while Action has
   no independent lifecycle. Reserve `test` for engineering test suites.
