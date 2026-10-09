@@ -314,8 +314,12 @@ Install or reconcile the complete Local Space.
 
 Usage:
   shimpz install
+  shimpz install <release>
 
-The command installs a missing Space or repairs the current installation against the atomic Local release.
+The command installs a missing Space or repairs the current installation against the atomic Local release. Without
+<release>, it uses the signed stable release. A <release> names one exact release set by digest: a published
+ghcr.io/theshimpz/shimpz-local-release@sha256:<digest>, or a developer release built on this amd64 Linux host,
+localhost/shimpz-local-release@sha256:<digest>, which is used only from the local Docker image store.
 
 Next:
   Open the Admin address printed when the Space is ready.

@@ -566,7 +566,7 @@ impl Engine {
             Ok(())
         } else {
             Err(format!(
-                "the developer release image {reference} is not in the local Docker image store; deploy the change again with .scripts/local-release/deploy, or return to the published release with shimpz update"
+                "the developer release image {reference} is not in the local Docker image store; assemble it again with .scripts/local-release/deploy, or install the published release with shimpz install"
             ))
         }
     }

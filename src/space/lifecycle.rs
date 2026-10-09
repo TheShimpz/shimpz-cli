@@ -380,6 +380,13 @@ impl Context {
         let release = self.resolve(exact_release)?;
         validate_forward_release(&release, installed.as_ref())?;
         if exact_release.is_some() && !candidate {
+            // A developer release set is built on this host, so the CLI that names it hands off to the set's own
+            // CLI unless it is that CLI.
+            if release::valid_developer_release_ref(&release.reference)
+                && self.handoff_if_needed(&release, installed.as_ref(), false)?
+            {
+                return Ok("The release-bound CLI completed the installation.".into());
+            }
             // The acquisition bootstrap runs its verified CLI from outside the Space; that CLI becomes the managed
             // executable only here, under the lifecycle lock and after admission. Apply then retains it.
             let running =
@@ -1278,7 +1285,6 @@ impl Context {
         } else {
             command
                 .arg("install")
-                .arg("--release")
                 .arg(&release.reference)
                 .arg("--candidate");
         }
@@ -2314,21 +2320,16 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
 }
 
 /// Admit only forward moves among published releases (ADR-0041). A developer release is an explicit selection on
-/// this host and applies over any installed release, but never as a fresh install; the explicit return to the
-/// published channel replaces an installed developer release with any published release.
+/// this host and installs freshly or applies over any installed release; the explicit return to the published
+/// channel replaces an installed developer release with any published release.
 fn validate_forward_release(
     release: &ResolvedRelease,
     installed: Option<&Installed>,
 ) -> Result<(), String> {
-    let developer = release::valid_developer_release_ref(&release.reference);
     let Some(installed) = installed else {
-        return if developer {
-            Err("a developer release applies only to an installed Local Space".into())
-        } else {
-            Ok(())
-        };
+        return Ok(());
     };
-    if developer || installed.developer() {
+    if release::valid_developer_release_ref(&release.reference) || installed.developer() {
         return Ok(());
     }
     let same_reference = release.reference == installed.release_ref;
@@ -3003,14 +3004,15 @@ mod tests {
     }
 
     #[test]
-    fn a_developer_release_applies_over_any_installation_and_yields_to_an_explicit_return() {
+    fn a_developer_release_installs_or_applies_over_any_installation_and_yields_to_an_explicit_return()
+     {
         let published = installed_from(&release(2, 'b'));
         let installed = installed_from(&developer(9, '1'));
-        // Over a published release or another developer release, in either direction, but never as a fresh install.
+        // As a fresh install, or over a published release or another developer release, in either direction.
+        assert!(validate_forward_release(&developer(9, '1'), None).is_ok());
         assert!(validate_forward_release(&developer(9, '1'), Some(&published)).is_ok());
         assert!(validate_forward_release(&developer(1, '2'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&developer(9, '1'), Some(&installed)).is_ok());
-        assert!(validate_forward_release(&developer(9, '1'), None).is_err());
         // The explicit return to the published channel replaces it with any published release.
         assert!(validate_forward_release(&release(1, 'a'), Some(&installed)).is_ok());
         assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
@@ -3109,6 +3111,122 @@ mod tests {
             ..context
         };
         assert!(macos.resolve(Some(&developer_release.reference)).is_err());
+    }
+
+    /// Run `shimpz install <developer release>` on a fresh Linux home whose Docker stand-in logs every call,
+    /// refuses every pull, and holds the developer release set only when `stored`. The set's CLI is a fake child that
+    /// records its arguments and commits the release as its apply would.
+    #[cfg(unix)]
+    fn fresh_developer_install(
+        home: &Path,
+        stored: bool,
+    ) -> (Context, ResolvedRelease, Result<String, String>) {
+        let root = home.join("fixture");
+        fs::create_dir(&root).unwrap();
+        let paths = Paths::under(home).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let mut target = developer(9, '1');
+        // The committed environment and status the child writes when its apply commits.
+        state::write_environment(
+            &paths,
+            &Environment {
+                release: &target,
+                profile: HostProfile::Linux,
+                space_id: "space-0123456789abcdef01234567",
+                port: 7777,
+                docker_gid: 0,
+                docker_socket: Path::new("/var/run/docker.sock"),
+                cpuset: "0",
+                secure_root: &paths.pool_mount,
+            },
+        )
+        .unwrap();
+        fs::rename(&paths.environment, root.join("committed.env")).unwrap();
+        let child = root.join("release-cli");
+        fs::write(
+            &child,
+            format!(
+                "#!/bin/sh\numask 077\nprintf '%s\\n' \"$*\" > '{arguments}'\ncp '{committed}' '{environment}'\nprintf '%s' '{status}' > '{status_path}'\n",
+                arguments = root.join("child-arguments").display(),
+                committed = root.join("committed.env").display(),
+                environment = paths.environment.display(),
+                status = serde_json::json!({
+                    "release": target.reference,
+                    "ordinal": 9,
+                    "checked_at": 1,
+                    "outcome": "updated",
+                }),
+                status_path = paths.home.join("release-status.json").display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
+        target.metadata.cli_linux_amd64_sha256 = hash_file(&child).unwrap();
+        fs::write(root.join("release.env"), release_document(&target)).unwrap();
+        let docker = root.join("docker");
+        crate::fake_tool::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  image) [ {stored} = 1 ] || exit 1; case \"$4\" in *Labels*) echo '1|<no value>' ;; *) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; esac ;;\n  create) case \"$7\" in /release.env) echo metadata ;; *) echo cli ;; esac ;;\n  cp) case \"$2\" in metadata:*) cat '{root}/release.env' > \"$3\" ;; *) cp '{child}' \"$3\" ;; esac ;;\n  ps|volume|network|rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                log = root.join("docker.log").display(),
+                stored = u8::from(stored),
+                root = root.display(),
+                child = child.display(),
+            ),
+        );
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+        let outcome = context.install(Some(&target.reference), false);
+        let log = fs::read_to_string(root.join("docker.log")).unwrap();
+        assert!(
+            !log.lines().any(|line| line.starts_with("pull")),
+            "pulled a developer release: {log}"
+        );
+        (context, target, outcome)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_developer_install_hands_off_to_the_cli_of_its_set_from_the_local_store() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, target, outcome) = fresh_developer_install(home.path(), true);
+        assert_eq!(
+            outcome,
+            Ok("The release-bound CLI completed the installation.".into())
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("fixture/child-arguments")).unwrap(),
+            format!("install {} --candidate\n", target.reference)
+        );
+        assert_eq!(
+            hash_file(&context.paths.managed_cli).unwrap(),
+            target.metadata.cli_linux_amd64_sha256
+        );
+        assert_eq!(
+            fs::read_link(&context.paths.public_cli).unwrap(),
+            context.paths.managed_cli
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_developer_install_missing_from_the_local_store_is_refused_without_a_pull() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, target, outcome) = fresh_developer_install(home.path(), false);
+        assert_eq!(
+            outcome,
+            Err(format!(
+                "the developer release image {} is not in the local Docker image store; assemble it again with .scripts/local-release/deploy, or install the published release with shimpz install",
+                target.reference
+            ))
+        );
+        assert!(!home.path().join("fixture/child-arguments").exists());
+        assert!(!context.paths.managed_cli.exists());
     }
 
     #[cfg(unix)]
@@ -5225,7 +5343,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(root.join("child-arguments")).unwrap(),
-            format!("install --release {} --candidate\n", target.reference)
+            format!("install {} --candidate\n", target.reference)
         );
         assert_eq!(
             Some(hash_file(&context.paths.managed_cli).unwrap()),

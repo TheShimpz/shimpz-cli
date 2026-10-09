@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::help::Topic;
 use crate::identifier;
-use crate::space::release::{valid_published_release_ref, valid_release_ref};
+use crate::space::release::valid_release_ref;
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
@@ -146,51 +146,42 @@ pub(crate) fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Inv
 }
 
 fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
-    match arguments {
-        [] => Ok(Invocation::Execute(Command::Install(SpaceInstall {
-            release: None,
-            print_graph: None,
-            candidate: false,
-        }))),
-        [option] if option == "--help" || option == "-h" => Ok(Invocation::Help(Topic::Install)),
+    let (release, candidate) = match arguments {
+        [] => (None, false),
+        [option] if option == "--help" || option == "-h" => {
+            return Ok(Invocation::Help(Topic::Install));
+        }
         [option, profile] if option == "--print-graph" => {
             let print_graph = match profile.as_str() {
                 "linux-luks" => GraphProfile::LinuxLuks,
                 "managed-disk" => GraphProfile::ManagedDisk,
                 _ => return Err("--print-graph requires linux-luks or managed-disk".into()),
             };
-            Ok(Invocation::Execute(Command::Install(SpaceInstall {
+            return Ok(Invocation::Execute(Command::Install(SpaceInstall {
                 release: None,
                 print_graph: Some(print_graph),
                 candidate: false,
-            })))
+            })));
         }
-        [option, release] if option == "--release" && valid_published_release_ref(release) => {
-            Ok(Invocation::Execute(Command::Install(SpaceInstall {
-                release: Some(release.clone()),
-                print_graph: None,
-                candidate: false,
-            })))
+        [option] if option == "--print-graph" => {
+            return Err("--print-graph requires a value".into());
         }
-        [option, release, candidate]
-            if option == "--release"
-                && candidate == "--candidate"
-                && valid_published_release_ref(release) =>
-        {
-            Ok(Invocation::Execute(Command::Install(SpaceInstall {
-                release: Some(release.clone()),
-                print_graph: None,
-                candidate: true,
-            })))
+        // One exact published release set, or a developer release set from this host's image store.
+        [release] if valid_release_ref(release) => (Some(release.clone()), false),
+        // The release-bound CLI's handoff install of that exact set.
+        [release, candidate] if candidate == "--candidate" && valid_release_ref(release) => {
+            (Some(release.clone()), true)
         }
-        [option, _] if option == "--release" => {
-            Err("the Local release reference is invalid".into())
+        [release] if !release.starts_with('-') => {
+            return Err("the Local release reference is invalid".into());
         }
-        [option] if option == "--release" || option == "--print-graph" => {
-            Err(format!("{option} requires a value"))
-        }
-        _ => Err("install accepts no public options".into()),
-    }
+        _ => return Err("install accepts only a Local release reference".into()),
+    };
+    Ok(Invocation::Execute(Command::Install(SpaceInstall {
+        release,
+        print_graph: None,
+        candidate,
+    })))
 }
 
 fn parse_space_start(arguments: &[String]) -> Result<Invocation, String> {
@@ -916,7 +907,6 @@ mod tests {
         assert_eq!(
             parse(vec![
                 "install".into(),
-                "--release".into(),
                 release.clone().into(),
                 "--candidate".into(),
             ]),
@@ -931,7 +921,7 @@ mod tests {
                 "start".into(),
                 "--scheduled".into(),
                 "--release".into(),
-                release.into(),
+                release.clone().into(),
                 "--candidate".into(),
             ]),
             Ok(Invocation::Execute(Command::Start(SpaceStart {
@@ -945,9 +935,26 @@ mod tests {
         );
         assert_eq!(
             parse(strings(&["install", "--candidate"])),
-            Err("install accepts no public options".into())
+            Err("install accepts only a Local release reference".into())
         );
         let developer = format!("localhost/shimpz-local-release@sha256:{}", "b".repeat(64));
+        // The owner names one exact published set, or a developer set from this host's image store.
+        for reference in [&release, &developer] {
+            for candidate in [false, true] {
+                let mut arguments = vec!["install", reference.as_str()];
+                if candidate {
+                    arguments.push("--candidate");
+                }
+                assert_eq!(
+                    parse(strings(&arguments)),
+                    Ok(Invocation::Execute(Command::Install(SpaceInstall {
+                        release: Some(reference.clone()),
+                        print_graph: None,
+                        candidate,
+                    })))
+                );
+            }
+        }
         // A developer release reaches start only through the release-bound CLI's handoff.
         assert_eq!(
             parse(strings(&[
@@ -963,13 +970,22 @@ mod tests {
                 candidate: true,
             })))
         );
-        for invalid in [
-            &["start", "--release", &developer][..],
-            &["install", "--release", &developer][..],
-            &["install", "--release", &developer, "--candidate"][..],
-        ] {
-            assert!(parse(strings(invalid)).is_err(), "accepted: {invalid:?}");
+        let tagged = "localhost/shimpz-local-release:latest";
+        let registry = format!(
+            "localhost:5000/shimpz-local-release@sha256:{}",
+            "b".repeat(64)
+        );
+        assert!(parse(strings(&["start", "--release", &developer])).is_err());
+        for invalid in [tagged, registry.as_str()] {
+            assert_eq!(
+                parse(strings(&["install", invalid])),
+                Err("the Local release reference is invalid".into())
+            );
         }
+        assert_eq!(
+            parse(strings(&["install", &developer, "--scheduled"])),
+            Err("install accepts only a Local release reference".into())
+        );
         for topic in Topic::ALL {
             for hidden in ["--scheduled", "--candidate", "--print-graph", "--release"] {
                 assert!(!topic.text().contains(hidden));

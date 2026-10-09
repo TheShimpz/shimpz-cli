@@ -83,7 +83,9 @@ The agent keeps its normal permission protections unless `--yolo` is explicitly
 provided.
 
 `shimpz install` installs or reconciles the complete Local Space from one atomic,
-digest-pinned release. `shimpz status` summarizes its health, Admin address, and
+digest-pinned release: the signed stable release, or the exact set `shimpz install <release>` names. A developer
+release built on an amd64 Linux host, `localhost/shimpz-local-release@sha256:<digest>`, is used only from that host's
+Docker image store and is never downloaded. `shimpz status` summarizes its health, Admin address, and
 release ordinal; `shimpz start` resumes or repairs it, `shimpz update` applies only a newer atomic release without
 resuming a stopped Space, `shimpz stop` stops every owned workload without removing data, and `shimpz reset` removes
 its exact owned state.
