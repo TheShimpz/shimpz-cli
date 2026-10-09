@@ -111,7 +111,7 @@ Creator account:
   shimpz auth [login|status|logout]       Manage Creator authentication.
 
 CLI:
-  shimpz upgrade                         Upgrade a standalone CLI.
+  shimpz upgrade                         Show how to upgrade this CLI.
   shimpz --version                       Show the CLI version.
 
 Common workflows:
@@ -401,10 +401,11 @@ Next:
 const UPGRADE: &str = "\
 shimpz upgrade
 
-Upgrade a standalone Shimpz CLI.
+Show how to upgrade this Shimpz CLI. The CLI never replaces itself from this command.
 
 Usage:
   shimpz upgrade
 
-A Space-managed CLI is upgraded only through the atomic Local release. Run 'shimpz update' to check for one.
+A Standalone CLI is upgraded by reinstalling it: cargo install --locked shimpz-cli
+A Space-managed CLI is upgraded only through the signed atomic Local release. Run 'shimpz update' to check for one.
 ";

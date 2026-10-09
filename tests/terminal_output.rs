@@ -232,3 +232,19 @@ fn untrusted_diagnostics_cannot_inject_terminal_controls() {
     assert!(diagnostic.contains("unknown option --�[2J"));
     assert!(!diagnostic.contains("\u{1b}[2J"));
 }
+
+#[test]
+fn standalone_upgrade_never_replaces_the_executable() {
+    let home = std::env::temp_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_shimpz"))
+        .arg("upgrade")
+        .env("HOME", &home)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let diagnostics = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(diagnostics.contains("cargo install --locked shimpz-cli"));
+    assert!(diagnostics.contains("the CLI was not changed"));
+}

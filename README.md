@@ -96,9 +96,11 @@ macOS and Windows/WSL2, Shimpz uses Docker-managed volumes and recommends
 FileVault or BitLocker respectively, but does not configure or verify the
 operating system's disk encryption.
 
-`shimpz upgrade` checks the latest stable GitHub release and replaces a
-standalone executable only when a newer version is available. A Space-managed
-CLI is updated exclusively by the atomic Local release through `shimpz update` or complete reconciliation.
+The CLI never replaces its own executable from GitHub Releases. Upgrade a
+standalone CLI by reinstalling it with `cargo install --locked shimpz-cli`;
+`shimpz upgrade` prints that command. A Space-managed CLI is updated exclusively
+by the signed atomic Local release through `shimpz update` or complete
+reconciliation.
 
 `shimpz assistant run` makes the Action's provider calls itself, as Team does: the
 Action never receives a credential. Integration tokens are read from environment

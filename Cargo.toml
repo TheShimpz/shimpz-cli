@@ -30,8 +30,6 @@ rpassword = "7.5.4"
 ring = "0.17.14"
 sha2 = "0.10"
 toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
-self-replace = "1.5.0"
-self_update = { version = "1.3.0", default-features = false, features = ["archive-tar", "compression-tar-gz", "archive-zip", "compression-zip-deflate", "rustls", "ureq"] }
 tempfile = "3"
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
 zeroize = "1"
@@ -45,10 +43,8 @@ rustix = { version = "1", features = ["fs", "process", "termios"] }
 winapi-util = "0.1.11"
 
 [dev-dependencies]
-flate2 = "1"
 serde_norway = "0.9.42"
 tar = "0.4"
-zip = { version = "6", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "shimpz"
