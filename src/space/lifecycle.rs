@@ -690,6 +690,17 @@ impl Context {
             candidate.installed.is_none(),
         )
         .map_err(Some)?;
+        // Removing replaced containers at once pays only when Compose would otherwise recreate two or more in turn;
+        // a single one is left to Compose, which creates its replacement before stopping it.
+        let remove_first = match candidate.installed {
+            Some(_) => {
+                replaced_container_count(
+                    &state::read_installed_images(&self.paths, self.profile).map_err(Some)?,
+                    release,
+                ) >= 2
+            }
+            None => false,
+        };
         state::write_environment(
             &self.paths,
             &Environment {
@@ -708,8 +719,37 @@ impl Context {
             .map_err(Some)?;
         state::clear_stopped(&self.paths).map_err(Some)?;
         output::progress("Starting the Shimpz Space...");
-        self.remove_replaced_containers(release).map_err(Some)?;
-        let (started, timings) = self.engine.compose_up(&self.paths).map_err(Some)?;
+        let init_current = if remove_first {
+            // The candidate files are written, so the initializer check reads them beside the removal; a replaced
+            // egress image already changes the initializer's configuration, and any failed observation reruns it.
+            let (engine, paths) = (&self.engine, &self.paths);
+            let (init_current, removed) = thread::scope(|scope| {
+                let init_current = scope.spawn(|| engine.completed_init_is_current(paths));
+                let removed = self.remove_replaced_containers(release);
+                (init_current.join().unwrap_or(false), removed)
+            });
+            removed.map_err(Some)?;
+            init_current
+        } else {
+            self.engine.completed_init_is_current(&self.paths)
+        };
+        let status = self.start_candidate(candidate, init_current)?;
+        // The local success record is the commit's last write: it and the live environment prove the commit.
+        state::write_private(&self.paths.status, &status).map_err(Some)
+    }
+
+    /// Bring the candidate up, prove it, and project its status to Admin.
+    /// Returns the status document for the local commit record.
+    fn start_candidate(
+        &self,
+        candidate: &Candidate<'_>,
+        init_current: bool,
+    ) -> Result<String, Option<String>> {
+        let release = candidate.release;
+        let (started, timings) = self
+            .engine
+            .compose_up(&self.paths, init_current)
+            .map_err(Some)?;
         for timing in &timings {
             output::progress(timing);
         }
@@ -743,8 +783,7 @@ impl Context {
         self.engine
             .project_release_status(&release.metadata.admin, status.as_bytes())
             .map_err(|_| None)?;
-        // The local success record is the commit's last write: it and the live environment prove the commit.
-        state::write_private(&self.paths.status, &status).map_err(Some)
+        Ok(status)
     }
 
     /// Stop, then remove, at once every Space container whose image the candidate replaces. Compose would otherwise
@@ -2410,6 +2449,23 @@ fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, S
     }
 }
 
+/// How many long-running Space containers `release` replaces, from the `previous` Admin, Team, Brain, and egress
+/// images: one each for the first three and four for the shared egress image.
+fn replaced_container_count(previous: &[String; 4], release: &ResolvedRelease) -> usize {
+    let metadata = &release.metadata;
+    [
+        (&metadata.admin, 1),
+        (&metadata.team, 1),
+        (&metadata.brain, 1),
+        (&metadata.egress, 4),
+    ]
+    .into_iter()
+    .zip(previous)
+    .filter(|((candidate, _), installed)| *candidate != *installed)
+    .map(|((_, containers), _)| containers)
+    .sum()
+}
+
 /// The long-running Space containers, among `identifiers` and their `name|image` records, whose image `release`
 /// replaces. The one-shot initializer is left to Compose, and any record that is not exactly a name and an image
 /// refuses the selection.
@@ -3580,12 +3636,14 @@ mod tests {
         assert!(!outcome.contains("restored"), "{outcome}");
     }
 
-    const REPLACED_ADMIN: &str = "a0000000000000000000000000000000000000000000000000000000000000ad";
-    const KEPT_TEAM: &str = "b0000000000000000000000000000000000000000000000000000000000000be";
+    const ADMIN_ID: &str = "a0000000000000000000000000000000000000000000000000000000000000ad";
+    const TEAM_ID: &str = "b0000000000000000000000000000000000000000000000000000000000000be";
+    const BRAIN_ID: &str = "c0000000000000000000000000000000000000000000000000000000000000cf";
 
-    /// A Docker stand-in for an installed Space whose project holds the installed Admin and Team: every name lookup
-    /// misses, each listing holds only those two containers, the release image labels state epoch 1, and `stop`,
-    /// `rm`, and `compose` exit with the given statuses. Every call is logged.
+    /// A Docker stand-in for an installed Space whose project holds the installed Admin, Team, and Brain: every name
+    /// lookup misses, each listing holds only those three containers, the release image labels state epoch 1, a
+    /// status helper appends whatever document it receives to `status.log`, and `stop`, `rm`, and `compose` exit
+    /// with the given statuses. Every call is logged.
     #[cfg(unix)]
     fn replacing_docker(home: &Path, stop: u8, remove: u8, compose: u8) -> (PathBuf, PathBuf) {
         let log = home.join("docker.log");
@@ -3594,23 +3652,55 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} ;; esac ;;\n  volume) case \"$2\" in inspect) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2\" in inspect) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
-                admin_id = REPLACED_ADMIN,
-                team_id = KEPT_TEAM,
+                status = home.join("status.log").display(),
+                admin_id = ADMIN_ID,
+                team_id = TEAM_ID,
+                brain_id = BRAIN_ID,
                 admin = installed.admin,
                 team = installed.team,
+                brain = installed.brain,
             ),
         );
         (docker, log)
     }
 
-    /// A candidate that replaces only the installed Admin image.
-    fn admin_replacing_release() -> ResolvedRelease {
+    /// A candidate that replaces the installed Admin image and, when `team` is set, the Team image too.
+    fn replacing_release(team: bool) -> ResolvedRelease {
         let mut candidate = release(2, 'b');
         candidate.metadata.admin =
             format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "c".repeat(64));
+        if team {
+            candidate.metadata.team = format!(
+                "ghcr.io/theshimpz/shimpz-team-local@sha256:{}",
+                "d".repeat(64)
+            );
+        }
         candidate
+    }
+
+    /// Run the start of `candidate_release` over a Space installed under `home` and return its error and the log.
+    #[cfg(unix)]
+    fn failed_start(
+        home: &Path,
+        docker: PathBuf,
+        candidate_release: &ResolvedRelease,
+    ) -> (String, Context) {
+        let (context, backup) = installed_space(home, docker);
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+        let candidate = Candidate {
+            release: candidate_release,
+            installed: Some(&installed),
+            space_id: &installed.space_id,
+            port: installed.port,
+            docker_gid: 0,
+            docker_socket: Path::new("/var/run/docker.sock.raw"),
+        };
+        let error = context
+            .start_or_roll_back(&candidate, Some(backup))
+            .unwrap_err();
+        (error, context)
     }
 
     #[cfg(unix)]
@@ -3641,40 +3731,24 @@ mod tests {
         ] {
             let home = tempfile::tempdir().unwrap();
             let (docker, log) = replacing_docker(home.path(), stop, remove, compose);
-            let (context, backup) = installed_space(home.path(), docker);
-            let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
-            let candidate_release = admin_replacing_release();
-            let candidate = Candidate {
-                release: &candidate_release,
-                installed: Some(&installed),
-                space_id: &installed.space_id,
-                port: installed.port,
-                docker_gid: 0,
-                docker_socket: Path::new("/var/run/docker.sock.raw"),
-            };
-
-            let error = context
-                .start_or_roll_back(&candidate, Some(backup))
-                .unwrap_err();
+            let (error, context) = failed_start(home.path(), docker, &replacing_release(true));
 
             assert!(error.contains(cause) && error.contains(outcome), "{error}");
             let calls = fs::read_to_string(&log).unwrap();
-            // Only the container whose image the candidate replaces is stopped, and removed without its volumes.
+            // Both replaced containers are stopped at once and removed without their volumes; Brain is kept.
             assert!(
                 calls
                     .lines()
-                    .any(|line| line == format!("stop {REPLACED_ADMIN}"))
+                    .any(|line| line == format!("stop {ADMIN_ID} {TEAM_ID}"))
             );
-            assert!(
-                calls
-                    .lines()
-                    .all(|line| !line.starts_with("stop ") || !line.contains(KEPT_TEAM))
-            );
+            assert!(!calls.lines().any(|line| {
+                (line.starts_with("stop ") || line.starts_with("rm ")) && line.contains(BRAIN_ID)
+            }));
             if stop == 0 {
                 assert!(
                     calls
                         .lines()
-                        .any(|line| line == format!("rm {REPLACED_ADMIN}"))
+                        .any(|line| line == format!("rm {ADMIN_ID} {TEAM_ID}"))
                 );
             } else {
                 assert!(!calls.lines().any(|line| line.starts_with("rm ")));
@@ -3688,6 +3762,26 @@ mod tests {
             let restored = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
             assert_eq!(restored.release_ref, release(1, 'a').reference);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_replaced_container_is_left_to_compose() {
+        let home = tempfile::tempdir().unwrap();
+        let (docker, log) = replacing_docker(home.path(), 0, 0, 1);
+        let (error, _context) = failed_start(home.path(), docker, &replacing_release(false));
+
+        assert!(
+            error.contains("the update and its rollback both failed"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("stop ") || line.starts_with("rm "))
+        );
     }
 
     /// An installed, marked Space under `home` whose Docker is `docker`.

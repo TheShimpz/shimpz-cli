@@ -562,10 +562,15 @@ impl Engine {
     /// in bounded lines: only parsed container states and a bounded diagnostic prefix are kept.
     ///
     /// A full `up` starts an exited one-shot service again and holds every dependent until it exits. When the Account
-    /// egress initializer already completed under exactly the candidate configuration, it is left alone: only the
-    /// long-running services are brought up, still in their dependency order among themselves.
-    pub(crate) fn compose_up(&self, paths: &Paths) -> Result<(ExitStatus, Vec<String>), String> {
-        let selection: &[&str] = if self.completed_init_is_current(paths) {
+    /// egress initializer already completed under exactly the candidate configuration (`init_current`, from
+    /// `completed_init_is_current`), it is left alone: only the long-running services are brought up, still in their
+    /// dependency order among themselves.
+    pub(crate) fn compose_up(
+        &self,
+        paths: &Paths,
+        init_current: bool,
+    ) -> Result<(ExitStatus, Vec<String>), String> {
+        let selection: &[&str] = if init_current {
             &graph::LONG_RUNNING_SERVICES
         } else {
             &[]
@@ -617,7 +622,7 @@ impl Engine {
     /// derives for it from the candidate files, and the capability it produced still passes its producer's own reader
     /// now, inside the running Account egress of the same image and capability volume. Any other state or any failed
     /// observation runs the initializer again.
-    fn completed_init_is_current(&self, paths: &Paths) -> bool {
+    pub(crate) fn completed_init_is_current(&self, paths: &Paths) -> bool {
         let Ok(records) = self.run_output([
             "inspect",
             "--type=container",
@@ -1899,7 +1904,9 @@ mod tests {
                 cpuset: "0".into(),
             };
 
-            let (status, _) = engine.compose_up(&paths).unwrap();
+            let (status, _) = engine
+                .compose_up(&paths, engine.completed_init_is_current(&paths))
+                .unwrap();
 
             assert!(status.success());
             let invocations = fs::read_to_string(&calls).unwrap();

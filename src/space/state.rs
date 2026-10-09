@@ -83,6 +83,24 @@ pub(crate) fn read_installed(paths: &Paths, profile: HostProfile) -> Result<Inst
     parse_installed(&document, paths, profile)
 }
 
+/// The Admin, Team, Brain, and egress images the installed environment pins, in that order.
+pub(crate) fn read_installed_images(
+    paths: &Paths,
+    profile: HostProfile,
+) -> Result<[String; 4], String> {
+    let document = fs::read_to_string(&paths.environment)
+        .map_err(|error| format!("could not read the installed Local environment: {error}"))?;
+    let values = parse_environment(&document)?;
+    validate_environment(&values, paths, profile)?;
+    Ok([
+        "SHIMPZ_ADMIN_IMAGE",
+        "SHIMPZ_TEAM_IMAGE",
+        "SHIMPZ_BRAIN_IMAGE",
+        "SHIMPZ_EGRESS_IMAGE",
+    ]
+    .map(|key| values[key].to_owned()))
+}
+
 /// Read the installed environment only as an admitted private record; `Ok(None)` when it is absent.
 pub(crate) fn read_private_installed(
     paths: &Paths,
