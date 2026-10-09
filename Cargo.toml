@@ -28,7 +28,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rpassword = "7.5.4"
 ring = "0.17.14"
-sha2 = "0.10"
 toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
 tempfile = "3"
 ureq = { version = "3.3.0", default-features = false, features = ["json", "rustls"] }
@@ -49,11 +48,6 @@ tar = "0.4"
 [[bin]]
 name = "shimpz"
 path = "src/main.rs"
-
-# The lifecycle tests hash the running test binary, about 100 MB in a debug build, as the current CLI; unoptimized
-# SHA-256 takes seconds per hash, so the hash alone is optimized in development and test builds.
-[profile.dev.package.sha2]
-opt-level = 3
 
 [profile.release]
 codegen-units = 1

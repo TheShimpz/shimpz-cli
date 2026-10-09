@@ -4,8 +4,6 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::ustar;
 
 const MAX_COLLECTED_FILES: usize = 10_000;
@@ -92,7 +90,7 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         .filter_map(|entry| entry.path.strip_prefix("actions/").map(str::to_owned))
         .collect();
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
-    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let digest = format!("sha256:{}", crate::digest::sha256_hex(&bytes));
     Ok(SourcePackage {
         bytes,
         digest,

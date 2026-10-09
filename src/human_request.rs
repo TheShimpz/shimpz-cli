@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use std::io;
 
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::action_failure::ActionFailure;
@@ -205,7 +204,7 @@ fn parse_request(value: Option<&Value>) -> Result<HumanRequest, String> {
     let mut preimage = fields.clone();
     preimage.remove("fingerprint");
     let encoded = serde_json::to_vec(&Value::Object(preimage)).map_err(|_| invalid())?;
-    if format!("{:x}", Sha256::digest(encoded)) != fingerprint {
+    if digest::sha256_hex(&encoded) != fingerprint {
         return Err(invalid());
     }
     Ok(HumanRequest {
@@ -425,7 +424,7 @@ mod tests {
     /// Attach the canonical fingerprint to a request preimage.
     fn framed(mut request: Value) -> Value {
         let encoded = serde_json::to_vec(&request).unwrap();
-        request["fingerprint"] = json!(format!("{:x}", Sha256::digest(encoded)));
+        request["fingerprint"] = json!(digest::sha256_hex(&encoded));
         request
     }
 

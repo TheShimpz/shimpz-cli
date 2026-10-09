@@ -1,10 +1,10 @@
 //! Integrity checks for the pinned source-package v1 authority.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const FILES: [(&str, &str); 4] = [
     (
@@ -51,16 +51,12 @@ fn vendored_source_package_contract_matches_the_pinned_developers_tree() {
 
     for (filename, expected) in FILES {
         let bytes = fs::read(mirror.join(filename)).expect("contract file");
-        assert_eq!(
-            format!("{:x}", Sha256::digest(bytes)),
-            expected,
-            "{filename}"
-        );
+        assert_eq!(sha256_hex(&bytes), expected, "{filename}");
     }
 
     let checksums = fs::read(mirror.join("contract-files.sha256")).expect("checksum manifest");
     assert_eq!(
-        format!("{:x}", Sha256::digest(&checksums)),
+        sha256_hex(&checksums),
         "8ec6520349afd75423131df2d9a78f262d2be6a88892c96c73ce700572903f96"
     );
     let upstream: Value =
@@ -71,4 +67,14 @@ fn vendored_source_package_contract_matches_the_pinned_developers_tree() {
         "f602133860482241f8030e25a11e3a0f0dfe259d"
     );
     assert_eq!(upstream["tree"], "614d308e27d248ce5961327beb9789ae4b969ec6");
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }

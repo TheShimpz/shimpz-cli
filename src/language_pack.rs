@@ -11,7 +11,6 @@ use icu_properties::CodePointMapData;
 use icu_properties::props::GeneralCategory;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 /// Every interface language other than English, which is the catalog itself.
 pub(crate) const LOCALES: [&str; 7] = ["ar", "de", "es", "fr", "ja", "pt", "zh"];
@@ -358,7 +357,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::digest::sha256_hex(bytes)
 }
 
 #[cfg(test)]

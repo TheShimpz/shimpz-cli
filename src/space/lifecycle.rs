@@ -10,7 +10,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use ureq::Agent;
 use zeroize::Zeroizing;
 
@@ -2377,7 +2376,7 @@ fn verify_running_cli(release: &ResolvedRelease, profile: HostProfile) -> Result
 
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(io_error)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::digest::Sha256Hasher::new();
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
         let count = file.read(&mut buffer).map_err(io_error)?;
@@ -2386,7 +2385,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finish_hex())
 }
 
 fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Result<bool, String> {
@@ -2801,7 +2800,7 @@ fn generate_host_reset_capability(space_id: &str) -> Result<HostResetCapability,
     let expires_at = created_at
         .checked_add(HOST_RESET_CAPABILITY_SECONDS)
         .ok_or_else(|| "the system clock cannot authorize a Local reset".to_owned())?;
-    let capability_sha256 = format!("{:x}", Sha256::digest(secret_bytes));
+    let capability_sha256 = crate::digest::sha256_hex(&secret_bytes);
     let document = serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "purpose": "space-reset",
@@ -4713,7 +4712,7 @@ mod tests {
         let secret = hex_bytes(capability.secret.as_str());
         assert_eq!(
             document["capability_sha256"],
-            format!("{:x}", Sha256::digest(secret))
+            crate::digest::sha256_hex(&secret)
         );
         assert!(
             !String::from_utf8(capability.document)

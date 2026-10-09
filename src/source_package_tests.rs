@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::source_package::{self, EntryContent, EntryKind, InputEntry};
 use crate::ustar;
@@ -88,7 +87,7 @@ fn matches_every_source_package_golden_vector() {
         if case.valid {
             let bytes = result.unwrap_or_else(|error| panic!("{}: {error}", case.name));
             assert_eq!(
-                format!("{:x}", Sha256::digest(bytes)),
+                crate::digest::sha256_hex(&bytes),
                 case.sha256.expect("valid digest"),
                 "{}",
                 case.name

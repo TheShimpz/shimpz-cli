@@ -5,6 +5,7 @@
 #[path = "../src/fake_tool.rs"]
 mod fake_tool;
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,7 +57,7 @@ fn trusted_environment(root: &Path) -> PathBuf {
         "def action(*args, **kwargs):\n    return lambda body: body\n",
     )
     .unwrap();
-    let id = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(SUMMARY));
+    let id = sha256_hex(SUMMARY.as_bytes());
     fs::write(
         package.join("_bridge.py"),
         format!(
@@ -120,4 +121,14 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
         stderr.contains("invalid language pack acknowledgement"),
         "{stderr}"
     );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }

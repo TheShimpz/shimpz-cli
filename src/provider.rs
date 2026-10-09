@@ -13,7 +13,6 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use ureq::Agent;
 use ureq::http::Request;
 use zeroize::Zeroizing;
@@ -583,27 +582,8 @@ fn proof(key: &str, message: &str) -> String {
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> String {
-    let mut block = [0_u8; 64];
-    if key.len() > block.len() {
-        block[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let pad = |byte: u8| block.map(|value| value ^ byte);
-    let inner = Sha256::new()
-        .chain_update(pad(0x36))
-        .chain_update(message)
-        .finalize();
-    let outer = Sha256::new()
-        .chain_update(pad(0x5c))
-        .chain_update(inner)
-        .finalize();
-    outer
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+    crate::digest::lower_hex(ring::hmac::sign(&key, message).as_ref())
 }
 
 #[cfg(test)]

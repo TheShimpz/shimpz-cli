@@ -5,19 +5,25 @@
 #[path = "../src/fake_tool.rs"]
 mod fake_tool;
 
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 const SUMMARY: &str = "Verify local file-backed Action execution.";
 const LOCALES: [&str; 7] = ["ar", "de", "es", "fr", "ja", "pt", "zh"];
 
 fn hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 fn messages() -> Value {

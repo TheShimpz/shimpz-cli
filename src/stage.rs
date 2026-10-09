@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use toml::Value;
 
 use crate::language_pack::{self, Catalog, Pack};
@@ -493,17 +492,17 @@ fn build_image(
 }
 
 fn stage_nonce() -> String {
-    let mut digest = Sha256::new();
-    digest.update(RandomState::new().hash_one(process::id()).to_be_bytes());
-    digest.update(process::id().to_be_bytes());
-    digest.update(
-        SystemTime::now()
+    let mut hasher = digest::Sha256Hasher::new();
+    hasher.update(&RandomState::new().hash_one(process::id()).to_be_bytes());
+    hasher.update(&process::id().to_be_bytes());
+    hasher.update(
+        &SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
             .to_be_bytes(),
     );
-    format!("{:x}", digest.finalize())[..32].to_owned()
+    hasher.finish_hex()[..32].to_owned()
 }
 
 /// Export the final contract and pack from a created, never-started container and compare them on the host with
@@ -675,7 +674,7 @@ fn declared_creators(identity: &PublicationIdentity) -> String {
 }
 
 fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8]) -> String {
-    let mut digest = Sha256::new();
+    let mut hasher = digest::Sha256Hasher::new();
     for value in [
         b"shimpz-local-stage-v3".as_slice(),
         platform.as_bytes(),
@@ -685,10 +684,10 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8])
         requirements,
         pack,
     ] {
-        digest.update(value.len().to_be_bytes());
-        digest.update(value);
+        hasher.update(&value.len().to_be_bytes());
+        hasher.update(value);
     }
-    format!("sha256:{:x}", digest.finalize())
+    format!("sha256:{}", hasher.finish_hex())
 }
 
 fn docker_output<I, S>(docker: &Path, arguments: I) -> Result<Output, String>
