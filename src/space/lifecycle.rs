@@ -18,7 +18,7 @@ use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
 
 use super::deploy;
-use super::docker::{Engine, ResolvedRelease};
+use super::docker::{Engine, PendingStatus, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::paths::Paths;
@@ -733,17 +733,36 @@ impl Context {
         } else {
             self.engine.completed_init_is_current(&self.paths)
         };
-        let status = self.start_candidate(candidate, init_current)?;
+        // An installed Space already holds the owned release status volume, so its helper starts now and waits only
+        // for the document; a fresh Space's volume exists only once Compose created it, so it projects afterwards.
+        let mut pending = match candidate.installed {
+            Some(_) => Some(
+                self.engine
+                    .begin_release_status(&release.metadata.admin)
+                    .map_err(Some)?,
+            ),
+            None => None,
+        };
+        let started = self.start_candidate(candidate, init_current, &mut pending);
+        // A helper the start did not commit is ended without a document, and reaped, before any rollback projects.
+        let abandoned = pending.map_or(Ok(()), PendingStatus::abandon);
+        let status = match (started, abandoned) {
+            (Ok(status), Ok(())) => status,
+            (Err(cause), Ok(())) => return Err(cause),
+            (Err(Some(cause)), Err(cleanup)) => return Err(Some(format!("{cause}; {cleanup}"))),
+            (Ok(_) | Err(None), Err(cleanup)) => return Err(Some(cleanup)),
+        };
         // The local success record is the commit's last write: it and the live environment prove the commit.
         state::write_private(&self.paths.status, &status).map_err(Some)
     }
 
-    /// Bring the candidate up, prove it, and project its status to Admin.
+    /// Bring the candidate up, prove it, and project its status to Admin, through `pending` when one is waiting.
     /// Returns the status document for the local commit record.
     fn start_candidate(
         &self,
         candidate: &Candidate<'_>,
         init_current: bool,
+        pending: &mut Option<PendingStatus>,
     ) -> Result<String, Option<String>> {
         let release = candidate.release;
         let (started, timings) = self
@@ -780,9 +799,13 @@ impl Context {
         output::progress("Recording the Local release status...");
         let status = state::status_document(release, release_outcome(release, candidate.installed))
             .map_err(Some)?;
-        self.engine
-            .project_release_status(&release.metadata.admin, status.as_bytes())
-            .map_err(|_| None)?;
+        match pending.take() {
+            Some(pending) => pending.commit(status.as_bytes()),
+            None => self
+                .engine
+                .project_release_status(&release.metadata.admin, status.as_bytes()),
+        }
+        .map_err(|_| None)?;
         Ok(status)
     }
 
@@ -3766,7 +3789,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn one_replaced_container_is_left_to_compose() {
+    fn one_replaced_container_is_left_to_compose_and_an_uncommitted_status_helper_writes_nothing() {
         let home = tempfile::tempdir().unwrap();
         let (docker, log) = replacing_docker(home.path(), 0, 0, 1);
         let (error, _context) = failed_start(home.path(), docker, &replacing_release(false));
@@ -3781,6 +3804,21 @@ mod tests {
             !lines
                 .iter()
                 .any(|line| line.starts_with("stop ") || line.starts_with("rm "))
+        );
+        // The status helper started before the candidate's Compose up and, never committed, received no document.
+        let helper = lines
+            .iter()
+            .position(|line| line.starts_with("run --rm --interactive "));
+        let candidate_up = lines.iter().position(|line| {
+            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+        });
+        assert!(
+            matches!((helper, candidate_up), (Some(helper), Some(up)) if helper < up),
+            "{calls}"
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("status.log")).unwrap(),
+            ""
         );
     }
 

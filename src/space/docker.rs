@@ -6,7 +6,7 @@ use std::io::{BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,6 +59,67 @@ pub(crate) struct Engine {
     docker: PathBuf,
     pub(crate) platform: &'static str,
     pub(crate) cpuset: String,
+}
+
+/// A started release status helper waiting for its document. It writes nothing unless committed: an abandoned
+/// helper reads an empty input, which its script refuses before opening any file.
+pub(crate) struct PendingStatus {
+    child: Option<Child>,
+}
+
+impl PendingStatus {
+    /// Send the status document and wait for the helper to write it.
+    pub(crate) fn commit(mut self, document: &[u8]) -> Result<(), String> {
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| "the Local release status helper is unavailable".to_owned())?;
+        let sent = if document.len() > 1_024 {
+            Err("the Local release status projection is invalid".to_owned())
+        } else {
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| "Docker status input is unavailable".to_owned())
+                .and_then(|mut input| {
+                    input.write_all(document).map_err(|_| {
+                        "the Local release status could not be sent to Docker".to_owned()
+                    })
+                })
+        };
+        // The input is closed by now, so the helper always ends and is reaped, even when nothing was sent.
+        drop(child.stdin.take());
+        let status = child
+            .wait()
+            .map_err(|error| format!("could not execute Docker: {error}"));
+        sent?;
+        if status?.success() {
+            Ok(())
+        } else {
+            Err("the Local release status could not be projected to Admin".into())
+        }
+    }
+
+    /// End the helper without a document and reap it; an unreaped helper is reported, never ignored.
+    pub(crate) fn abandon(mut self) -> Result<(), String> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        drop(child.stdin.take());
+        child.wait().map(|_| ()).map_err(|error| {
+            format!("the unused Local release status helper could not be reaped: {error}")
+        })
+    }
+}
+
+impl Drop for PendingStatus {
+    /// The fallback for an exit that neither committed nor abandoned: end the helper without a document.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+    }
 }
 
 pub(crate) struct ResolvedRelease {
@@ -699,7 +760,13 @@ impl Engine {
         admin_image: &str,
         document: &[u8],
     ) -> Result<(), String> {
-        if !ADMIN.admits(admin_image) || document.len() > 1_024 {
+        self.begin_release_status(admin_image)?.commit(document)
+    }
+
+    /// Start the hardened helper that projects the Local release status into this Space's owned volume, before the
+    /// status is known: it waits on its input, so an apply can commit the status as soon as the candidate is healthy.
+    pub(crate) fn begin_release_status(&self, admin_image: &str) -> Result<PendingStatus, String> {
+        if !ADMIN.admits(admin_image) {
             return Err("the Local release status projection is invalid".into());
         }
         let volume = "shimpz-space_release_status";
@@ -716,27 +783,14 @@ impl Engine {
         let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
         let arguments =
             status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image);
-        let mut child = Command::new(&self.docker)
+        let child = Command::new(&self.docker)
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("could not execute Docker: {error}"))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| "Docker status input is unavailable".to_owned())?
-            .write_all(document)
-            .map_err(|_| "the Local release status could not be sent to Docker".to_owned())?;
-        if child
-            .wait()
-            .map_err(|error| format!("could not execute Docker: {error}"))?
-            .success()
-        {
-            Ok(())
-        } else {
-            Err("the Local release status could not be projected to Admin".into())
-        }
+        Ok(PendingStatus { child: Some(child) })
     }
 
     pub(crate) fn project_reset_capability(
@@ -1917,6 +1971,62 @@ mod tests {
             assert_eq!(up.ends_with(services), selected, "{capability}: {up}");
             assert_eq!(up.ends_with("--remove-orphans"), !selected, "{up}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_status_helper_writes_only_a_committed_document_and_is_always_reaped() {
+        let temporary = tempfile::tempdir().unwrap();
+        let received = temporary.path().join("received");
+        let command = temporary.path().join("docker");
+        crate::fake_tool::write(
+            &command,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat >> '{}'; echo . >> '{}.runs' ;;\n  *) exit 1 ;;\nesac\n",
+                received.display(),
+                received.display()
+            ),
+        );
+        let engine = Engine::with_docker(command.clone());
+        let admin = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
+        let runs =
+            || fs::read_to_string(temporary.path().join("received.runs")).unwrap_or_default();
+
+        engine
+            .begin_release_status(&admin)
+            .unwrap()
+            .commit(b"{}")
+            .unwrap();
+        assert_eq!(fs::read_to_string(&received).unwrap(), "{}");
+        engine
+            .begin_release_status(&admin)
+            .unwrap()
+            .abandon()
+            .unwrap();
+        drop(engine.begin_release_status(&admin).unwrap());
+        assert!(
+            engine
+                .begin_release_status(&admin)
+                .unwrap()
+                .commit(&[b'x'; 1_025])
+                .is_err()
+        );
+        // Every helper ran to its end; only the committed document was ever received.
+        assert_eq!(runs(), ".\n.\n.\n.\n");
+        assert_eq!(fs::read_to_string(&received).unwrap(), "{}");
+
+        // A volume this Space does not own starts no helper.
+        crate::fake_tool::write(
+            &command,
+            "#!/bin/sh\ncase \"$1\" in\n  volume) echo other ;;\n  *) exit 9 ;;\nesac\n",
+        );
+        assert!(engine.begin_release_status(&admin).is_err());
+        assert!(
+            engine
+                .begin_release_status("localhost/other:latest")
+                .is_err()
+        );
+        assert_eq!(runs(), ".\n.\n.\n.\n");
     }
 
     #[cfg(unix)]
