@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::capture;
 
@@ -25,8 +26,21 @@ pub(crate) enum Tool {
     Mountpoint,
     Sudo,
     Systemctl,
+    Timeout,
     Umount,
 }
+
+/// How long one call of a quick host tool may run: a mount, unit, or metadata query answers in well under a second, so
+/// two minutes leaves a loaded or waking host ample room while a wedged tool can no longer hold the lifecycle lock.
+const QUICK_TOOL_BUDGET: Duration = Duration::from_mins(2);
+/// How long one LUKS or filesystem operation may run: Argon2 key derivation and formatting take seconds.
+const STORAGE_TOOL_BUDGET: Duration = Duration::from_mins(5);
+/// How long `timeout` waits after its terminate signal before it kills a privileged tool.
+const PRIVILEGED_KILL_AFTER: Duration = Duration::from_secs(5);
+/// How long past a privileged tool's own deadline this process waits for `sudo` before reporting it may remain.
+const PRIVILEGED_REAP_MARGIN: Duration = Duration::from_mins(1);
+/// The exit statuses `timeout` reports when it terminated (124) or killed (128 + 9) the tool it ran.
+const PRIVILEGED_TIMED_OUT: [i32; 2] = [124, 137];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HostOs {
@@ -61,7 +75,16 @@ impl Tool {
             Self::Mountpoint => &["/usr/bin/mountpoint", "/bin/mountpoint"],
             Self::Sudo => &["/usr/bin/sudo"],
             Self::Systemctl => &["/usr/bin/systemctl", "/bin/systemctl"],
+            Self::Timeout => &["/usr/bin/timeout", "/bin/timeout"],
             Self::Umount => &["/usr/bin/umount", "/bin/umount"],
+        }
+    }
+
+    /// The longest one call of this tool may run before it is stopped.
+    pub(crate) fn budget(self) -> Duration {
+        match self {
+            Self::Luks | Self::MkfsExt4 => STORAGE_TOOL_BUDGET,
+            _ => QUICK_TOOL_BUDGET,
         }
     }
 
@@ -180,7 +203,11 @@ where
     S: AsRef<OsStr>,
 {
     let program = tool.resolve()?;
-    let result = bounded(&program, Command::new(&program).args(arguments))?;
+    let result = bounded(
+        &program,
+        Command::new(&program).args(arguments),
+        tool.budget(),
+    )?;
     if !result.status.success() {
         return Err(format!("host command failed: {}", program.display()));
     }
@@ -194,24 +221,36 @@ where
     S: AsRef<OsStr>,
 {
     let program = tool.resolve()?;
-    bounded(&program, Command::new(&program).args(arguments))
+    bounded(
+        &program,
+        Command::new(&program).args(arguments),
+        tool.budget(),
+    )
 }
 
-/// Capture at most `MAX_HOST_OUTPUT_BYTES` of each stream from one host tool.
-fn bounded(program: &Path, command: &mut Command) -> Result<Output, String> {
-    capture::bounded(command, MAX_HOST_OUTPUT_BYTES, MAX_HOST_OUTPUT_BYTES).map_err(|failure| {
-        match failure {
-            capture::Failure::Unavailable(error) => {
-                format!("could not execute {}: {error}", program.display())
-            }
-            capture::Failure::Excessive => {
-                format!(
-                    "host command output exceeded its bound: {}",
-                    program.display()
-                )
-            }
-        }
-    })
+/// Capture at most `MAX_HOST_OUTPUT_BYTES` of each stream from one host tool, stopping it once it outlives `budget`.
+fn bounded(program: &Path, command: &mut Command, budget: Duration) -> Result<Output, String> {
+    capture::bounded_within(
+        command,
+        MAX_HOST_OUTPUT_BYTES,
+        MAX_HOST_OUTPUT_BYTES,
+        budget,
+    )
+    .map_err(|failure| wait_failure(program, budget, failure))
+}
+
+/// The diagnostic of a host command that outlived its deadline.
+fn timed_out(program: &Path, budget: Duration, stopped: bool) -> String {
+    let outcome = if stopped {
+        "it was stopped"
+    } else {
+        "it could not be stopped and may still be running"
+    };
+    format!(
+        "host command did not finish within {} s; {outcome}: {}",
+        budget.as_secs(),
+        program.display()
+    )
 }
 
 pub(crate) fn status<I, S>(tool: Tool, arguments: I) -> Result<ExitStatus, String>
@@ -220,11 +259,25 @@ where
     S: AsRef<OsStr>,
 {
     let program = tool.resolve()?;
-    Command::new(&program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))
+    let budget = tool.budget();
+    let mut child = capture::spawn(Command::new(&program).args(arguments).stdin(Stdio::null()))
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    capture::wait(&mut child, Instant::now() + budget)
+        .map_err(|failure| wait_failure(&program, budget, failure))
+}
+
+/// The diagnostic of a host command whose wait failed: it outlived its deadline or could not be reaped.
+fn wait_failure(program: &Path, budget: Duration, failure: capture::Failure) -> String {
+    match failure {
+        capture::Failure::TimedOut { stopped } => timed_out(program, budget, stopped),
+        capture::Failure::Unavailable(error) => {
+            format!("could not execute {}: {error}", program.display())
+        }
+        capture::Failure::Excessive => format!(
+            "host command output exceeded its bound: {}",
+            program.display()
+        ),
+    }
 }
 
 pub(crate) fn authorize() -> Result<(), String> {
@@ -252,11 +305,11 @@ where
     S: AsRef<OsStr>,
 {
     let (program, mut command) = privileged_command(tool)?;
-    command
-        .args(arguments)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))
+    let mut child = capture::spawn(command.args(arguments).stdin(Stdio::null()))
+        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    let status = capture::wait(&mut child, privileged_reap_deadline(tool))
+        .map_err(|failure| wait_failure(&program, tool.budget(), failure))?;
+    privileged_outcome(&program, tool, status)
 }
 
 pub(crate) fn privileged_status_with_input<I, S>(
@@ -269,24 +322,27 @@ where
     S: AsRef<OsStr>,
 {
     let (program, mut command) = privileged_command(tool)?;
-    let mut child = command
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+    let mut child = capture::spawn(
+        command
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
     let write_result = child
         .stdin
         .take()
-        .ok_or_else(|| "privileged command input is unavailable".to_owned())?
-        .write_all(input)
-        .map_err(|_| "privileged command input failed".to_owned());
-    let status = child
-        .wait()
-        .map_err(|error| format!("could not execute {}: {error}", program.display()))?;
+        .ok_or_else(|| "privileged command input is unavailable".to_owned())
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(input)
+                .map_err(|_| "privileged command input failed".to_owned())
+        });
+    let status = capture::wait(&mut child, privileged_reap_deadline(tool))
+        .map_err(|failure| wait_failure(&program, tool.budget(), failure))?;
     write_result?;
-    Ok(status)
+    privileged_outcome(&program, tool, status)
 }
 
 pub(crate) fn privileged_output<I, S>(tool: Tool, arguments: I) -> Result<String, String>
@@ -295,8 +351,10 @@ where
     S: AsRef<OsStr>,
 {
     let (program, mut command) = privileged_command(tool)?;
-    let result = bounded(&program, command.args(arguments))?;
-    if !result.status.success() {
+    let budget = privileged_reap_deadline(tool).saturating_duration_since(Instant::now());
+    let result = bounded(&program, command.args(arguments), budget)?;
+    let status = privileged_outcome(&program, tool, result.status)?;
+    if !status.success() {
         return Err(format!(
             "privileged host command failed: {}",
             program.display()
@@ -305,17 +363,45 @@ where
     String::from_utf8(result.stdout).map_err(|_| "host command output was not UTF-8".into())
 }
 
+/// A privileged tool runs under `timeout` as root, which alone may signal it: past its budget `timeout` terminates
+/// it, kills it after a grace, and exits only once it ended, so a deadline never leaves it running behind `sudo`.
 fn privileged_command(tool: Tool) -> Result<(PathBuf, Command), String> {
     let program = tool.resolve()?;
-    let command = if effective_root() {
-        Command::new(&program)
+    let deadline = Tool::Timeout.resolve()?;
+    let mut command = if effective_root() {
+        Command::new(&deadline)
     } else {
         let sudo = Tool::Sudo.resolve()?;
         let mut command = Command::new(sudo);
-        command.arg("--non-interactive").arg(&program);
+        command.arg("--non-interactive").arg(&deadline);
         command
     };
+    command
+        .arg(format!("--kill-after={}s", PRIVILEGED_KILL_AFTER.as_secs()))
+        .arg(format!("{}s", tool.budget().as_secs()))
+        .arg(&program);
     Ok((program, command))
+}
+
+/// The moment past which this process stops waiting for a privileged tool that `timeout` should already have ended.
+fn privileged_reap_deadline(tool: Tool) -> Instant {
+    Instant::now() + tool.budget() + PRIVILEGED_KILL_AFTER + PRIVILEGED_REAP_MARGIN
+}
+
+/// The privileged tool's own status, or the refusal of one `timeout` stopped at its deadline.
+fn privileged_outcome(
+    program: &Path,
+    tool: Tool,
+    status: ExitStatus,
+) -> Result<ExitStatus, String> {
+    if status
+        .code()
+        .is_some_and(|code| PRIVILEGED_TIMED_OUT.contains(&code))
+    {
+        Err(timed_out(program, tool.budget(), true))
+    } else {
+        Ok(status)
+    }
 }
 
 fn effective_root() -> bool {
@@ -338,7 +424,13 @@ mod tests {
     #[test]
     fn host_tool_output_is_bounded_on_each_stream() {
         let shell = Path::new("/bin/sh");
-        let run = |script: String| bounded(shell, Command::new(shell).args(["-c", &script]));
+        let run = |script: String| {
+            bounded(
+                shell,
+                Command::new(shell).args(["-c", &script]),
+                Duration::from_mins(1),
+            )
+        };
         let exact = run(format!("head -c {MAX_HOST_OUTPUT_BYTES} /dev/zero")).unwrap();
         assert_eq!(exact.stdout.len(), MAX_HOST_OUTPUT_BYTES);
         for redirect in ["", " >&2"] {
@@ -352,7 +444,7 @@ mod tests {
     }
 
     /// Every production host tool.
-    const TOOLS: [Tool; 13] = [
+    const TOOLS: [Tool; 14] = [
         Tool::Chown,
         Tool::Docker,
         Tool::Findmnt,
@@ -365,8 +457,31 @@ mod tests {
         Tool::Mountpoint,
         Tool::Sudo,
         Tool::Systemctl,
+        Tool::Timeout,
         Tool::Umount,
     ];
+
+    /// `timeout` ends a privileged tool past its deadline with 124, or 137 once it had to kill it; either is a
+    /// refusal naming the deadline, never an ordinary failure the caller could misread.
+    #[cfg(unix)]
+    #[test]
+    fn a_privileged_tool_stopped_at_its_deadline_is_reported_as_timed_out() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let program = Path::new("/usr/sbin/cryptsetup");
+        for code in [124, 137] {
+            assert_eq!(
+                privileged_outcome(program, Tool::Luks, ExitStatus::from_raw(code << 8)),
+                Err("host command did not finish within 300 s; it was stopped: /usr/sbin/cryptsetup".into())
+            );
+        }
+        for code in [0, 1, 5] {
+            let status = ExitStatus::from_raw(code << 8);
+            assert_eq!(privileged_outcome(program, Tool::Luks, status), Ok(status));
+        }
+        assert_eq!(Tool::Mount.budget(), Duration::from_mins(2));
+        assert_eq!(Tool::MkfsExt4.budget(), Duration::from_mins(5));
+    }
 
     #[test]
     fn production_tools_have_only_absolute_fixed_candidates() {

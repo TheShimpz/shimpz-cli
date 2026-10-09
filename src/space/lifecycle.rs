@@ -62,6 +62,11 @@ pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
 }
 
 pub(crate) fn start(options: &SpaceStart) -> Result<String, String> {
+    // An unattended run under systemd starts every host command in its own process group, so a deadline stops the
+    // command's descendants too; macOS keeps launchd's job group, and an interactive run keeps the terminal's.
+    if options.scheduled && host::detect().is_ok_and(|profile| profile != HostProfile::MacOs) {
+        crate::capture::isolate_process_groups();
+    }
     let paths = Paths::discover()?;
     validate_install_home(&paths)?;
     let _lock = (!options.candidate)
@@ -1412,23 +1417,30 @@ impl Context {
             &release.metadata.team,
             false,
         ) {
-            Ok(_) => self
-                .engine
-                .compose(
-                    &self.paths,
-                    [
-                        "up",
-                        "-d",
-                        "--wait",
-                        "--wait-timeout",
-                        "120",
-                        "--no-build",
-                        "--pull",
-                        "never",
-                        "--remove-orphans",
-                    ],
-                )?
-                .success(),
+            // A restoration that could not run, or outlived its deadline, is a failed restoration: the rollback
+            // status is still recorded.
+            Ok(_) => match self.engine.compose(
+                &self.paths,
+                [
+                    "up",
+                    "-d",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "--no-build",
+                    "--pull",
+                    "never",
+                    "--remove-orphans",
+                ],
+            ) {
+                Ok(status) => status.success(),
+                Err(error) => {
+                    output::warning(&format!(
+                        "the previous release could not be started: {error}"
+                    ));
+                    false
+                }
+            },
             Err(error) => {
                 output::warning(&format!(
                     "the previous release was not started because its runtime state could not be recreated: {error}"
@@ -3677,6 +3689,24 @@ mod tests {
             "{outcome}"
         );
         assert!(!outcome.contains("restored"), "{outcome}");
+    }
+
+    /// A restoration Docker cannot run, as when it outlives its deadline and is stopped, still records the rollback.
+    #[cfg(unix)]
+    #[test]
+    fn a_restoration_that_cannot_run_still_records_the_rollback() {
+        let home = tempfile::tempdir().unwrap();
+        let (context, backup) = installed_space(home.path(), home.path().join("absent-docker"));
+        let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
+
+        let outcome = context
+            .rollback(&release(2, 'b'), &installed.space_id, Some(backup))
+            .unwrap_err();
+
+        assert_eq!(outcome, "the update and its rollback both failed");
+        let status: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&context.paths.status).unwrap()).unwrap();
+        assert_eq!(status["outcome"], "rollback-needed");
     }
 
     const ADMIN_ID: &str = "a0000000000000000000000000000000000000000000000000000000000000ad";

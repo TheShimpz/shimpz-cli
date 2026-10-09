@@ -189,7 +189,9 @@ where
     )
     .map_err(|error| match error {
         capture::Failure::Excessive => "Docker returned excessive Local snapshot removal output",
-        capture::Failure::Unavailable(_) => "Docker could not execute the Local snapshot removal",
+        capture::Failure::Unavailable(_) | capture::Failure::TimedOut { .. } => {
+            "Docker could not execute the Local snapshot removal"
+        }
     })
     .map_err(Into::into)
 }

@@ -7,6 +7,7 @@ use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,23 @@ use crate::capture::{self, Drained};
 use crate::digest;
 
 const RELEASE_CHANNEL: &str = "stable";
+/// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
+/// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in
+/// about a second; two minutes leaves a loaded or waking daemon ample room while a wedged one can no longer hold the
+/// lifecycle lock. A failure before the candidate replaces the running release is retried by the next run.
+const DOCKER_QUICK: Duration = Duration::from_mins(2);
+/// How long one image download may run. The longest measured Local download was 126 s, for the 443 MB Team image;
+/// twenty minutes still admits about 3 Mbit/s for it.
+const DOCKER_PULL: Duration = Duration::from_mins(20);
+/// How long stopping managed containers may run: each honors its 15 s stop grace.
+const DOCKER_STOP: Duration = Duration::from_mins(5);
+/// How long one Compose `up --wait` (whose own health wait is 120 s) or `down` may run, recreation and stop graces
+/// included; the longest measured start took 58 s. A false timeout here rolls back, so the bound is wide.
+const DOCKER_COMPOSE: Duration = Duration::from_mins(10);
+/// How long emptying the runtime-state volumes may run.
+const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
+/// How long a reader may take to deliver a stream after Docker exited, before its output is treated as unavailable.
+const STREAM_GRACE: Duration = Duration::from_secs(5);
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 /// The most output one captured Docker command may return on either stream before it is stopped.
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -95,12 +113,21 @@ impl PendingStatus {
                     })
                 })
         };
-        // The input is closed by now, so the helper always ends and is reaped, even when nothing was sent.
+        // The input is closed by now, so the helper ends and is reaped, even when nothing was sent; one that outlives
+        // its deadline is stopped.
         drop(child.stdin.take());
-        match (child.wait(), sent) {
-            (Err(error), sent) => {
-                let unreaped =
-                    format!("the Local release status helper could not be reaped: {error}");
+        match (
+            capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
+            sent,
+        ) {
+            (Err(capture::Failure::TimedOut { stopped: true }), _) => Err(
+                ProjectionFailure::NotProjected(docker_timed_out(DOCKER_QUICK, true)),
+            ),
+            (Err(failure), sent) => {
+                let unreaped = format!(
+                    "the Local release status helper could not be reaped: {}",
+                    wait_failure(DOCKER_QUICK, failure)
+                );
                 Err(ProjectionFailure::Unreaped(match sent {
                     Ok(()) => unreaped,
                     Err(cause) => format!("{cause}; {unreaped}"),
@@ -120,9 +147,13 @@ impl PendingStatus {
             return Ok(());
         };
         drop(child.stdin.take());
-        child.wait().map(|_| ()).map_err(|error| {
-            format!("the unused Local release status helper could not be reaped: {error}")
-        })
+        match capture::wait(&mut child, Instant::now() + DOCKER_QUICK) {
+            Ok(_) | Err(capture::Failure::TimedOut { stopped: true }) => Ok(()),
+            Err(failure) => Err(format!(
+                "the unused Local release status helper could not be reaped: {}",
+                wait_failure(DOCKER_QUICK, failure)
+            )),
+        }
     }
 }
 
@@ -131,7 +162,7 @@ impl Drop for PendingStatus {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             drop(child.stdin.take());
-            let _ = child.wait();
+            let _ = capture::wait(&mut child, Instant::now() + DOCKER_QUICK);
         }
     }
 }
@@ -431,11 +462,31 @@ impl Engine {
             RUNTIME_STATE_RESET_CONTAINER,
             volumes,
         );
-        let status = self.run_quiet_status("Docker runtime state reset", arguments)?;
+        let status = match self.run_quiet_status_within(
+            "Docker runtime state reset",
+            DOCKER_STATE_RESET,
+            arguments,
+        ) {
+            Ok(status) => status,
+            // A stopped Docker client does not stop its container, so the deletion is ended here and proved gone
+            // before anything may start on these volumes again.
+            Err(error) => return Err(self.end_runtime_state_reset(error)),
+        };
         if status.success() {
             Ok(())
         } else {
             Err("the Local runtime state could not be recreated".into())
+        }
+    }
+
+    /// Remove the runtime state reset helper after its run failed, and prove it absent.
+    fn end_runtime_state_reset(&self, cause: String) -> String {
+        let _ = self.silent_status(["rm", "--force", RUNTIME_STATE_RESET_CONTAINER]);
+        match self.silent_status(["container", "inspect", RUNTIME_STATE_RESET_CONTAINER]) {
+            Ok(status) if !status.success() => cause,
+            _ => format!(
+                "{cause}; the runtime state reset container may still be running; run docker rm --force {RUNTIME_STATE_RESET_CONTAINER}"
+            ),
         }
     }
 
@@ -559,24 +610,27 @@ impl Engine {
     }
 
     fn remove_authentication_probe(&self, container: &str) -> Result<bool, String> {
-        let inspect = Command::new(&self.docker)
-            .args(["container", "inspect", container])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
-        if !inspect.success() {
+        if !self
+            .silent_status(["container", "inspect", container])?
+            .success()
+        {
             return Ok(true);
         }
-        let removed = Command::new(&self.docker)
-            .args(["rm", "--force", container])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
-        Ok(removed.success())
+        Ok(self.silent_status(["rm", "--force", container])?.success())
+    }
+
+    /// Run one quick Docker call with every stream closed, within its deadline.
+    fn silent_status<const N: usize>(&self, arguments: [&str; N]) -> Result<ExitStatus, String> {
+        let mut child = capture::spawn(
+            Command::new(&self.docker)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
+        capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
+            .map_err(|failure| wait_failure(DOCKER_QUICK, failure))
     }
 
     #[cfg(unix)]
@@ -651,39 +705,50 @@ impl Engine {
             &[]
         };
         let started = Instant::now();
-        let mut child = Command::new(&self.docker)
-            .arg("compose")
-            .arg("--progress")
-            .arg("plain")
-            .arg("--project-directory")
-            .arg(&paths.home)
-            .arg("--env-file")
-            .arg(&paths.environment)
-            .arg("--file")
-            .arg(&paths.compose)
-            .args(COMPOSE_UP)
-            .args(if selection.is_empty() {
-                &[][..]
-            } else {
-                &["--no-deps"][..]
-            })
-            .args(selection)
-            // Progress must reach the stream read below, whatever the caller's environment selects.
-            .env("COMPOSE_STATUS_STDOUT", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        let deadline = started + DOCKER_COMPOSE;
+        let mut child = capture::spawn(
+            Command::new(&self.docker)
+                .arg("compose")
+                .arg("--progress")
+                .arg("plain")
+                .arg("--project-directory")
+                .arg(&paths.home)
+                .arg("--env-file")
+                .arg(&paths.environment)
+                .arg("--file")
+                .arg(&paths.compose)
+                .args(COMPOSE_UP)
+                .args(if selection.is_empty() {
+                    &[][..]
+                } else {
+                    &["--no-deps"][..]
+                })
+                .args(selection)
+                // Progress must reach the stream read below, whatever the caller's environment selects.
+                .env("COMPOSE_STATUS_STDOUT", "0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped()),
+        )
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
         let stderr = child
             .stderr
             .take()
             .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
-        let read = read_compose_progress(stderr, started);
-        let status = child
-            .wait()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
-        let (timings, diagnostic) = read?;
+        let (sender, receiver) = mpsc::channel();
+        // The reader is never joined: a process Compose started may still hold its stream after a stop.
+        thread::spawn(move || {
+            let _ = sender.send(read_compose_progress(stderr, started));
+        });
+        let status = capture::wait(&mut child, deadline).map_err(|failure| {
+            format!(
+                "Docker Compose could not bring the Space up: {}",
+                wait_failure(DOCKER_COMPOSE, failure)
+            )
+        })?;
+        let (timings, diagnostic) =
+            capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
+                .unwrap_or_else(|| Err("Docker Compose progress could not be read".to_owned()))?;
         if !status.success() {
             crate::output::warning(&format!(
                 "Docker Compose failed; Docker returned {status}: {}",
@@ -766,7 +831,7 @@ impl Engine {
             .arg(&paths.compose)
             .args(arguments)
             .stdin(Stdio::null());
-        quiet_status(&mut command, "Docker Compose")
+        quiet_status(&mut command, "Docker Compose", DOCKER_COMPOSE)
     }
 
     pub(crate) fn project_release_status(
@@ -825,13 +890,14 @@ impl Engine {
         let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
         let arguments =
             status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image);
-        let child = Command::new(&self.docker)
-            .args(arguments)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
+        let child = capture::spawn(
+            Command::new(&self.docker)
+                .args(arguments)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
         Ok(Some(PendingStatus { child: Some(child) }))
     }
 
@@ -855,23 +921,27 @@ impl Engine {
             true,
             reset_capability_write_script(),
         );
-        let mut child = Command::new(&self.docker)
-            .args(arguments)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("could not execute Docker: {error}"))?;
-        child
+        let mut child = capture::spawn(
+            Command::new(&self.docker)
+                .args(arguments)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null()),
+        )
+        .map_err(|error| format!("could not execute Docker: {error}"))?;
+        let sent = child
             .stdin
             .take()
-            .ok_or_else(|| "Docker reset capability input is unavailable".to_owned())?
-            .write_all(document)
-            .map_err(|_| "the Local reset capability could not be sent to Docker".to_owned())?;
-        if child
-            .wait()
-            .map_err(|error| format!("could not execute Docker: {error}"))?
-            .success()
-        {
+            .ok_or_else(|| "Docker reset capability input is unavailable".to_owned())
+            .and_then(|mut input| {
+                input.write_all(document).map_err(|_| {
+                    "the Local reset capability could not be sent to Docker".to_owned()
+                })
+            });
+        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped.
+        let status = capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
+            .map_err(|failure| wait_failure(DOCKER_QUICK, failure))?;
+        sent?;
+        if status.success() {
             Ok(())
         } else {
             Err("the Local reset capability could not be projected to Admin".into())
@@ -945,9 +1015,23 @@ impl Engine {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_quiet_status_within(operation, DOCKER_QUICK, arguments)
+    }
+
+    /// [`Self::run_quiet_status`] for a call that may legitimately run up to `budget`.
+    pub(crate) fn run_quiet_status_within<I, S>(
+        &self,
+        operation: &str,
+        budget: Duration,
+        arguments: I,
+    ) -> Result<ExitStatus, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = Command::new(&self.docker);
         command.args(arguments).stdin(Stdio::null());
-        quiet_status(&mut command, operation)
+        quiet_status(&mut command, operation, budget)
     }
 
     pub(crate) fn stop_containers(&self, containers: &[String]) -> Result<(), String> {
@@ -956,7 +1040,7 @@ impl Engine {
         }
         let arguments = stop_arguments(containers);
         if self
-            .run_quiet_status("Docker managed container stop", arguments)?
+            .run_quiet_status_within("Docker managed container stop", DOCKER_STOP, arguments)?
             .success()
         {
             Ok(())
@@ -983,8 +1067,9 @@ impl Engine {
     }
 
     fn pull(&self, reference: &str) -> Result<(), String> {
-        let result = self.run_quiet_status(
+        let result = self.run_quiet_status_within(
             "Docker image download",
+            DOCKER_PULL,
             ["pull", "--quiet", "--platform", self.platform, reference],
         )?;
         if result.success() {
@@ -1495,8 +1580,13 @@ fn require_engine_versions(daemon: &str, compose: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn quiet_status(command: &mut Command, operation: &str) -> Result<ExitStatus, String> {
-    let (status, diagnostic) = execute_quiet(command)?;
+fn quiet_status(
+    command: &mut Command,
+    operation: &str,
+    budget: Duration,
+) -> Result<ExitStatus, String> {
+    let (status, diagnostic) =
+        execute_quiet(command, budget).map_err(|error| format!("{operation} failed: {error}"))?;
     if !status.success() {
         let detail = if diagnostic.is_empty() {
             String::new()
@@ -1510,24 +1600,52 @@ fn quiet_status(command: &mut Command, operation: &str) -> Result<ExitStatus, St
     Ok(status)
 }
 
-fn execute_quiet(command: &mut Command) -> Result<(ExitStatus, String), String> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+fn execute_quiet(command: &mut Command, budget: Duration) -> Result<(ExitStatus, String), String> {
+    let deadline = Instant::now() + budget;
+    let mut child = capture::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| format!("could not execute Docker: {error}"))?;
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
-    let captured = drain_diagnostic(stderr);
-    let status = child
-        .wait()
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-    let captured = captured?;
+    let (sender, receiver) = mpsc::channel();
+    // The reader is never joined: a process Docker started may still hold its stream after a stop.
+    thread::spawn(move || {
+        let _ = sender.send(drain_diagnostic(stderr));
+    });
+    let status =
+        capture::wait(&mut child, deadline).map_err(|failure| wait_failure(budget, failure))?;
+    let captured = capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
+        .unwrap_or_else(|| Err("Docker diagnostic output could not be read".to_owned()))?;
     let diagnostic = render_diagnostic(&captured);
     Ok((status, diagnostic))
+}
+
+/// The diagnostic of a Docker call that outlived its deadline.
+fn docker_timed_out(budget: Duration, stopped: bool) -> String {
+    let outcome = if stopped {
+        "it was stopped"
+    } else {
+        "it could not be stopped and may still be running"
+    };
+    format!(
+        "Docker did not finish within {} s; {outcome}",
+        budget.as_secs()
+    )
+}
+
+/// The diagnostic of a Docker call whose bounded wait failed.
+fn wait_failure(budget: Duration, failure: capture::Failure) -> String {
+    match failure {
+        capture::Failure::TimedOut { stopped } => docker_timed_out(budget, stopped),
+        capture::Failure::Unavailable(error) => format!("could not execute Docker: {error}"),
+        capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
+    }
 }
 
 enum BoundedOutput {
@@ -1543,43 +1661,32 @@ fn execute_bounded_stdout(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<BoundedOutput, String> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .spawn()
+    let deadline = Instant::now() + timeout;
+    let mut child = capture::spawn(command.stdout(Stdio::piped()))
         .map_err(|error| format!("could not execute Docker: {error}"))?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
-    let captured = thread::spawn(move || drain_bounded_stdout(stdout));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("could not execute Docker: {error}"))?
-        {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            child
-                .wait()
-                .map_err(|error| format!("could not execute Docker: {error}"))?;
-            break None;
-        }
-        thread::sleep(Duration::from_millis(25));
+    let (sender, receiver) = mpsc::channel();
+    // The reader is never joined: a process Docker started may still hold its stream after a stop.
+    thread::spawn(move || {
+        let _ = sender.send(drain_bounded_stdout(stdout));
+    });
+    let status = match capture::wait(&mut child, deadline) {
+        Ok(status) => status,
+        Err(capture::Failure::TimedOut { stopped: true }) => return Ok(BoundedOutput::TimedOut),
+        Err(failure) => return Err(wait_failure(timeout, failure)),
     };
-    let captured = captured
-        .join()
-        .map_err(|_| "Docker authentication-state output could not be read".to_owned())??;
-    match status {
-        Some(status) => Ok(BoundedOutput::Completed {
-            status,
-            bytes: captured.bytes,
-            truncated: captured.truncated,
-        }),
-        None => Ok(BoundedOutput::TimedOut),
-    }
+    let captured =
+        capture::receive(&receiver, Instant::now() + STREAM_GRACE).unwrap_or_else(|| {
+            Err("Docker authentication-state output could not be read".to_owned())
+        })?;
+    Ok(BoundedOutput::Completed {
+        status,
+        bytes: captured.bytes,
+        truncated: captured.truncated,
+    })
 }
 
 fn drain_bounded_stdout(stdout: ChildStdout) -> Result<Drained, String> {
@@ -1616,14 +1723,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = capture::bounded(
+    let result = capture::bounded_within(
         Command::new(program).args(arguments),
         MAX_DOCKER_OUTPUT_BYTES,
         MAX_DOCKER_OUTPUT_BYTES,
+        DOCKER_QUICK,
     )
     .map_err(|failure| match failure {
-        capture::Failure::Unavailable(error) => format!("could not execute Docker: {error}"),
         capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
+        failure => wait_failure(DOCKER_QUICK, failure),
     })?;
     if !result.status.success() {
         return Err(format!(
@@ -2351,12 +2459,75 @@ mod tests {
             .stdout(Stdio::from(stdout.reopen().unwrap()))
             .stderr(Stdio::from(stderr.reopen().unwrap()));
 
-        let (status, diagnostic) = execute_quiet(&mut command).unwrap();
+        let (status, diagnostic) = execute_quiet(&mut command, DOCKER_QUICK).unwrap();
 
         assert!(status.success());
         assert_eq!(diagnostic, "unexpected stderr");
         assert_eq!(stdout.as_file().metadata().unwrap().len(), 0);
         assert_eq!(stderr.as_file().metadata().unwrap().len(), 0);
+    }
+
+    /// A Docker call that outlives its deadline is stopped and reported, instead of holding the lifecycle lock.
+    #[cfg(unix)]
+    #[test]
+    fn a_docker_call_past_its_deadline_is_stopped_and_reported() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 60"]);
+        let started = Instant::now();
+
+        let error = quiet_status(
+            &mut command,
+            "Docker image download",
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Docker image download failed: Docker did not finish within 1 s; it was stopped"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A stopped Docker client does not stop the deletion container it ran, so a failed runtime state reset removes
+    /// it and reports success only once Docker proves it gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_runtime_state_reset_removes_its_container_and_proves_it_gone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let docker = temporary.path().join("docker");
+        let calls = temporary.path().join("calls");
+        for (inspect, expected) in [
+            ("1", "timed out".to_owned()),
+            (
+                "0",
+                format!(
+                    "timed out; the runtime state reset container may still be running; run docker rm --force {RUNTIME_STATE_RESET_CONTAINER}"
+                ),
+            ),
+        ] {
+            crate::fake_tool::write(
+                &docker,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in container) exit {inspect} ;; esac\n",
+                    calls.display()
+                ),
+            );
+            let _ = fs::remove_file(&calls);
+            let engine = Engine::with_docker(docker.clone());
+
+            assert_eq!(engine.end_runtime_state_reset("timed out".into()), expected);
+            assert_eq!(
+                fs::read_to_string(&calls)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                [
+                    format!("rm --force {RUNTIME_STATE_RESET_CONTAINER}"),
+                    format!("container inspect {RUNTIME_STATE_RESET_CONTAINER}"),
+                ]
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2365,7 +2536,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "printf 'failed\\033[2J' >&2; exit 7"]);
 
-        let (status, diagnostic) = execute_quiet(&mut command).unwrap();
+        let (status, diagnostic) = execute_quiet(&mut command, DOCKER_QUICK).unwrap();
 
         assert_eq!(status.code(), Some(7));
         assert!(diagnostic.contains("failed�[2J"));
