@@ -3061,7 +3061,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$4\" in *Labels*) echo 1 ;; *) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; esac ;;\n  create) echo developer ;;\n  cp) cat '{developer}' > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$4\" in *Labels*) echo '1|<no value>' ;; *) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; esac ;;\n  create) echo developer ;;\n  cp) cat '{developer}' > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 developer = developer_document.display(),
             ),
@@ -3167,13 +3167,93 @@ mod tests {
             panic!("an unreadable release metadata copy was admitted");
         };
         assert!(
-            error.starts_with("could not read Local release metadata: ")
-                && error.contains("; could not remove temporary release metadata: "),
+            error.starts_with("the Local release metadata is not a regular file; ")
+                && error.contains("could not remove temporary release metadata: "),
             "{error}"
         );
     }
 
-    /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set.
+    /// The copies a set image controls are trusted only as bounded regular files: a link is never followed, a FIFO
+    /// never opened, and an oversized document never read whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_resolution_reads_only_a_bounded_regular_metadata_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let developer_release = developer(9, '1');
+        let docker = developer_docker(home.path(), &developer_release);
+        let document = home.path().join("developer.env");
+        let copy = format!("cat '{}' > \"$3\"", document.display());
+        let script = fs::read_to_string(&docker).unwrap();
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(docker.clone()),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+        for (replacement, refusal) in [
+            (
+                format!("ln -s '{}' \"$3\"", document.display()),
+                "the Local release metadata is not a regular file",
+            ),
+            (
+                "mkfifo \"$3\"".to_owned(),
+                "the Local release metadata is not a regular file",
+            ),
+            (
+                "head -c 2049 /dev/zero > \"$3\"".to_owned(),
+                "the Local release metadata is malformed",
+            ),
+        ] {
+            crate::fake_tool::write(&docker, script.replace(&copy, &replacement));
+            let Err(error) = context.resolve(Some(&developer_release.reference)) else {
+                panic!("admitted the copy made by {replacement}");
+            };
+            assert_eq!(error, refusal, "{replacement}");
+            assert!(!context.paths.home.join("release.env.tmp").exists());
+        }
+        assert_eq!(
+            fs::read_to_string(&document).unwrap(),
+            release_document(&developer_release)
+        );
+    }
+
+    /// A release-bound CLI copy that is a link is removed without following it, so no host file changes mode.
+    #[cfg(unix)]
+    #[test]
+    fn an_extracted_cli_link_is_removed_without_touching_its_target() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("host-file");
+        fs::write(&target, "host\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let docker = home.path().join("docker");
+        crate::fake_tool::write(
+            &docker,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  create) echo c ;;\n  cp) ln -s '{}' \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                target.display()
+            ),
+        );
+        let candidate = home.path().join("shimpz.candidate");
+        let Err(error) = Engine::with_docker(docker).extract_cli(
+            &release(3, 'c').reference,
+            HostProfile::Linux,
+            &candidate,
+        ) else {
+            panic!("a linked CLI copy was admitted");
+        };
+        assert_eq!(error, "the release-bound CLI is not a regular file");
+        assert!(fs::symlink_metadata(&candidate).is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    /// A Docker stand-in whose `stable` channel names `stable` and whose store holds every given release set at
+    /// state epoch 1, each published set correctly signed.
     #[cfg(unix)]
     fn channel_docker(
         directory: &Path,
@@ -3182,9 +3262,16 @@ mod tests {
     ) -> PathBuf {
         for set in sets {
             let digest = set.reference.rsplit_once(':').unwrap().1;
+            let document = release_document(set);
+            let signature = if release::valid_published_release_ref(&set.reference) {
+                release::test_signing::sign(&document, "1")
+            } else {
+                "<no value>".into()
+            };
+            fs::write(directory.join(format!("{digest}.env")), document).unwrap();
             fs::write(
-                directory.join(format!("{digest}.env")),
-                release_document(set),
+                directory.join(format!("{digest}.labels")),
+                format!("1|{signature}\n"),
             )
             .unwrap();
         }
@@ -3192,7 +3279,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *Labels*) echo 1 ;; *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  pull) case \"$5\" in localhost/*) exit 1 ;; esac; exit 0 ;;\n  image) case \"$5\" in *:stable) printf '[\"%s\"]\\n' '{stable}' ;; *) case \"$4\" in *Labels*'|'*) cat '{directory}/'\"${{5##*:}}\".labels ;; *Labels*) echo 1 ;; *'|'*) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;; esac ;;\n  create) printf 'c%s\\n' \"${{6##*:}}\" ;;\n  cp) container=\"${{2%%:*}}\"; cat '{directory}/'\"${{container#c}}\".env > \"$3\" ;;\n  rm) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 stable = stable.reference,
                 directory = directory.display(),
             ),
@@ -3242,6 +3329,47 @@ mod tests {
                     selected.may_hand_off,
                 )
             }))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_published_release_is_admitted_only_with_a_valid_signature_before_any_handoff() {
+        let home = tempfile::tempdir().unwrap();
+        let stable = release(3, 'c');
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let context = Context {
+            paths,
+            profile: HostProfile::Linux,
+            engine: Engine::with_docker(channel_docker(home.path(), &stable, &[&stable])),
+            scheduled: true,
+            recreated: Cell::new(false),
+        };
+        let resolved = context.resolve(None).unwrap();
+        assert_eq!(resolved.reference, stable.reference);
+        assert_eq!(resolved.metadata, stable.metadata);
+        // Without a ResolvedRelease nothing is handed off, pulled, or applied: every refusal ends the resolution.
+        let labels = home.path().join(format!("{}.labels", "c".repeat(64)));
+        let (other_key, _) = release::test_signing::generate();
+        let swapped = release_document(&stable).replace(HEX, &"f".repeat(64));
+        for refused in [
+            "1|<no value>\n".to_owned(),
+            format!("1|{}\n", release::test_signing::sign(&swapped, "1")),
+            format!(
+                "2|{}\n",
+                release::test_signing::sign(&release_document(&stable), "1")
+            ),
+            format!(
+                "1|{}\n",
+                release::test_signing::sign_with(&other_key, &release_document(&stable), "1")
+            ),
+        ] {
+            fs::write(&labels, &refused).unwrap();
+            let Err(error) = context.resolve(None) else {
+                panic!("admitted {refused}");
+            };
+            assert_eq!(error, "the Local release signature is invalid");
+        }
     }
 
     #[cfg(unix)]

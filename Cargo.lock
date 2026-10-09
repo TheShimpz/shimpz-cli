@@ -1666,6 +1666,7 @@ dependencies = [
  "libc",
  "memsafe",
  "nix",
+ "ring",
  "rpassword",
  "rustix",
  "self-replace",

@@ -165,6 +165,44 @@ const COMPOSE_UP: [&str; 9] = [
 const RUNTIME_STATE_RESET_CONTAINER: &str = "shimpz-runtime-state-reset";
 const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
 
+/// The key a published release set must be signed with: the published pin, or the key the test build generates.
+#[cfg(not(test))]
+fn release_key() -> &'static str {
+    release::PUBLISHED_SIGNING_KEY
+}
+
+#[cfg(test)]
+fn release_key() -> &'static str {
+    release::test_signing::public_key()
+}
+
+/// The largest release metadata document a set may carry.
+const MAX_RELEASE_METADATA_BYTES: u64 = 2_048;
+
+/// Whether `path` is itself a regular file, not a link, directory, FIFO, or device.
+fn regular_file(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+/// Read copied release metadata only when it is a regular file of bounded size.
+fn read_metadata(path: &Path) -> Result<String, String> {
+    if !regular_file(path) {
+        return Err("the Local release metadata is not a regular file".into());
+    }
+    let mut document = String::new();
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_RELEASE_METADATA_BYTES + 1)
+                .read_to_string(&mut document)
+        })
+        .map_err(|error| format!("could not read Local release metadata: {error}"))?;
+    if document.len() as u64 > MAX_RELEASE_METADATA_BYTES {
+        return Err("the Local release metadata is malformed".into());
+    }
+    Ok(document)
+}
+
 pub(crate) struct Engine {
     docker: PathBuf,
     pub(crate) platform: &'static str,
@@ -376,15 +414,16 @@ impl Engine {
         );
         let removed = self.run_quiet_status(
             "Docker temporary container cleanup",
-            [OsString::from("rm"), OsString::from(&container)],
+            [
+                OsString::from("rm"),
+                OsString::from("--volumes"),
+                OsString::from(&container),
+            ],
         );
         // The temporary metadata is read, if it was copied, and removed whatever else failed, so no exit leaves it.
         let copied = copied.map(|status| status.success());
         let document = match copied {
-            Ok(true) => Some(
-                fs::read_to_string(&metadata_path)
-                    .map_err(|error| format!("could not read Local release metadata: {error}")),
-            ),
+            Ok(true) => Some(read_metadata(&metadata_path)),
             _ => None,
         };
         let cleaned = match fs::remove_file(&metadata_path) {
@@ -412,17 +451,23 @@ impl Engine {
             (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
             (Err(error), Err(cleanup)) => return Err(format!("{error}; {cleanup}")),
         };
-        let state_epoch = self.run_output([
+        let labels = self.run_output([
             "image",
             "inspect",
             "--format",
             &format!(
-                "{{{{index .Config.Labels \"{}\"}}}}",
-                release::STATE_EPOCH_LABEL
+                "{{{{index .Config.Labels \"{}\"}}}}|{{{{index .Config.Labels \"{}\"}}}}",
+                release::STATE_EPOCH_LABEL,
+                release::SIGNATURE_LABEL
             ),
             &reference,
         ])?;
-        let metadata = release::parse(&reference, &document, state_epoch.trim_end_matches('\n'))?;
+        let (state_epoch, signature) = labels
+            .trim_end_matches('\n')
+            .split_once('|')
+            .ok_or_else(|| "Docker returned invalid Local release labels".to_owned())?;
+        let metadata =
+            release::parse(&reference, &document, state_epoch, signature, release_key())?;
         Ok(ResolvedRelease {
             reference,
             metadata,
@@ -457,12 +502,25 @@ impl Engine {
         );
         let removed = self.run_quiet_status(
             "Docker temporary container cleanup",
-            [OsString::from("rm"), OsString::from(&container)],
+            [
+                OsString::from("rm"),
+                OsString::from("--volumes"),
+                OsString::from(&container),
+            ],
         );
         if !copied?.success() || !removed?.success() {
             return Err("the release-bound CLI could not be extracted cleanly".into());
         }
-        Ok(())
+        // An unsigned image wrapping signed metadata chooses the member's file type: only a regular file is kept, so
+        // nothing later changes the mode of, hashes, or runs what a link names.
+        if regular_file(target) {
+            Ok(())
+        } else {
+            fs::remove_file(target).map_err(|error| {
+                format!("could not remove the invalid release-bound CLI copy: {error}")
+            })?;
+            Err("the release-bound CLI is not a regular file".into())
+        }
     }
 
     /// Make one release member available by its exact digest: a developer member must already be in this host's
