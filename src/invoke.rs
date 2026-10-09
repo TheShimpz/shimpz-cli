@@ -1,6 +1,5 @@
-//! Local Action invocation and Integration injection.
+//! Local Action invocation through the local provider-call broker (ADR-0106).
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -11,12 +10,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::args::Input;
 use crate::human_request::{ActionResponse, answer, parse_response};
-use crate::python;
+use crate::{manifest, provider, python};
 
 const MAX_INPUT_BYTES: u64 = 512 * 1_024;
 const MAX_INVOCATION_BYTES: usize = 512 * 1_024;
-const MIN_PROTECTED_VALUE_CHARACTERS: usize = 8;
-const MAX_SECRET_INSPECTION_DEPTH: usize = 32;
+const AUTHORIZATION_KINDS: [&str; 4] = ["approval", "auth:password", "auth:totp", "auth:passkey"];
 /// The most Stored Inputs one Action may use, and the most replay responses one Action may receive.
 const MAX_STORED_INPUTS: usize = 8;
 const MAX_HUMAN_RESPONSES: usize = 8;
@@ -36,21 +34,39 @@ impl Invocation {
         Ok(())
     }
 
-    /// Hold one answered Stored Input for the rest of this run, injected as Team would after sealing it.
-    fn insert_stored_input(&mut self, stored_input: &str, value: Value) -> Result<(), String> {
+    /// Record one answered Stored Input as held for the rest of this run; only its id reaches the Action.
+    fn hold_stored_input(&mut self, stored_input: &str) -> Result<(), String> {
         let stored_inputs = self
             .0
             .get_mut("stored_inputs")
-            .and_then(Value::as_object_mut)
+            .and_then(Value::as_array_mut)
             .ok_or_else(|| "Action invocation is invalid".to_owned())?;
-        if stored_inputs.contains_key(stored_input) {
+        if stored_inputs.iter().any(|held| held == stored_input) {
             return Err("Action requested a Stored Input it was already given".into());
         }
-        if stored_inputs.len() >= MAX_STORED_INPUTS || !value.is_string() {
+        if stored_inputs.len() >= MAX_STORED_INPUTS {
             return Err("Action invocation is invalid".into());
         }
-        stored_inputs.insert(stored_input.to_owned(), value);
+        stored_inputs.push(Value::String(stored_input.to_owned()));
         Ok(())
+    }
+
+    /// Whether the transcript holds the authorization response the Action declares, when it declares one.
+    fn authorized(&self, human_requests: &[String]) -> bool {
+        let Some(declared) = human_requests
+            .iter()
+            .find(|kind| AUTHORIZATION_KINDS.contains(&kind.as_str()))
+        else {
+            return true;
+        };
+        self.0
+            .get("responses")
+            .and_then(Value::as_array)
+            .is_some_and(|responses| {
+                responses
+                    .iter()
+                    .any(|response| response.get("kind").and_then(Value::as_str) == Some(declared))
+            })
     }
 
     fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -64,52 +80,6 @@ impl Invocation {
         serde_json::to_writer(&mut *encoded, &self.0)
             .map_err(|_| "Action invocation is invalid".to_owned())?;
         Ok(encoded)
-    }
-
-    fn response_exposes_secret(&self, response: &Value) -> bool {
-        let secrets = self.protected_values();
-        !secrets.is_empty() && contains_secret(response, &secrets, 0)
-    }
-
-    /// Every nonempty private value in the invocation, for failure-diagnostic redaction: unlike the echo check,
-    /// redaction needs no length floor because replacing a short value cannot refuse a valid result.
-    fn injected_values(&self) -> Vec<&str> {
-        self.private_values(|value| !value.is_empty())
-    }
-
-    fn protected_values(&self) -> Vec<&str> {
-        self.private_values(protected_value)
-    }
-
-    fn private_values(&self, admit: fn(&str) -> bool) -> Vec<&str> {
-        let Some(invocation) = self.0.as_object() else {
-            return Vec::new();
-        };
-        let mut secrets = Vec::new();
-        for field in ["integrations", "stored_inputs"] {
-            secrets.extend(
-                invocation
-                    .get(field)
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flat_map(|values| values.values())
-                    .filter_map(Value::as_str)
-                    .filter(|value| admit(value)),
-            );
-        }
-        secrets.extend(
-            invocation
-                .get("responses")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|response| {
-                    response.get("kind").and_then(Value::as_str) == Some("input:password")
-                })
-                .filter_map(|response| response.get("value").and_then(Value::as_str))
-                .filter(|value| admit(value)),
-        );
-        secrets
     }
 }
 
@@ -144,125 +114,108 @@ fn zeroize_strings(value: &mut Value) {
     }
 }
 
-fn protected_value(value: &str) -> bool {
-    // Local creators commonly use short placeholders. Team runtime values are provider-issued,
-    // so the CLI deliberately applies this floor only to its additional defense-in-depth scan.
-    value.chars().count() >= MIN_PROTECTED_VALUE_CHARACTERS
-}
-
-fn contains_secret(value: &Value, secrets: &[&str], depth: usize) -> bool {
-    if depth > MAX_SECRET_INSPECTION_DEPTH {
-        return true;
-    }
-    match value {
-        Value::String(text) => secrets.iter().any(|secret| text.contains(secret)),
-        Value::Array(values) => values
-            .iter()
-            .any(|item| contains_secret(item, secrets, depth + 1)),
-        Value::Object(values) => values.iter().any(|(key, item)| {
-            contains_secret_text(key, secrets, depth + 1)
-                || contains_secret(item, secrets, depth + 1)
-        }),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-fn contains_secret_text(text: &str, secrets: &[&str], depth: usize) -> bool {
-    depth > MAX_SECRET_INSPECTION_DEPTH || secrets.iter().any(|secret| text.contains(secret))
-}
-
 pub(crate) fn run(project: &Path, action_id: &str, input: &Input) -> Result<String, String> {
     let assistant = python::Assistant::open(project)?;
-    let contract = assistant.contract()?;
-    let integration_ids = action_integrations(&contract, action_id)?;
-    let integrations = integration_tokens(&integration_ids)?;
-    let mut request = request(input, &integrations)?;
-    let mut secret_answered = false;
+    let declaration = action_declaration(&assistant.contract()?, action_id)?;
+    let mut broker = broker(project, &declaration)?;
+    let mut request = request(input)?;
     // Each round answers one request: at most every replay response and every Stored Input, then the result.
     for _ in 0..=(MAX_HUMAN_RESPONSES + MAX_STORED_INPUTS) {
+        broker.begin(request.authorized(&declaration.human_requests));
         let serialized = request.serialized()?;
-        let output = assistant.invoke(action_id, serialized.as_slice())?;
-        let response = parse_response(&output)?;
-        let response_value: Value = serde_json::from_str(&output)
-            .map_err(|_| "Python SDK response is invalid".to_owned())?;
-        // Only a failure diagnostic is sanitized; every other frame that echoes a private value is refused.
-        if !matches!(response, ActionResponse::Failure(_))
-            && request.response_exposes_secret(&response_value)
-        {
-            return Err("Action response exposes private input".into());
-        }
-        match response {
+        let output = assistant.invoke(action_id, serialized.as_slice(), &mut |frame| {
+            broker.answer(frame)
+        })?;
+        match parse_response(&output)? {
+            ActionResponse::Request(_) if broker.calls() > 0 => {
+                return Err("Action requested human input after a provider call".into());
+            }
             ActionResponse::Result(result) => {
                 return serde_json::to_string(&result)
                     .map_err(|_| "Action result is invalid".into());
             }
-            ActionResponse::Request(_) if secret_answered => {
-                return Err("Action requested human input after a password response".into());
-            }
             ActionResponse::Request(frame) => {
                 let display = frame.display(&assistant.render(&frame.frame())?)?;
                 let mut response = answer(&frame, &display)?;
-                // A Stored Input is answered by injection, never as a replay response, as Team seals it (ADR-0059).
+                // A Stored Input stays with the broker, as Team keeps it sealed; the Action learns only its id.
                 if let Some(stored_input) = frame.stored_input() {
-                    request.insert_stored_input(stored_input, response["value"].take())?;
+                    let Value::String(value) = response["value"].take() else {
+                        return Err("Action Stored Input answer is invalid".into());
+                    };
+                    request.hold_stored_input(stored_input)?;
+                    broker.hold(stored_input, Zeroizing::new(value));
                 } else {
                     request.push_response(response)?;
-                    secret_answered = frame.contains_secret_input();
                 }
             }
             ActionResponse::StoredInputRejected(stored_input) => {
                 return Err(format!("Action rejected Stored Input {stored_input}"));
             }
-            ActionResponse::Failure(mut failure) => {
-                failure.redact(&request.injected_values());
-                return Err(failure.render());
-            }
+            ActionResponse::Failure(failure) => return Err(failure.render()),
         }
     }
     Err("Action exceeded its human request limit".into())
 }
 
-fn action_integrations(contract: &str, action_id: &str) -> Result<Vec<String>, String> {
+/// The selected Action's reviewed declarations from the SDK contract.
+struct ActionDeclaration {
+    integrations: Vec<String>,
+    stored_inputs: Vec<String>,
+    human_requests: Vec<String>,
+}
+
+fn action_declaration(contract: &str, action_id: &str) -> Result<ActionDeclaration, String> {
     let value: Value =
         serde_json::from_str(contract).map_err(|_| "SDK contract is invalid".to_owned())?;
     if value.get("version").and_then(Value::as_u64) != Some(1) {
         return Err("SDK contract version is invalid".into());
     }
-    let actions = value
+    let action = value
         .get("actions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "SDK contract is invalid".to_owned())?;
-    let action = actions
-        .iter()
-        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(action_id))
-        .ok_or_else(|| "Action id does not exist".to_owned())?;
-    action
-        .get("integrations")
         .and_then(Value::as_array)
         .ok_or_else(|| "SDK contract is invalid".to_owned())?
         .iter()
-        .map(|integration| {
-            integration
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| "SDK contract is invalid".to_owned())
-        })
-        .collect()
+        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(action_id))
+        .ok_or_else(|| "Action id does not exist".to_owned())?;
+    let ids = |field: &str| -> Result<Vec<String>, String> {
+        action
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| "SDK contract is invalid".to_owned())?
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "SDK contract is invalid".to_owned())
+            })
+            .collect()
+    };
+    Ok(ActionDeclaration {
+        integrations: ids("integrations")?,
+        stored_inputs: ids("stored_inputs")?,
+        human_requests: ids("human_requests")?,
+    })
 }
 
-fn integration_tokens(integration_ids: &[String]) -> Result<BTreeMap<String, String>, String> {
-    integration_ids
+/// The broker for one Action: the manifest's hosts and the Action's own placements, and the Creator's token for each
+/// declared Integration when its `SHIMPZ_INTEGRATION_<ID>` is set.
+fn broker(project: &Path, declaration: &ActionDeclaration) -> Result<provider::Broker, String> {
+    let bytes = fs::read(project.join("shimpz.toml"))
+        .map_err(|_| "Assistant manifest is unavailable".to_owned())?;
+    let (hosts, mut placements) = manifest::call_policy(&bytes)?;
+    placements.retain(|id, _| declaration.stored_inputs.contains(id));
+    let integrations = declaration
+        .integrations
         .iter()
-        .map(|integration_id| {
-            let variable = integration_variable(integration_id);
-            let token = std::env::var(&variable)
-                .map_err(|_| format!("{variable} is required for this Action"))?;
-            if token.is_empty() {
-                return Err(format!("{variable} is required for this Action"));
-            }
-            Ok((integration_id.clone(), token))
+        .map(|id| {
+            let token = std::env::var(integration_variable(id))
+                .ok()
+                .filter(|token| !token.is_empty())
+                .map(Zeroizing::new);
+            (id.clone(), token)
         })
-        .collect()
+        .collect();
+    provider::Broker::new(hosts, placements, integrations)
 }
 
 fn integration_variable(integration_id: &str) -> String {
@@ -279,7 +232,7 @@ fn integration_variable(integration_id: &str) -> String {
     format!("SHIMPZ_INTEGRATION_{suffix}")
 }
 
-fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Invocation, String> {
+fn request(input: &Input) -> Result<Invocation, String> {
     let raw = read_input(input)?;
     let value: Value =
         serde_json::from_str(&raw).map_err(|_| "--input must be a JSON object".to_owned())?;
@@ -289,8 +242,7 @@ fn request(input: &Input, integrations: &BTreeMap<String, String>) -> Result<Inv
     // A direct run selects no Team file, so even an Action that declares a file input receives none (ADR-0093).
     Ok(Invocation(serde_json::json!({
         "input": value,
-        "integrations": integrations,
-        "stored_inputs": {},
+        "stored_inputs": [],
         "files": {},
         "operation_id": operation_id()?
     })))
@@ -402,30 +354,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_integrations_for_the_selected_action() {
-        let contract =
-            r#"{"version":1,"actions":[{"id":"create-dns","integrations":["cloudflare"]}]}"#;
-        assert_eq!(
-            action_integrations(contract, "create-dns"),
-            Ok(vec!["cloudflare".into()])
-        );
-    }
-
-    #[test]
     fn preserves_json_for_strict_sdk_parsing() {
-        let integrations = BTreeMap::new();
-        let invocation = request(
-            &Input::Inline(r#"{"zone":"example.com"}"#.into()),
-            &integrations,
-        )
-        .expect("valid invocation");
+        let invocation =
+            request(&Input::Inline(r#"{"zone":"example.com"}"#.into())).expect("valid invocation");
         let operation_id = invocation.0["operation_id"].clone();
         assert_eq!(
             invocation.0,
             serde_json::json!({
                 "input": {"zone": "example.com"},
-                "integrations": {},
-                "stored_inputs": {},
+                "stored_inputs": [],
                 "files": {},
                 "operation_id": operation_id
             })
@@ -433,44 +370,51 @@ mod tests {
     }
 
     #[test]
-    fn injects_each_answered_stored_input_once_and_protects_it() {
-        let integrations = BTreeMap::new();
-        let mut invocation =
-            request(&Input::Inline("{}".into()), &integrations).expect("valid invocation");
+    fn finds_the_declarations_of_the_selected_action() {
+        let contract = r#"{"version":1,"actions":[{"id":"create-dns","integrations":["cloudflare"],
+            "stored_inputs":["api-token"],"human_requests":["approval","input:password"]}]}"#;
+        let declaration = action_declaration(contract, "create-dns").expect("declaration");
+        assert_eq!(declaration.integrations, ["cloudflare"]);
+        assert_eq!(declaration.stored_inputs, ["api-token"]);
+        assert_eq!(declaration.human_requests, ["approval", "input:password"]);
+        assert!(action_declaration(contract, "other").is_err());
+    }
+
+    #[test]
+    fn holds_each_answered_stored_input_once_by_id_only() {
+        let mut invocation = request(&Input::Inline("{}".into())).expect("valid invocation");
         invocation
-            .insert_stored_input("meta-access-token", Value::String("test-token".into()))
+            .hold_stored_input("meta-access-token")
             .expect("first slot");
         invocation
-            .insert_stored_input("meta-app-secret", Value::String("test-secret".into()))
+            .hold_stored_input("meta-app-secret")
             .expect("second slot");
         assert_eq!(
             invocation.0["stored_inputs"],
-            serde_json::json!({
-                "meta-access-token": "test-token",
-                "meta-app-secret": "test-secret"
-            })
+            serde_json::json!(["meta-access-token", "meta-app-secret"])
         );
-        assert!(invocation.0.get("responses").is_none());
-        assert!(invocation.response_exposes_secret(&serde_json::json!({"echo": "test-secret"})));
         assert_eq!(
-            invocation.insert_stored_input("meta-app-secret", Value::String("again".into())),
+            invocation.hold_stored_input("meta-app-secret"),
             Err("Action requested a Stored Input it was already given".into())
-        );
-        assert!(
-            invocation
-                .insert_stored_input("other-slot", Value::Bool(true))
-                .is_err()
         );
         for index in 2..MAX_STORED_INPUTS {
             invocation
-                .insert_stored_input(&format!("slot-{index}"), Value::String("value".into()))
+                .hold_stored_input(&format!("slot-{index}"))
                 .expect("up to eight slots");
         }
-        assert!(
-            invocation
-                .insert_stored_input("slot-ninth", Value::String("value".into()))
-                .is_err()
-        );
+        assert!(invocation.hold_stored_input("slot-ninth").is_err());
+    }
+
+    #[test]
+    fn admits_provider_calls_only_after_the_declared_authorization_response() {
+        let mut invocation = request(&Input::Inline("{}".into())).expect("valid invocation");
+        let declared = ["input:password".to_owned(), "approval".to_owned()];
+        assert!(invocation.authorized(&["input:text".to_owned()]));
+        assert!(!invocation.authorized(&declared));
+        invocation
+            .push_response(serde_json::json!({"kind": "approval", "ordinal": 0, "fingerprint": "a", "value": true}))
+            .expect("response");
+        assert!(invocation.authorized(&declared));
     }
 
     #[test]
@@ -499,11 +443,8 @@ mod tests {
 
     #[test]
     fn serializes_into_a_zeroizing_bounded_buffer() {
-        let invocation = request(
-            &Input::Inline(r#"{"zone":"example.com"}"#.into()),
-            &BTreeMap::new(),
-        )
-        .expect("valid invocation");
+        let invocation =
+            request(&Input::Inline(r#"{"zone":"example.com"}"#.into())).expect("valid invocation");
 
         let serialized: Zeroizing<Vec<u8>> =
             invocation.serialized().expect("bounded serialization");
@@ -519,8 +460,7 @@ mod tests {
     fn traverses_every_nested_invocation_string_for_zeroization() {
         let mut invocation = serde_json::json!({
             "input": {"message": "private message", "nested": ["private token", 7]},
-            "integrations": {"cloudflare": "private integration"},
-            "stored_inputs": {},
+            "stored_inputs": [],
             "active": true
         });
 
@@ -530,97 +470,15 @@ mod tests {
             invocation,
             serde_json::json!({
                 "input": {"message": "", "nested": ["", 7]},
-                "integrations": {"cloudflare": ""},
-                "stored_inputs": {},
+                "stored_inputs": [],
                 "active": true
             })
         );
     }
 
     #[test]
-    fn rejects_private_values_in_nested_response_arrays_and_keys() {
-        let invocation = Invocation(serde_json::json!({
-            "input": {},
-            "integrations": {"cloudflare": "integration-secret"},
-            "stored_inputs": {},
-            "responses": []
-        }));
-
-        assert_private(
-            &invocation,
-            &serde_json::json!({"result": ["prefix-integration-secret-suffix"]}),
-        );
-        assert_private(
-            &invocation,
-            &serde_json::json!({"integration-secret-key": "value"}),
-        );
-        assert_private(
-            &invocation,
-            &serde_json::json!({"type": "request", "request": {"title": "integration-secret"}}),
-        );
-        assert!(!invocation.response_exposes_secret(&serde_json::json!({"result": "safe"})));
-    }
-
-    #[test]
-    fn recomputes_password_protection_after_each_response() {
-        let mut invocation = Invocation(serde_json::json!({
-            "input": {},
-            "integrations": {},
-            "stored_inputs": {}
-        }));
-        let result = serde_json::json!({"result": "typed-password"});
-        assert!(!invocation.response_exposes_secret(&result));
-
-        invocation
-            .push_response(serde_json::json!({
-                "kind": "input:password",
-                "ordinal": 0,
-                "fingerprint": "a".repeat(64),
-                "value": "typed-password"
-            }))
-            .expect("password response");
-
-        assert!(invocation.response_exposes_secret(&result));
-    }
-
-    #[test]
-    fn bounds_secret_inspection_and_ignores_short_placeholders() {
-        let short = Invocation(serde_json::json!({
-            "input": {},
-            "integrations": {"provider": "test"},
-            "stored_inputs": {"future": ""}
-        }));
-        assert!(!short.response_exposes_secret(&serde_json::json!({"result": "test"})));
-
-        let protected = Invocation(serde_json::json!({
-            "input": {},
-            "integrations": {"provider": "12345678"},
-            "stored_inputs": {}
-        }));
-        let at_limit = nested_array(Value::String("safe".into()), MAX_SECRET_INSPECTION_DEPTH);
-        let beyond_limit = nested_array(
-            Value::String("safe".into()),
-            MAX_SECRET_INSPECTION_DEPTH + 1,
-        );
-        assert!(!protected.response_exposes_secret(&at_limit));
-        assert!(protected.response_exposes_secret(&beyond_limit));
-        assert!(protected.response_exposes_secret(&Value::String("12345678".into())));
-    }
-
-    fn assert_private(invocation: &Invocation, response: &Value) {
-        assert!(invocation.response_exposes_secret(response));
-    }
-
-    fn nested_array(mut value: Value, depth: usize) -> Value {
-        for _ in 0..depth {
-            value = Value::Array(vec![value]);
-        }
-        value
-    }
-
-    #[test]
     fn rejects_non_object_input() {
-        let error = request(&Input::Inline("42".into()), &BTreeMap::new())
+        let error = request(&Input::Inline("42".into()))
             .err()
             .expect("non-object input must fail");
         assert!(
@@ -631,8 +489,8 @@ mod tests {
 
     #[test]
     fn rejects_key_injecting_input() {
-        let injected = r#"{},"integrations":{"attacker":"token"}"#;
-        let error = request(&Input::Inline(injected.into()), &BTreeMap::new())
+        let injected = r#"{},"stored_inputs":["attacker"]"#;
+        let error = request(&Input::Inline(injected.into()))
             .err()
             .expect("injected input must fail");
         assert!(

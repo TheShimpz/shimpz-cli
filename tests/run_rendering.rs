@@ -19,7 +19,7 @@ const FINGERPRINT: &str = "20e90c08af91d7f9a7c1a34ee04e0126c7b98df955678ca850c98
 /// stdin and answers `rendered` with `render_exit`.
 fn workspace_with(name: &str, rendered: &str, render_exit: u8) -> Workspace {
     let cases = format!(
-        r#"      contract) echo '{{"version":1,"actions":[{{"id":"greet","integrations":[]}}]}}'; exit 0;;
+        r#"      contract) echo '{{"version":1,"actions":[{{"id":"greet","integrations":[],"stored_inputs":[],"human_requests":["input:choice"]}}]}}'; exit 0;;
       render) cat > "$ROOT/render-stdin.json"; echo '{rendered}'; exit {render_exit};;
       invoke)
         {RECORD_INVOCATION}

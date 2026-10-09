@@ -10,7 +10,7 @@ github = "https://github.com/TheShimpz/shimpz-cli"
 genesis = "Return a deterministic greeting for CLI verification."
 
 [network]
-allowed_hosts = []
+allowed_hosts = ["api.cloudflare.com"]
 
 [integrations.cloudflare]
 scopes = ["zone.read"]

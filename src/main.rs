@@ -21,6 +21,7 @@ mod manifest;
 mod new_assistant;
 mod output;
 mod private_file;
+mod provider;
 mod publish;
 mod python;
 mod snapshot_files;

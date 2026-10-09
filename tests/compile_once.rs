@@ -28,11 +28,11 @@ fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do
     if [ "$argument" = "contract" ]; then
-      echo '{"version":1,"actions":[{"id":"greet","integrations":[]}]}'
+      echo '{"version":1,"actions":[{"id":"greet","integrations":[],"stored_inputs":[],"human_requests":[]}]}'
       exit 0
     fi
     if [ "$argument" = "invoke" ]; then
-      cat >/dev/null
+      read -r invocation
       echo '{"type":"result","result":{"message":"Hello, Ada"}}'
       exit 0
     fi

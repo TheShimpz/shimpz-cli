@@ -249,6 +249,43 @@ pub(crate) fn integration_ids(bytes: &[u8]) -> Result<Vec<String>, String> {
     Ok(manifest.integrations.into_keys().collect())
 }
 
+/// Where Team places one Stored Input in the Action's provider calls to its host (ADR-0106).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct Placement {
+    pub(crate) host: String,
+    #[serde(default)]
+    pub(crate) header: Option<String>,
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+    #[serde(default)]
+    pub(crate) scheme: Option<String>,
+    #[serde(default)]
+    pub(crate) hmac: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallManifest {
+    network: NetworkDeclaration,
+    #[serde(default)]
+    stored_inputs: BTreeMap<String, Placement>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkDeclaration {
+    allowed_hosts: BTreeSet<String>,
+}
+
+/// The allowed hosts and every Stored Input placement of a manifest the SDK has already validated.
+pub(crate) fn call_policy(
+    bytes: &[u8],
+) -> Result<(BTreeSet<String>, BTreeMap<String, Placement>), String> {
+    let manifest: CallManifest = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|source| toml::from_str(source).ok())
+        .ok_or_else(|| "Assistant manifest network declarations are invalid".to_owned())?;
+    Ok((manifest.network.allowed_hosts, manifest.stored_inputs))
+}
+
 /// The manifest schema's display-text rule: trimmed, bounded in code points, and free of control characters and of
 /// invisible bidirectional, zero-width, and format characters.
 fn valid_display_text(value: &str, maximum: usize) -> bool {

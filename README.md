@@ -98,9 +98,12 @@ operating system's disk encryption.
 standalone executable only when a newer version is available. A Space-managed
 CLI is updated exclusively by the atomic Local release through `shimpz update` or complete reconciliation.
 
-Integration tokens are read from environment variables and never accepted as CLI
-arguments. For example, Integration `cloudflare` uses
-`SHIMPZ_INTEGRATION_CLOUDFLARE`.
+`shimpz assistant run` makes the Action's provider calls itself, as Team does: the
+Action never receives a credential. Integration tokens are read from environment
+variables, never accepted as CLI arguments, and sent only to that provider's
+reviewed API hosts; for example, Integration `cloudflare` uses
+`SHIMPZ_INTEGRATION_CLOUDFLARE`. Stored Inputs are asked for in the terminal,
+kept only in memory, and placed where `shimpz.toml` declares them.
 
 The crates.io package is named `shimpz-cli`; the installed command is
 `shimpz`.

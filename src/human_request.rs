@@ -78,10 +78,6 @@ pub(crate) fn parse_response(source: &str) -> Result<ActionResponse, String> {
 }
 
 impl HumanRequest {
-    pub(crate) fn contains_secret_input(&self) -> bool {
-        self.kind == "input:password"
-    }
-
     /// The declared Stored Input a password request names, which Team answers only by injection.
     pub(crate) fn stored_input(&self) -> Option<&str> {
         self.frame.get("stored_input").and_then(Value::as_str)
@@ -536,7 +532,10 @@ mod tests {
                 "stored_input": stored_input,
             }))
         };
-        assert!(request(&frame("whatsapp-token")).contains_secret_input());
+        assert_eq!(
+            request(&frame("whatsapp-token")).stored_input(),
+            Some("whatsapp-token")
+        );
         for stored_input in ["", "Whatsapp_Token", "a--b", &"a".repeat(65)] {
             let source = json!({"type": "request", "request": frame(stored_input)}).to_string();
             assert!(parse_response(&source).is_err(), "{stored_input}");

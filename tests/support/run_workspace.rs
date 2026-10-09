@@ -9,9 +9,10 @@ use serde_json::Value;
 
 use crate::fake_tool;
 
-/// Records each `invoke` call's stdin as `invoke-<n>.json` and leaves the call count in `$count`.
+/// Records each `invoke` call's first input line as `invoke-<n>.json` and leaves the call count in `$count`; the
+/// input stays open for provider-call replies (ADR-0106).
 pub const RECORD_INVOCATION: &str = r#"count=$(ls "$ROOT" | grep -c '^invoke-')
-        cat > "$ROOT/invoke-$count.json""#;
+        IFS= read -r line; printf '%s' "$line" > "$ROOT/invoke-$count.json""#;
 
 pub struct Workspace {
     pub root: PathBuf,

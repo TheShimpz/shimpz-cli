@@ -13,13 +13,13 @@ use run_workspace::{RECORD_INVOCATION, Workspace};
 use serde_json::Value;
 
 const TOKEN: &str = "integration-secret-token";
-const FAILURE: &str = r#"{"type":"failure","failure":{"error_type":"httpx.HTTPStatusError","message":"Client error 404 Not Found with integration-secret-token","provider":"api.example.com","http_status":404,"response_excerpt":"{\"error\":\"zone not found\"}","redacted":false,"truncated":false}}"#;
+const FAILURE: &str = r#"{"type":"failure","failure":{"error_type":"httpx.HTTPStatusError","message":"Client error 404 Not Found","provider":"api.example.com","http_status":404,"response_excerpt":"{\"error\":\"zone not found\"}","redacted":false,"truncated":false}}"#;
 const REQUEST: &str = r#"{"type":"request","request":{"kind":"approval","ordinal":0,"title":{"message":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","params":{}},"description":{"message":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","params":{}},"fingerprint":"a86d7cdfaf3de9ed43148b22ef4680682b65179bcd1667ed3986a873603df7ad"}}"#;
 
-/// The fake `uv` arms: one Action that declares the `example` Integration and runs `invoke` once per call.
+/// The fake `uv` arms: one Action that declares the `cloudflare` Integration and runs `invoke` once per call.
 fn workspace_with(name: &str, invoke: &str) -> Workspace {
     let cases = format!(
-        r#"      contract) echo '{{"version":1,"actions":[{{"id":"greet","integrations":["example"]}}]}}'; exit 0;;
+        r#"      contract) echo '{{"version":1,"actions":[{{"id":"greet","integrations":["cloudflare"],"stored_inputs":[],"human_requests":["approval"]}}]}}'; exit 0;;
       render) cat > /dev/null; echo '{{"kind":"approval","ordinal":0,"title":"Approve","description":"Approve the greeting.","fingerprint":"a86d7cdfaf3de9ed43148b22ef4680682b65179bcd1667ed3986a873603df7ad"}}'; exit 0;;
       invoke)
         {RECORD_INVOCATION}
@@ -29,7 +29,7 @@ fn workspace_with(name: &str, invoke: &str) -> Workspace {
 }
 
 fn run(workspace: &Workspace, answer: &str) -> Output {
-    workspace.run(answer, &[("SHIMPZ_INTEGRATION_EXAMPLE", TOKEN)])
+    workspace.run(answer, &[("SHIMPZ_INTEGRATION_CLOUDFLARE", TOKEN)])
 }
 
 fn invocation(workspace: &Workspace, index: usize) -> Value {
@@ -58,10 +58,9 @@ fn shows_the_sanitized_failure_and_keeps_one_operation_id_across_replay() {
 
     assert!(!output.status.success(), "{shown}");
     for text in [
-        "Action failed: httpx.HTTPStatusError: Client error 404 Not Found with [REDACTED]",
+        "Action failed: httpx.HTTPStatusError: Client error 404 Not Found",
         "Provider: api.example.com (HTTP 404)",
         "Response: {\"error\":\"zone not found\"}",
-        "Some diagnostic content was redacted or withheld.",
     ] {
         assert!(shown.contains(text), "{text}: {shown}");
     }
