@@ -14,7 +14,6 @@ mod fake_tool;
 mod help;
 mod human_request;
 mod identifier;
-mod install;
 mod invoke;
 mod language_pack;
 mod manifest;
@@ -94,13 +93,6 @@ fn run(command: &Command) -> ExitCode {
             project,
             visibility,
         }) => (publish::run(project, *visibility), Presentation::Success),
-        Command::Assistant(AssistantCommand::Install {
-            source_digest,
-            team,
-        }) => (
-            install::run(source_digest, team.as_deref()),
-            Presentation::Success,
-        ),
         Command::Install(options) => (
             space::lifecycle::install(options),
             if options.print_graph.is_some() {

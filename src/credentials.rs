@@ -21,12 +21,7 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
 const MAX_CREDENTIALS_BYTES: u64 = 16 * 1024;
 const FORMAT_VERSION: u8 = 1;
-const VALID_SCOPES: [&str; 4] = [
-    "identity:read",
-    "teams:read",
-    "assistant:publish",
-    "assistant:install",
-];
+const VALID_SCOPES: [&str; 2] = ["identity:read", "assistant:publish"];
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -378,7 +373,7 @@ mod tests {
             "d".repeat(43),
             3_000,
             4_000,
-            vec!["identity:read".into(), "assistant:install".into()],
+            vec!["identity:read".into()],
         )
         .unwrap();
         store_at(&path, &first).unwrap();

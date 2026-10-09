@@ -25,12 +25,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 const IDENTITY_SCOPE: &str = "identity:read";
 pub(crate) const ASSISTANT_PUBLISH_SCOPE: &str = "assistant:publish";
-const AVAILABLE_SCOPES: [&str; 4] = [
-    "identity:read",
-    "teams:read",
-    ASSISTANT_PUBLISH_SCOPE,
-    "assistant:install",
-];
+const AVAILABLE_SCOPES: [&str; 2] = [IDENTITY_SCOPE, ASSISTANT_PUBLISH_SCOPE];
 
 pub(crate) fn login() -> Result<String, String> {
     let credential_lock = credentials::lock()?;
@@ -496,11 +491,8 @@ mod tests {
             ["identity:read", "assistant:publish"]
         );
         assert_eq!(
-            cumulative_scopes(
-                &["identity:read".into(), "assistant:publish".into()],
-                "assistant:install"
-            ),
-            ["identity:read", "assistant:publish", "assistant:install"]
+            cumulative_scopes(&["assistant:publish".into()], "identity:read"),
+            ["identity:read", "assistant:publish"]
         );
     }
 
@@ -519,8 +511,16 @@ mod tests {
             account_id: "a".repeat(32),
             scopes: vec!["identity:read".into(), "assistant:publish".into()],
         };
+        assert!(session.validate().is_ok());
         assert!(session.has_scope("assistant:publish"));
-        assert!(!session.has_scope("assistant:install"));
+        for retired in ["teams:read", "assistant:install"] {
+            let retired_session = AuthSession {
+                authenticated: true,
+                account_id: "a".repeat(32),
+                scopes: vec!["identity:read".into(), retired.into()],
+            };
+            assert!(retired_session.validate().is_err(), "{retired}");
+        }
     }
 
     #[test]

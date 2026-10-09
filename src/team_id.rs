@@ -1,4 +1,4 @@
-//! The one Team id grammar the CLI admits from arguments, Developers responses, and Local resource labels.
+//! The one Team id grammar the CLI admits from Local resource labels.
 
 /// One to 40 bytes of lowercase ASCII letters, digits, or underscores, as the Team protocol defines a Team id.
 pub(crate) fn valid(value: &str) -> bool {

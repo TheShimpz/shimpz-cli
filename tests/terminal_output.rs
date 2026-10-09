@@ -28,7 +28,6 @@ fn help_exposes_the_resource_first_assistant_surface() {
     assert!(help.contains("shimpz assistant run <action-id>"));
     assert!(help.contains("shimpz assistant stage [--project <path>]"));
     assert!(help.contains("shimpz assistant unstage [--project <path>]"));
-    assert!(help.contains("shimpz assistant install <source-digest>"));
     assert!(!help.contains("shimpz test"));
     assert!(!help.contains("shimpz install assistant"));
 }
@@ -92,11 +91,6 @@ fn each_assistant_command_prints_its_own_help() {
             &["assistant", "publish", "--help"][..],
             "shimpz assistant publish\n",
             "shimpz assistant publish --visibility <private|public> [--project <path>]",
-        ),
-        (
-            &["assistant", "install", "--help"][..],
-            "shimpz assistant install\n",
-            "shimpz assistant install <source-digest> [--team <team-id>]",
         ),
     ]);
 }

@@ -11,7 +11,6 @@ pub(crate) enum Topic {
     AssistantStage,
     AssistantUnstage,
     AssistantPublish,
-    AssistantInstall,
     Auth,
     AuthLogin,
     AuthStatus,
@@ -27,7 +26,7 @@ pub(crate) enum Topic {
 
 impl Topic {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Root,
         Self::Assistant,
         Self::AssistantNew,
@@ -37,7 +36,6 @@ impl Topic {
         Self::AssistantStage,
         Self::AssistantUnstage,
         Self::AssistantPublish,
-        Self::AssistantInstall,
         Self::Auth,
         Self::AuthLogin,
         Self::AuthStatus,
@@ -62,7 +60,6 @@ impl Topic {
             Self::AssistantStage => ASSISTANT_STAGE,
             Self::AssistantUnstage => ASSISTANT_UNSTAGE,
             Self::AssistantPublish => ASSISTANT_PUBLISH,
-            Self::AssistantInstall => ASSISTANT_INSTALL,
             Self::Auth => AUTH,
             Self::AuthLogin => AUTH_LOGIN,
             Self::AuthStatus => AUTH_STATUS,
@@ -109,8 +106,6 @@ Assistant development:
                                          Permanently remove its Local snapshots.
   shimpz assistant publish --visibility <private|public> [--project <path>]
                                          Publish an immutable Assistant release.
-  shimpz assistant install <source-digest> [--team <team-id>]
-                                         Install an exact release for a Team.
 
 Creator account:
   shimpz auth [login|status|logout]       Manage Creator authentication.
@@ -153,8 +148,6 @@ Operations:
   unstage [--project <path>]             Permanently remove its Local snapshots.
   publish --visibility <private|public> [--project <path>]
                                          Publish an immutable release.
-  install <source-digest> [--team <team-id>]
-                                         Install an exact release for a Team.
 
 Run 'shimpz assistant <operation> --help' for operation details.
 ";
@@ -262,21 +255,6 @@ Usage:
 Options:
   --visibility <private|public>          Set the publication visibility.
   --project <path>                       Project directory. Defaults to the current directory.
-";
-
-const ASSISTANT_INSTALL: &str = "\
-shimpz assistant install
-
-Install an exact published Assistant release for a Team.
-
-Usage:
-  shimpz assistant install <source-digest> [--team <team-id>]
-
-Arguments:
-  <source-digest>                        Exact sha256 source-package digest.
-
-Options:
-  --team <team-id>                       Target Team when it cannot be selected automatically.
 ";
 
 const AUTH: &str = "\

@@ -4,8 +4,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::help::Topic;
+use crate::identifier;
 use crate::space::release::{valid_published_release_ref, valid_release_ref};
-use crate::{digest, identifier, team_id};
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
     "assistant",
@@ -93,10 +93,6 @@ pub(crate) enum AssistantCommand {
     Publish {
         project: PathBuf,
         visibility: PublicationVisibility,
-    },
-    Install {
-        source_digest: String,
-        team: Option<String>,
     },
 }
 
@@ -284,7 +280,6 @@ fn parse_assistant(arguments: &[String]) -> Result<Invocation, String> {
         "stage" => parse_assistant_stage(rest),
         "unstage" => parse_assistant_unstage(rest),
         "publish" => parse_assistant_publish(rest),
-        "install" => parse_assistant_install(rest),
         _ => Err("unknown assistant operation".into()),
     }
 }
@@ -514,31 +509,6 @@ fn parse_assistant_publish(arguments: &[String]) -> Result<Invocation, String> {
         AssistantCommand::Publish {
             project,
             visibility,
-        },
-    )))
-}
-
-fn parse_assistant_install(arguments: &[String]) -> Result<Invocation, String> {
-    if arguments == ["--help"] || arguments == ["-h"] {
-        return Ok(Invocation::Help(Topic::AssistantInstall));
-    }
-    let Some(source_digest) = arguments.first().filter(|value| !value.starts_with('-')) else {
-        return Err("assistant install requires a source digest".into());
-    };
-    if !digest::is_sha256(source_digest) {
-        return Err("Assistant source digest is invalid".into());
-    }
-    let team = match &arguments[1..] {
-        [] => None,
-        [option, value] if option == "--team" && team_id::valid(value) => Some(value.clone()),
-        [option, _] if option == "--team" => return Err("Team id is invalid".into()),
-        [option] if option == "--team" => return Err("--team requires a value".into()),
-        _ => return Err("assistant install accepts only --team <team-id>".into()),
-    };
-    Ok(Invocation::Execute(Command::Assistant(
-        AssistantCommand::Install {
-            source_digest: source_digest.clone(),
-            team,
         },
     )))
 }
@@ -864,35 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_assistant_install_with_an_optional_team() {
-        let digest = format!("sha256:{}", "a".repeat(64));
-        assert_eq!(
-            parse(strings(&["assistant", "install", &digest])),
-            Ok(Invocation::Execute(Command::Assistant(
-                AssistantCommand::Install {
-                    source_digest: digest.clone(),
-                    team: None,
-                },
-            )))
-        );
-        assert_eq!(
-            parse(strings(&[
-                "assistant",
-                "install",
-                &digest,
-                "--team",
-                "team_1"
-            ])),
-            Ok(Invocation::Execute(Command::Assistant(
-                AssistantCommand::Install {
-                    source_digest: digest,
-                    team: Some("team_1".into()),
-                },
-            )))
-        );
-    }
-
-    #[test]
     fn parses_publish_with_a_project_or_current_directory() {
         assert_eq!(
             parse(strings(&[
@@ -949,10 +890,12 @@ mod tests {
             parse(strings(&["assistant"])),
             Err("assistant requires an operation".into())
         );
-        assert_eq!(
-            parse(strings(&["assistant", "test"])),
-            Err("unknown assistant operation".into())
-        );
+        for retired in ["test", "install"] {
+            assert_eq!(
+                parse(strings(&["assistant", retired])),
+                Err("unknown assistant operation".into())
+            );
+        }
     }
 
     #[test]
@@ -1146,7 +1089,6 @@ mod tests {
             "shimpz assistant stage",
             "shimpz assistant unstage",
             "shimpz assistant publish",
-            "shimpz assistant install",
         ] {
             assert!(Topic::Root.text().contains(current));
         }
@@ -1157,6 +1099,7 @@ mod tests {
             "shimpz test",
             "shimpz publish",
             "shimpz install assistant",
+            "shimpz assistant install",
             "shimpz assistant prepare",
         ] {
             for topic in Topic::ALL {
@@ -1195,10 +1138,6 @@ mod tests {
             (
                 &["assistant", "publish", "--help"][..],
                 Topic::AssistantPublish,
-            ),
-            (
-                &["assistant", "install", "--help"][..],
-                Topic::AssistantInstall,
             ),
         ] {
             assert_eq!(parse(strings(arguments)), Ok(Invocation::Help(topic)));
