@@ -1,5 +1,6 @@
 //! Exact publication identity parsed from the manifest bytes in the source package, plus the Assistant page copy
-//! (`description` and Creator `links`) that the Developers manifest schema requires before publication.
+//! (`description` and Creator `links`) and each Stored Input's help text and help link that the Developers manifest
+//! schema requires before publication.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,6 +22,8 @@ struct PublicationManifest {
     shimpz: PublicationTable,
     #[serde(default)]
     integrations: BTreeMap<String, IntegrationDeclaration>,
+    #[serde(default)]
+    stored_inputs: BTreeMap<String, toml::Value>,
 }
 
 /// The `[shimpz]` table: the identity plus the page copy, which is validated here but not projected further.
@@ -53,6 +56,7 @@ const LINK_KINDS: [(&str, &[&str]); 6] = [
 ];
 const DESCRIPTION_CHARS: usize = 400;
 const LINK_CHARS: usize = 256;
+const HELP_URL_CHARS: usize = 2048;
 /// Top-level labels that never name a public host, as the manifest schema's `helpUrl` grammar refuses them.
 const PRIVATE_TOP_LEVEL_LABELS: [&str; 11] = [
     "arpa",
@@ -79,11 +83,16 @@ impl PublicationIdentity {
             .map_err(|_| "Assistant manifest identity is invalid".to_owned())?;
         let manifest: PublicationManifest = toml::from_str(source)
             .map_err(|_| "Assistant manifest identity is invalid".to_owned())?;
-        let PublicationTable {
-            identity,
-            description,
-            links,
-        } = manifest.shimpz;
+        let PublicationManifest {
+            shimpz:
+                PublicationTable {
+                    identity,
+                    description,
+                    links,
+                },
+            stored_inputs,
+            ..
+        } = manifest;
         if !identifier::assistant_id(&identity.id)
             || !valid_version(&identity.version)
             || !valid_creators(&identity.creators)
@@ -94,6 +103,7 @@ impl PublicationIdentity {
         }
         validate_description(description.as_ref())?;
         validate_links(links.as_ref())?;
+        validate_stored_input_help(&stored_inputs)?;
         Ok(identity)
     }
 }
@@ -110,6 +120,43 @@ fn validate_description(description: Option<&toml::Value>) -> Result<(), String>
              characters on a single line, without surrounding spaces or control characters"
         )),
     }
+}
+
+/// Every secret a person is asked for says what it is, how to get it, and where: each Stored Input declares a help-text
+/// `description` and the `help_url` of the official page or documentation where the value is made.
+fn validate_stored_input_help(stored_inputs: &BTreeMap<String, toml::Value>) -> Result<(), String> {
+    for (id, declaration) in stored_inputs {
+        // A Creator's own table key is named only once it is a valid identifier, so a diagnostic never echoes noise.
+        let name = if identifier::declared(id) {
+            format!("[stored_inputs.{id}]")
+        } else {
+            "[stored_inputs]".to_owned()
+        };
+        let field = |key: &str| declaration.get(key).and_then(toml::Value::as_str);
+        if !field("description").is_some_and(|text| valid_display_text(text, DESCRIPTION_CHARS)) {
+            return Err(format!(
+                "Assistant manifest {name}.description is invalid: write the help text a person reads before \
+                 entering this secret, what it is and how to get it, as one line of 1 to {DESCRIPTION_CHARS} \
+                 characters"
+            ));
+        }
+        match field("help_url") {
+            None if declaration.get("help_url").is_none() => {
+                return Err(format!(
+                    "Assistant manifest is missing {name}.help_url: add the official https:// page where a person \
+                     creates this secret, or the provider documentation that explains how"
+                ));
+            }
+            Some(url) if url.len() <= HELP_URL_CHARS && public_https_url(url) => {}
+            _ => {
+                return Err(format!(
+                    "Assistant manifest {name}.help_url is invalid: use a public https:// URL with a path, at most \
+                     {HELP_URL_CHARS} characters, and no port, credentials, or fragment"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_links(links: Option<&toml::Value>) -> Result<(), String> {
@@ -397,6 +444,96 @@ description = "Greets people by name in one short, friendly sentence."
 
     fn with_links(links: &str) -> String {
         format!("{VALID}\n[shimpz.links]\n{links}\n")
+    }
+
+    const HELP: &str = "Create an API key in the Exa dashboard and copy it.";
+    const HELP_URL: &str = "https://dashboard.exa.ai/api-keys";
+
+    fn with_stored_input(fields: &str) -> String {
+        format!(
+            "{VALID}\n[stored_inputs.exa-api-key]\nkind = \"password\"\nlabel = \"Exa API key\"\n{fields}\n"
+        )
+    }
+
+    #[test]
+    fn admits_a_stored_input_with_its_help_text_and_help_link() {
+        for fields in [
+            format!("description = \"{HELP}\"\nhelp_url = \"{HELP_URL}\""),
+            format!(
+                "description = \"{}\"\nhelp_url = \"{HELP_URL}\"",
+                "h".repeat(400)
+            ),
+            format!(
+                "description = \"{HELP}\"\nhelp_url = \"https://exa.ai/{}\"",
+                "a".repeat(2048 - "https://exa.ai/".len())
+            ),
+        ] {
+            let source = with_stored_input(&fields);
+            assert!(
+                PublicationIdentity::parse(source.as_bytes()).is_ok(),
+                "{fields}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_stored_input_without_its_help_text_or_help_link() {
+        for (fields, expected) in [
+            (
+                format!("help_url = \"{HELP_URL}\""),
+                "[stored_inputs.exa-api-key].description is invalid",
+            ),
+            (
+                format!(
+                    "description = \"{}\"\nhelp_url = \"{HELP_URL}\"",
+                    "h".repeat(401)
+                ),
+                "[stored_inputs.exa-api-key].description is invalid",
+            ),
+            (
+                format!("description = \"Line one.\\nLine two.\"\nhelp_url = \"{HELP_URL}\""),
+                "[stored_inputs.exa-api-key].description is invalid",
+            ),
+            (
+                format!("description = \"{HELP}\""),
+                "missing [stored_inputs.exa-api-key].help_url",
+            ),
+            (
+                format!(
+                    "description = \"{HELP}\"\nhelp_url = \"http://dashboard.exa.ai/api-keys\""
+                ),
+                "[stored_inputs.exa-api-key].help_url is invalid",
+            ),
+            (
+                format!(
+                    "description = \"{HELP}\"\nhelp_url = \"https://dashboard.exa.ai/api-keys#new\""
+                ),
+                "[stored_inputs.exa-api-key].help_url is invalid",
+            ),
+            (
+                format!("description = \"{HELP}\"\nhelp_url = 42"),
+                "[stored_inputs.exa-api-key].help_url is invalid",
+            ),
+            (
+                format!(
+                    "description = \"{HELP}\"\nhelp_url = \"https://exa.ai/{}\"",
+                    "a".repeat(2049 - "https://exa.ai/".len())
+                ),
+                "[stored_inputs.exa-api-key].help_url is invalid",
+            ),
+        ] {
+            let error =
+                PublicationIdentity::parse(with_stored_input(&fields).as_bytes()).unwrap_err();
+            assert!(error.contains(expected), "{fields}: {error}");
+        }
+        let unnamed = format!(
+            "{VALID}\n[stored_inputs.\"Bad Key\"]\nkind = \"password\"\nlabel = \"Key\"\nhelp_url = \"{HELP_URL}\"\n"
+        );
+        let error = PublicationIdentity::parse(unnamed.as_bytes()).unwrap_err();
+        assert!(
+            error.contains("Assistant manifest [stored_inputs].description is invalid"),
+            "{error}"
+        );
     }
 
     #[test]
