@@ -513,7 +513,6 @@ services:
     ports:
       - "127.0.0.1:${SHIMPZ_PORT:-7777}:4600"
     environment:
-      SHIMPZ_ADMIN_PROFILE: local
       SHIMPZ_TEAM_URL: http://team:7077
       SHIMPZ_TEAM_TOKEN_FILE: /run/shimpz-local/token
       SHIMPZ_TEAM_CREDENTIALS_ENABLED: "0"
