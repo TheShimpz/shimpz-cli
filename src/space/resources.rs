@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::thread;
 
 use super::docker::Engine;
-use super::graph::{StorageProfile, VOLUME_NAMES};
+use super::graph::{self, NETWORK_NAMES, StorageProfile, VOLUME_NAMES};
 use super::id;
 use super::paths::Paths;
 use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
@@ -21,19 +21,6 @@ pub(crate) const RESERVED: [&str; 8] = [
     "shimpz-assistant-release",
     "shimpz-account-egress",
     "shimpz-account-egress-init",
-];
-const NETWORKS: [&str; 11] = [
-    "egress",
-    "control",
-    "brain_runtime",
-    "brain_egress",
-    "brain_egress_out",
-    "assistant_release",
-    "assistant_release_out",
-    "assistant_egress",
-    "assistant_egress_out",
-    "account_egress",
-    "account_egress_out",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -431,7 +418,7 @@ fn validate_project_volumes(
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 6
             || !VOLUME_NAMES.contains(&fields[1])
-            || fields[0] != format!("{PROJECT}_{}", fields[1])
+            || fields[0] != graph::resource_name(fields[1])
         {
             return Err("the Compose project contains an unknown volume".into());
         }
@@ -464,8 +451,8 @@ fn validate_project_networks(engine: &Engine, identifiers: &[String]) -> Result<
     )? {
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 2
-            || !NETWORKS.contains(&fields[1])
-            || fields[0] != format!("{PROJECT}_{}", fields[1])
+            || !NETWORK_NAMES.contains(&fields[1])
+            || fields[0] != graph::resource_name(fields[1])
         {
             return Err("the Compose project contains an unknown network".into());
         }
@@ -615,7 +602,7 @@ mod tests {
         let identifiers: Vec<String> = (0..70).map(|index| format!("n{index:03}")).collect();
         let map = identifiers
             .iter()
-            .map(|id| format!("{id:0<64}|shimpz-space_egress|egress\n"))
+            .map(|id| format!("{id:0<64}|shimpz-space-egress|egress\n"))
             .collect::<Vec<_>>()
             .concat();
         let (temporary, engine) = fake_docker(&map);
@@ -683,20 +670,20 @@ mod tests {
     #[test]
     fn a_batch_fails_closed_unless_each_record_answers_its_own_request() {
         let requested = vec!["n001".to_owned(), "n002".to_owned()];
-        let one = format!("{:0<64}|shimpz-space_egress|egress\n", "n001");
+        let one = format!("{:0<64}|shimpz-space-egress|egress\n", "n001");
         // A missing record, a short identity, or a record for another object each refuse the inspection.
         for map in [
             one.clone(),
-            format!("{one}{:0<64}|shimpz-space_egress|egress\n", "n009"),
+            format!("{one}{:0<64}|shimpz-space-egress|egress\n", "n009"),
         ] {
             let (_temporary, engine) = fake_docker(&map);
             assert!(validate_project_networks(&engine, &requested).is_err());
         }
-        let short = "n001|shimpz-space_egress|egress\n";
+        let short = "n001|shimpz-space-egress|egress\n";
         let (_temporary, engine) = fake_docker(short);
         assert!(validate_project_networks(&engine, &requested[..1]).is_err());
         let volume =
-            "shimpz-space_team_storage2|shimpz-space_team_storage2|team_storage|local||||\n";
+            "shimpz-space-team-storage2|shimpz-space-team-storage2|team_storage|local||||\n";
         let (_temporary, engine) = fake_docker(volume);
         assert!(
             inspect_records(
@@ -704,7 +691,7 @@ mod tests {
                 &["volume", "inspect"],
                 Identity::Name,
                 "{{.Name}}",
-                &["shimpz-space_team_storage".to_owned()],
+                &["shimpz-space-team-storage".to_owned()],
                 "Compose volume",
             )
             .is_err()

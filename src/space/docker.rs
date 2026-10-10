@@ -137,11 +137,11 @@ const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 /// The most output one captured Docker command may return on either stream before it is stopped.
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
-const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space_data";
+const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space-data";
 const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
-const RESET_CAPABILITY_VOLUME: &str = "shimpz-space_reset_capability";
+const RESET_CAPABILITY_VOLUME: &str = "shimpz-space-reset-capability";
 /// The CPU quota of every one-shot helper container, inside the Space cpuset. One CPU bounds a helper as firmly as
 /// a fraction would, while a quarter-CPU quota stretched each helper's Python start several-fold (the Admin
 /// authentication probe from about 2 s to 7 s).
@@ -597,7 +597,7 @@ impl Engine {
             return Err("the selected Team image reference is invalid".into());
         }
         for volume in volumes {
-            let name = format!("{SPACE_PROJECT}_{volume}");
+            let name = graph::resource_name(volume);
             let identity = self.run_output([
                 "volume",
                 "inspect",
@@ -772,7 +772,7 @@ impl Engine {
             "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
             ADMIN_AUTHENTICATION_VOLUME,
         ])?;
-        if identity.trim() == "shimpz-space_data|shimpz-space|data" {
+        if identity.trim() == "shimpz-space-data|shimpz-space|data" {
             Ok(())
         } else {
             Err("the Admin data volume is not owned by this Space".into())
@@ -1020,7 +1020,7 @@ impl Engine {
         if !ADMIN.admits(admin_image) {
             return Err("the Local release status projection is invalid".into());
         }
-        let volume = "shimpz-space_release_status";
+        let volume = "shimpz-space-release-status";
         let identity = match self.run_output([
             "volume",
             "inspect",
@@ -1045,7 +1045,7 @@ impl Engine {
                 };
             }
         };
-        if identity.trim() != "shimpz-space_release_status|shimpz-space|release_status" {
+        if identity.trim() != "shimpz-space-release-status|shimpz-space|release_status" {
             return Err("the Local release status volume is not owned by this Space".into());
         }
         // A status helper an earlier projection could not prove removed may still write; no other may start first.
@@ -1164,7 +1164,7 @@ impl Engine {
             "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
             RESET_CAPABILITY_VOLUME,
         ])?;
-        if identity.trim() == "shimpz-space_reset_capability|shimpz-space|reset_capability" {
+        if identity.trim() == "shimpz-space-reset-capability|shimpz-space|reset_capability" {
             Ok(())
         } else {
             Err("the Local reset capability volume is not owned by this Space".into())
@@ -1346,7 +1346,10 @@ fn completed_init_matches(records: &str, configuration: &str) -> bool {
     let (Some(init), Some(egress), None) = (lines.next(), lines.next(), lines.next()) else {
         return false;
     };
-    let capability = format!("volume:{SPACE_PROJECT}_account_egress_capability");
+    let capability = format!(
+        "volume:{}",
+        graph::resource_name("account_egress_capability")
+    );
     let Some(image) = init
         .strip_prefix(&format!(
             "exited|0|{SPACE_PROJECT}|{}|{hash}|",
@@ -1588,8 +1591,11 @@ fn clear_volumes_arguments(
     for volume in volumes {
         arguments.push("--mount".into());
         arguments.push(
-            format!("type=volume,src={SPACE_PROJECT}_{volume},dst=/state/{volume},volume-nocopy")
-                .into(),
+            format!(
+                "type=volume,src={},dst=/state/{volume},volume-nocopy",
+                graph::resource_name(volume)
+            )
+            .into(),
         );
     }
     // Depth 1 holds the volume roots themselves, which stay; everything below them is removed, and the deletions
@@ -2014,6 +2020,15 @@ fn version_at_least(value: &str, minimum: (u64, u64, u64)) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fixed_volume_names_are_the_graph_names_of_their_keys() {
+        assert_eq!(ADMIN_AUTHENTICATION_VOLUME, graph::resource_name("data"));
+        assert_eq!(
+            RESET_CAPABILITY_VOLUME,
+            graph::resource_name("reset_capability")
+        );
+    }
+
     /// Captured Docker output was once read without any bound; it now stops Docker one byte past its bound.
     #[cfg(unix)]
     #[test]
@@ -2229,7 +2244,7 @@ mod tests {
 
     fn init_records(hash: &str) -> String {
         let image = format!("localhost/shimpz-egress@sha256:{DIGEST}");
-        let capability = "volume:shimpz-space_account_egress_capability";
+        let capability = "volume:shimpz-space-account-egress-capability";
         format!(
             "exited|0|shimpz-space|shimpz-account-egress-init|{hash}|{image}|{capability}\nrunning|0|shimpz-space|shimpz-account-egress|{}|{image}|{capability}\n",
             "9".repeat(64)
@@ -2252,11 +2267,11 @@ mod tests {
             records.replacen("|shimpz-account-egress-init|", "|shimpz-account-egress|", 1),
             records.replacen(&hash, &"d".repeat(64), 1),
             records.replacen(
-                "volume:shimpz-space_account_egress_capability",
+                "volume:shimpz-space-account-egress-capability",
                 "volume:other",
                 1,
             ),
-            records.replacen("volume:shimpz-space_account_egress_capability", "bind:", 1),
+            records.replacen("volume:shimpz-space-account-egress-capability", "bind:", 1),
             format!("{init}\n{}", egress.replacen("running|", "restarting|", 1)),
             format!(
                 "{init}\n{}",
@@ -2272,7 +2287,7 @@ mod tests {
             ),
             format!(
                 "{init}\n{}",
-                egress.replacen("volume:shimpz-space_account_egress_capability", "", 1)
+                egress.replacen("volume:shimpz-space-account-egress-capability", "", 1)
             ),
             format!("{init}\n{}", egress.replacen(&"9".repeat(64), "", 1)),
             records.replace(
@@ -2357,7 +2372,7 @@ mod tests {
         crate::fake_tool::write(
             &command,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat >> '{}'; echo . >> '{}.runs' ;;\n  ps) ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space-release-status|shimpz-space|release_status' ;;\n  run) cat >> '{}'; echo . >> '{}.runs' ;;\n  ps) ;;\n  *) exit 1 ;;\nesac\n",
                 received.display(),
                 received.display()
             ),
@@ -2400,7 +2415,7 @@ mod tests {
         );
         assert!(engine.begin_release_status(&admin).is_err());
         // A volume Docker cannot inspect is absent only when it is not listed; then nothing starts until Compose made it.
-        for (listed, absent) in [("", true), ("shimpz-space_release_status\n", false)] {
+        for (listed, absent) in [("", true), ("shimpz-space-release-status\n", false)] {
             crate::fake_tool::write(
                 &command,
                 format!(
@@ -2666,11 +2681,11 @@ mod tests {
             ["--entrypoint", "/bin/sh"],
             [
                 "--mount",
-                "type=volume,src=shimpz-space_controller_routine_state,dst=/state/controller_routine_state,volume-nocopy",
+                "type=volume,src=shimpz-space-controller-routine-state,dst=/state/controller_routine_state,volume-nocopy",
             ],
             [
                 "--mount",
-                "type=volume,src=shimpz-space_brain_runtime_state,dst=/state/brain_runtime_state,volume-nocopy",
+                "type=volume,src=shimpz-space-brain-runtime-state,dst=/state/brain_runtime_state,volume-nocopy",
             ],
         ] {
             assert!(
@@ -2692,7 +2707,7 @@ mod tests {
     #[test]
     fn admin_authentication_probe_is_read_only_offline_and_resource_bounded() {
         let image = format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}");
-        let mount = "type=volume,src=shimpz-space_data,dst=/data,volume-nocopy,readonly";
+        let mount = "type=volume,src=shimpz-space-data,dst=/data,volume-nocopy,readonly";
         let arguments = admin_authentication_probe_arguments(
             "linux/amd64",
             "0-3",
@@ -2929,7 +2944,7 @@ mod tests {
             crate::fake_tool::write(
                 &docker,
                 format!(
-                    "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  run) cat > /dev/null; exit 3 ;;\n  ps) case \"$*\" in *name=*) {named} ;; esac ;;\nesac\n"
+                    "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space-release-status|shimpz-space|release_status' ;;\n  run) cat > /dev/null; exit 3 ;;\n  ps) case \"$*\" in *name=*) {named} ;; esac ;;\nesac\n"
                 ),
             );
             let engine = Engine::with_docker(docker.clone());

@@ -583,30 +583,41 @@ volumes:
 
 networks:
   control:
+    name: shimpz-space-control
     driver: bridge
     internal: true
   brain_runtime:
+    name: shimpz-space-brain-runtime
     driver: bridge
     internal: true
   brain_egress:
+    name: shimpz-space-brain-egress
     driver: bridge
     internal: true
   brain_egress_out:
+    name: shimpz-space-brain-egress-out
     driver: bridge
   assistant_egress:
+    name: shimpz-space-assistant-egress
     driver: bridge
     internal: true
   assistant_egress_out:
+    name: shimpz-space-assistant-egress-out
     driver: bridge
   assistant_release:
+    name: shimpz-space-assistant-release
     driver: bridge
     internal: true
   assistant_release_out:
+    name: shimpz-space-assistant-release-out
     driver: bridge
   account_egress:
+    name: shimpz-space-account-egress
     driver: bridge
     internal: true
   account_egress_out:
+    name: shimpz-space-account-egress-out
     driver: bridge
   egress:
+    name: shimpz-space-egress
     driver: bridge

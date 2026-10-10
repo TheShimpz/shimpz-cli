@@ -17,6 +17,25 @@ pub(crate) const LONG_RUNNING_SERVICES: [&str; 7] = [
     "admin",
 ];
 
+/// Every Local Docker network and volume carries this explicit name prefix before its hyphenated logical key, so the
+/// Space never relies on Compose's default `<project>_<key>` naming.
+const RESOURCE_PREFIX: &str = "shimpz-space-";
+
+/// The logical keys of every Local network, in the template's order.
+pub(crate) const NETWORK_NAMES: [&str; 11] = [
+    "control",
+    "brain_runtime",
+    "brain_egress",
+    "brain_egress_out",
+    "assistant_egress",
+    "assistant_egress_out",
+    "assistant_release",
+    "assistant_release_out",
+    "account_egress",
+    "account_egress_out",
+    "egress",
+];
+
 pub(crate) const VOLUME_NAMES: [&str; 28] = [
     "config",
     "data",
@@ -78,12 +97,19 @@ impl StorageProfile {
     }
 }
 
+/// The explicit Docker name of the Local network or volume with logical `key`.
+pub(crate) fn resource_name(key: &str) -> String {
+    format!("{RESOURCE_PREFIX}{}", key.replace('_', "-"))
+}
+
 pub(crate) fn render(profile: StorageProfile) -> String {
     let mut volumes = String::new();
     for name in VOLUME_NAMES {
         volumes.push_str("  ");
         volumes.push_str(name);
-        volumes.push_str(":\n");
+        volumes.push_str(":\n    name: ");
+        volumes.push_str(&resource_name(name));
+        volumes.push('\n');
         if profile == StorageProfile::LinuxLuks {
             volumes.push_str("    driver: local\n");
             volumes.push_str("    driver_opts:\n");
@@ -126,6 +152,33 @@ mod tests {
         }
         assert_eq!(StorageProfile::LinuxLuks.name(), "linux-luks");
         assert_eq!(StorageProfile::ManagedDisk.name(), "managed-disk");
+    }
+
+    #[test]
+    fn names_every_network_and_volume_explicitly_for_each_storage_profile() {
+        assert_eq!(resource_name("data"), "shimpz-space-data");
+        assert_eq!(
+            resource_name("controller_token"),
+            "shimpz-space-controller-token"
+        );
+        for profile in [StorageProfile::LinuxLuks, StorageProfile::ManagedDisk] {
+            let graph: Value = serde_norway::from_str(&render(profile)).unwrap();
+            let mut names = BTreeSet::new();
+            for (section, keys) in [
+                ("networks", &NETWORK_NAMES[..]),
+                ("volumes", &VOLUME_NAMES[..]),
+            ] {
+                let declared = graph[section].as_mapping().unwrap();
+                let declared_keys: BTreeSet<_> =
+                    declared.keys().map(|key| key.as_str().unwrap()).collect();
+                assert_eq!(declared_keys, keys.iter().copied().collect());
+                for (key, definition) in declared {
+                    let name = definition["name"].as_str().unwrap();
+                    assert_eq!(name, resource_name(key.as_str().unwrap()));
+                    assert!(names.insert(name.to_owned()), "{name}");
+                }
+            }
+        }
     }
 
     #[test]

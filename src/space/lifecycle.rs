@@ -3691,7 +3691,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space-data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display()
             ),
         );
@@ -3965,7 +3965,7 @@ mod tests {
         let docker = home.path().join("docker");
         crate::fake_tool::write(
             &docker,
-            "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) case \"$*\" in *shimpz-admin*) exit 0 ;; *) exit 1 ;; esac ;;\n  run) sleep 0.2; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space-data|shimpz-space|data' ;;\n  image) case \"$4\" in *'|'*) exit 1 ;; *) printf '[\"%s\"]\\n' \"$5\" ;; esac ;;\n  pull) case \"$*\" in *shimpz-admin*) exit 0 ;; *) exit 1 ;; esac ;;\n  run) sleep 0.2; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
         );
         let context = Context {
             paths,
@@ -4057,7 +4057,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space_release_status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"${{5#shimpz-space_}}\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space-release-status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"$(printf '%s' \"${{5#shimpz-space-}}\" | tr - _)\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 status = home.join("status.log").display(),
                 status_volume = if status_volume {
@@ -4224,7 +4224,7 @@ mod tests {
         );
         let calls = fs::read_to_string(&log).unwrap();
         assert!(calls.lines().any(|line| {
-            line.starts_with("volume ls --quiet --filter name=^shimpz-space_release_status$")
+            line.starts_with("volume ls --quiet --filter name=^shimpz-space-release-status$")
         }));
         assert!(!calls.lines().any(|line| line.starts_with("run ")));
         assert!(calls.lines().any(|line| {
@@ -5918,7 +5918,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space_release_status|shimpz-space|release_status' ;;\n  image) echo 1 ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  volume) printf '%s\\n' 'shimpz-space-release-status|shimpz-space|release_status' ;;\n  image) echo 1 ;;\n  run) cat > '{}' ;;\n  *) exit 0 ;;\nesac\n",
                 projected.display()
             ),
         );
