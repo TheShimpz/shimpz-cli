@@ -4,7 +4,7 @@
 //! call against the project's `shimpz.toml`, injects the credentials the Action declares for that host, and returns
 //! only a complete, credential-free response, applying Team's admission rules and bounds. Stored Input values live
 //! only in this process's memory; an Integration bearer comes from the Creator's `SHIMPZ_INTEGRATION_<ID>` and goes
-//! only to that provider's reviewed API hosts.
+//! only to that provider's reviewed API hosts and routes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -48,6 +48,32 @@ pub(crate) const RESERVED_HEADERS: [&str; 12] = [
 /// keeps the two equal.
 pub(crate) const INTEGRATION_HOSTS: [(&str, &[&str]); 1] =
     [("cloudflare", &["api.cloudflare.com"])];
+/// The pattern of a 32-lowercase-hexadecimal provider identifier, written exactly as in Team's route patterns.
+const ROUTE_ID: &str = "[0-9a-f]{32}";
+/// Each Integration's reviewed endpoints, by method and canonical-path pattern, exactly as Team's provider registry
+/// pins them (ADR-0106 amendment, 2026-10-09); an umbrella test keeps the two equal. A pattern is literal text except
+/// for each `ROUTE_ID`, so it matches here exactly as Team's regular expression matches the whole path.
+pub(crate) const INTEGRATION_ROUTES: [(&str, &[(&str, &str)]); 1] = [(
+    "cloudflare",
+    &[
+        ("GET", "/client/v4/zones"),
+        ("GET", "/client/v4/zones/[0-9a-f]{32}"),
+        ("GET", "/client/v4/zones/[0-9a-f]{32}/dns_records"),
+        (
+            "GET",
+            "/client/v4/zones/[0-9a-f]{32}/dns_records/[0-9a-f]{32}",
+        ),
+        ("POST", "/client/v4/zones/[0-9a-f]{32}/dns_records"),
+        (
+            "PUT",
+            "/client/v4/zones/[0-9a-f]{32}/dns_records/[0-9a-f]{32}",
+        ),
+        (
+            "DELETE",
+            "/client/v4/zones/[0-9a-f]{32}/dns_records/[0-9a-f]{32}",
+        ),
+    ],
+)];
 
 /// One credential placed in calls to its host: a header or a query parameter.
 struct Credential {
@@ -156,6 +182,14 @@ impl Broker {
         if missing {
             return Err("credential-missing");
         }
+        let path = call.target.split('?').next().unwrap_or_default();
+        if self.integrations.iter().any(|(id, _)| {
+            integration_hosts(id).is_some_and(|hosts| hosts.contains(&call.host.as_str()))
+                && !integration_allows(id, &call.method, path)
+        }) {
+            // An Integration bearer is never sent to an endpoint outside its provider's reviewed routes.
+            return Err("refused");
+        }
         Ok((inject(call, &credentials)?, credentials))
     }
 
@@ -212,6 +246,40 @@ fn integration_hosts(id: &str) -> Option<&'static [&'static str]> {
         .iter()
         .find(|(provider, _)| *provider == id)
         .map(|(_, hosts)| *hosts)
+}
+
+/// Whether one call's method and path, as sent and before any query, are a reviewed endpoint of the Integration's
+/// provider; percent-encoding, dot or empty segments, and a trailing slash never match, so they are refused.
+fn integration_allows(id: &str, method: &str, path: &str) -> bool {
+    INTEGRATION_ROUTES
+        .iter()
+        .filter(|(provider, _)| *provider == id)
+        .flat_map(|(_, routes)| routes.iter())
+        .any(|(reviewed, pattern)| *reviewed == method && route_matches(pattern, path))
+}
+
+/// Match a whole path against a route pattern: literal text, each `ROUTE_ID` exactly 32 lowercase hex characters.
+fn route_matches(pattern: &str, path: &str) -> bool {
+    let mut parts = pattern.split(ROUTE_ID);
+    let Some(mut rest) = parts.next().and_then(|first| path.strip_prefix(first)) else {
+        return false;
+    };
+    for literal in parts {
+        let Some((id, tail)) = rest.split_at_checked(32) else {
+            return false;
+        };
+        if !id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return false;
+        }
+        let Some(tail) = tail.strip_prefix(literal) else {
+            return false;
+        };
+        rest = tail;
+    }
+    rest.is_empty()
 }
 
 fn parse(frame: &Value, hosts: &BTreeSet<String>) -> Result<Call, &'static str> {
@@ -742,6 +810,149 @@ mod tests {
                 vec![("unknown".into(), None)]
             )
             .is_err()
+        );
+    }
+
+    fn cloudflare(token: Option<&str>) -> Broker {
+        let mut broker = Broker::new(
+            [
+                "api.cloudflare.com".to_owned(),
+                "api.example.com".to_owned(),
+            ]
+            .into(),
+            BTreeMap::new(),
+            vec![(
+                "cloudflare".into(),
+                token.map(|token| Zeroizing::new(token.into())),
+            )],
+        )
+        .expect("broker");
+        broker.begin(true);
+        broker
+    }
+
+    #[test]
+    fn every_route_pattern_is_canonical_literal_text_around_reviewed_ids() {
+        assert_eq!(
+            INTEGRATION_ROUTES.map(|(provider, _)| provider),
+            INTEGRATION_HOSTS.map(|(provider, _)| provider)
+        );
+        for (_, routes) in INTEGRATION_ROUTES {
+            assert!(!routes.is_empty());
+            for (method, pattern) in routes {
+                assert!(METHODS.contains(method), "{method}");
+                assert!(pattern.starts_with('/'), "{pattern}");
+                assert!(
+                    pattern.split(ROUTE_ID).all(|literal| literal
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || b"/_".contains(&byte))),
+                    "{pattern}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_cloudflare_bearer_reaches_only_the_reviewed_dns_endpoints() {
+        let (zone, record) = ("a".repeat(32), "b".repeat(32));
+        for (method, path) in [
+            ("GET", "/client/v4/zones".to_owned()),
+            ("GET", format!("/client/v4/zones/{zone}")),
+            ("GET", format!("/client/v4/zones/{zone}/dns_records")),
+            (
+                "GET",
+                format!("/client/v4/zones/{zone}/dns_records/{record}"),
+            ),
+            ("POST", format!("/client/v4/zones/{zone}/dns_records")),
+            (
+                "PUT",
+                format!("/client/v4/zones/{zone}/dns_records/{record}"),
+            ),
+            (
+                "DELETE",
+                format!("/client/v4/zones/{zone}/dns_records/{record}"),
+            ),
+        ] {
+            assert!(
+                integration_allows("cloudflare", method, &path),
+                "{method} {path}"
+            );
+            assert!(
+                !integration_allows("unknown", method, &path),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            ("GET", "/client/v4/user/tokens/verify".to_owned()),
+            ("POST", "/client/v4/user/tokens".to_owned()),
+            ("POST", format!("/client/v4/accounts/{zone}/tokens")),
+            ("GET", "/client/v4/user".to_owned()),
+            ("GET", "/client/v4/accounts".to_owned()),
+            ("PATCH", format!("/client/v4/zones/{zone}")),
+            ("DELETE", format!("/client/v4/zones/{zone}")),
+            ("POST", "/client/v4/zones".to_owned()),
+            (
+                "PATCH",
+                format!("/client/v4/zones/{zone}/dns_records/{record}"),
+            ),
+            ("DELETE", format!("/client/v4/zones/{zone}/dns_records")),
+            ("GET", "/client/v4/zones/".to_owned()),
+            ("GET", "//client/v4/zones".to_owned()),
+            ("GET", format!("/client/v4/zones/{zone}/../../user/tokens")),
+            ("GET", format!("/client/v4/zones/{zone}/%2e%2e/user")),
+            ("GET", format!("/client/v4/zones/{}", zone.to_uppercase())),
+            ("GET", format!("/client/v4/zones/{zone}%2Fdns_records")),
+            ("GET", format!("/client/v4/zones/{zone}a")),
+            ("GET", format!("/client/v4/zones/{}", &zone[1..])),
+            ("GET", "/client/v4/zones/x".to_owned()),
+        ] {
+            assert!(
+                !integration_allows("cloudflare", method, &path),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_integration_bearer_is_never_placed_outside_its_providers_reviewed_routes() {
+        let broker = cloudflare(Some("token-1"));
+        let (call, credentials) = broker
+            .admit(&fetch(
+                "https://api.cloudflare.com/client/v4/zones?page=1&per_page=25",
+            ))
+            .expect("admitted");
+        assert_eq!(credentials.len(), 1);
+        assert!(
+            call.headers
+                .contains(&("authorization".into(), "Bearer token-1".into()))
+        );
+        let zone = "a".repeat(32);
+        for frame in [
+            fetch("https://api.cloudflare.com/client/v4/user/tokens/verify"),
+            fetch(&format!(
+                "https://api.cloudflare.com/client/v4/zones/{zone}/%2e%2e/%2e%2e/user/tokens"
+            )),
+            fetch(&format!(
+                "https://api.cloudflare.com/client/v4/zones/{zone}%2Fdns_records"
+            )),
+            fetch("https://api.cloudflare.com/client/v4/zones/?page=1"),
+            json!({"type": "fetch", "method": "POST", "url": "https://api.cloudflare.com/client/v4/user/tokens",
+                "headers": []}),
+        ] {
+            assert_eq!(broker.admit(&frame).err(), Some("refused"), "{frame}");
+        }
+        let (other, none) = broker
+            .admit(&fetch("https://api.example.com/client/v4/user/tokens"))
+            .expect("another host");
+        assert!(none.is_empty());
+        assert_eq!(other.headers.len(), 1);
+        assert_eq!(
+            cloudflare(None)
+                .admit(&fetch("https://api.cloudflare.com/client/v4/user/tokens"))
+                .err(),
+            Some("credential-missing")
         );
     }
 

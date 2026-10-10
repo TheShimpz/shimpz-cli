@@ -51,6 +51,7 @@ fi
 exit 1
 "#,
         capture = capture.display(),
+        url = url.replace('%', "%%"),
     );
     fake_tool::write(&shim, script);
     (shim, capture)
@@ -121,4 +122,27 @@ fn discards_private_invocation_stderr_on_failure() {
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(diagnostic.contains("the Action process ended without a response frame"));
     assert!(!diagnostic.contains("operation_id"));
+}
+
+#[test]
+fn a_call_outside_the_integrations_reviewed_routes_is_refused_with_its_token_set() {
+    for (name, url) in [
+        (
+            "token-route",
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        ),
+        (
+            "encoded-route",
+            "https://api.cloudflare.com/client/v4/zones/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/%2e%2e/%2e%2e/user/tokens",
+        ),
+    ] {
+        let (shim, _capture) = fake_uv(name, url, false);
+        let output = run_report(&shim, Some("integration-secret"));
+        assert!(output.status.success(), "{url}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            r#"{"reply":{"error":"refused"}}"#,
+            "{url}"
+        );
+    }
 }
