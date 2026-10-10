@@ -4,7 +4,8 @@
 //! call against the project's `shimpz.toml`, injects the credentials the Action declares for that host, and returns
 //! only a complete, credential-free response, applying Team's admission rules and bounds. Stored Input values live
 //! only in this process's memory; an Integration bearer comes from the Creator's `SHIMPZ_INTEGRATION_<ID>` and goes
-//! only to that provider's reviewed API hosts and routes.
+//! only to that provider's reviewed API hosts and routes. A Stored Input is placed only on a call that the reviewed
+//! routes of every Stored Input placed for its host admit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -18,6 +19,7 @@ use ureq::http::Request;
 use zeroize::Zeroizing;
 
 use crate::manifest::Placement;
+use crate::route;
 
 pub(crate) const MAX_CALLS: usize = 16;
 const MAX_URL_CHARACTERS: usize = 8192;
@@ -188,6 +190,23 @@ impl Broker {
                 && !integration_allows(id, &call.method, path)
         }) {
             // An Integration bearer is never sent to an endpoint outside its provider's reviewed routes.
+            return Err("refused");
+        }
+        let null = Value::Null;
+        if self
+            .placements
+            .values()
+            .filter(|placement| placement.host == call.host)
+            .any(|placement| {
+                route::call_error(
+                    placement.routes.as_ref().unwrap_or(&null),
+                    &call.method,
+                    &call.target,
+                )
+                .is_some()
+            })
+        {
+            // A Stored Input is never sent to an endpoint outside the routes it declares, matched on the raw target.
             return Err("refused");
         }
         Ok((inject(call, &credentials)?, credentials))
@@ -665,7 +684,86 @@ mod tests {
             query: query.map(Into::into),
             scheme: None,
             hmac: None,
+            routes: Some(
+                json!([{"method": "GET", "path": "/v26.0/me"}, {"method": "GET", "path": "/me"}]),
+            ),
         }
+    }
+
+    const MATCH_VECTORS: &str = include_str!("../contracts/assistant/route-match-vectors.json");
+
+    /// A broker holding one value for each of `routes`, every one placed on `api.example.com`.
+    fn routed(routes: &[Value]) -> Broker {
+        let placements: BTreeMap<String, Placement> = routes
+            .iter()
+            .enumerate()
+            .map(|(index, routes)| {
+                let mut placement =
+                    placement("api.example.com", Some(&format!("x-key-{index}")), None);
+                placement.routes = Some(routes.clone());
+                (format!("key-{index}"), placement)
+            })
+            .collect();
+        let ids: Vec<String> = placements.keys().cloned().collect();
+        let mut broker = Broker::new(
+            ["api.example.com".to_owned()].into(),
+            placements,
+            Vec::new(),
+        )
+        .expect("broker");
+        for id in ids {
+            broker.hold(&id, Zeroizing::new("value-1".into()));
+        }
+        broker.begin(true);
+        broker
+    }
+
+    #[test]
+    fn places_a_stored_input_only_on_calls_its_routes_admit_as_the_golden_vectors_require() {
+        let vectors: Value = serde_json::from_str(MATCH_VECTORS).expect("vectors");
+        let cases = vectors["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let frame = json!({"type": "fetch", "method": case["method"],
+                "url": format!("https://api.example.com{}", case["target"].as_str().expect("target")),
+                "headers": []});
+            let admitted = routed(&[case["routes"].clone()]).admit(&frame);
+            if case["valid"] == true {
+                let (call, credentials) =
+                    admitted.unwrap_or_else(|code| panic!("{}: {code}", case["name"]));
+                assert_eq!(credentials.len(), 1);
+                assert!(call.headers.contains(&("x-key-0".into(), "value-1".into())));
+            } else {
+                assert_eq!(admitted.err(), Some("refused"), "{}", case["name"]);
+            }
+        }
+    }
+
+    #[test]
+    fn every_stored_input_placed_for_the_host_must_admit_the_call() {
+        let search = json!([{"method": "POST", "path": "/search"}]);
+        let contents = json!([{"method": "POST", "path": "/contents"}]);
+        let post = |path: &str| json!({"type": "fetch", "method": "POST", "url": format!("https://api.example.com{path}"), "headers": []});
+        assert!(
+            routed(std::slice::from_ref(&search))
+                .admit(&post("/search"))
+                .is_ok()
+        );
+        let both = routed(&[search, contents]);
+        for path in ["/search", "/contents"] {
+            assert_eq!(both.admit(&post(path)).err(), Some("refused"), "{path}");
+        }
+        let mut unrouted = placement("api.example.com", Some("x-key"), None);
+        unrouted.routes = None;
+        let mut broker = Broker::new(
+            ["api.example.com".to_owned()].into(),
+            [("key".to_owned(), unrouted)].into(),
+            Vec::new(),
+        )
+        .expect("broker");
+        broker.hold("key", Zeroizing::new("value-1".into()));
+        broker.begin(true);
+        assert_eq!(broker.admit(&post("/search")).err(), Some("refused"));
     }
 
     fn meta() -> Broker {

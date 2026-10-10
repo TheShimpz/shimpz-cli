@@ -1,0 +1,736 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "exact literal route",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "/search",
+      "valid": true
+    },
+    {
+      "name": "wildcard segment with a free query",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/act_123/insights?level=ad&fields=a%2Cb;c",
+      "valid": true
+    },
+    {
+      "name": "wildcard segment of 256 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/insights",
+      "valid": true
+    },
+    {
+      "name": "selector satisfied among other parameters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?limit=25&fields=id%2Cname&after=",
+      "valid": true
+    },
+    {
+      "name": "routes refused before any call",
+      "routes": [],
+      "method": "POST",
+      "target": "/search",
+      "valid": false
+    },
+    {
+      "name": "method differs",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/search",
+      "valid": false
+    },
+    {
+      "name": "lowercase method",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "post",
+      "target": "/search",
+      "valid": false
+    },
+    {
+      "name": "extra segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "/search/more",
+      "valid": false
+    },
+    {
+      "name": "missing segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/insights",
+      "valid": false
+    },
+    {
+      "name": "target without a leading slash",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "search",
+      "valid": false
+    },
+    {
+      "name": "trailing slash",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "/search/",
+      "valid": false
+    },
+    {
+      "name": "percent-encoded path",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "/se%61rch",
+      "valid": false
+    },
+    {
+      "name": "dot segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/./insights",
+      "valid": false
+    },
+    {
+      "name": "dot-dot segment through a wildcard",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/../insights",
+      "valid": false
+    },
+    {
+      "name": "empty segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "POST",
+      "target": "//search",
+      "valid": false
+    },
+    {
+      "name": "wildcard segment over 256 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/insights",
+      "valid": false
+    },
+    {
+      "name": "wildcard reaching a credential segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/*/*"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/oauth/access_token",
+      "valid": false
+    },
+    {
+      "name": "wildcard reaching token debugging",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/*"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/debug_token",
+      "valid": false
+    },
+    {
+      "name": "selector missing",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?limit=25",
+      "valid": false
+    },
+    {
+      "name": "selector missing without a query",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts",
+      "valid": false
+    },
+    {
+      "name": "selector value not listed",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname%2Caccess_token",
+      "valid": false
+    },
+    {
+      "name": "selector repeated",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname&fields=access_token",
+      "valid": false
+    },
+    {
+      "name": "selector repeated in another case",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname&Fields=access_token",
+      "valid": false
+    },
+    {
+      "name": "selector only in another case",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?Fields=id%2Cname",
+      "valid": false
+    },
+    {
+      "name": "selector value not encoded as declared",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id,name",
+      "valid": false
+    },
+    {
+      "name": "selector beside an encoded alias",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname&f%69elds=access_token",
+      "valid": false
+    },
+    {
+      "name": "selector beside a semicolon separator",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname&a=1;fields=access_token",
+      "valid": false
+    },
+    {
+      "name": "selector beside an empty parameter",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        },
+        {
+          "method": "POST",
+          "path": "/search"
+        }
+      ],
+      "method": "GET",
+      "target": "/v26.0/me/accounts?fields=id%2Cname&&limit=25",
+      "valid": false
+    }
+  ]
+}

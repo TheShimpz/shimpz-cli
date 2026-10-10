@@ -105,7 +105,10 @@ impl PublicationIdentity {
         validate_links(links.as_ref())?;
         validate_stored_input_help(&stored_inputs)?;
         for (id, declaration) in &stored_inputs {
-            validate_stored_input_routes(id, declaration.get("routes"))?;
+            let routes = declaration
+                .get("routes")
+                .map(|routes| serde_json::to_value(routes).unwrap_or_default());
+            validate_stored_input_routes(id, routes.as_ref())?;
         }
         Ok(identity)
     }
@@ -164,9 +167,9 @@ fn validate_stored_input_help(stored_inputs: &BTreeMap<String, toml::Value>) -> 
 
 /// Every Stored Input names the only provider endpoints on its host that ever receive its value, as the Developers
 /// route grammar admits them (ADR-0106 amendment of 2026-10-09).
-pub(crate) fn validate_stored_input_routes(
+fn validate_stored_input_routes(
     id: &str,
-    routes: Option<&toml::Value>,
+    routes: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     let name = if identifier::declared(id) {
         format!("[stored_inputs.{id}]")
@@ -179,10 +182,7 @@ pub(crate) fn validate_stored_input_routes(
              {{ method = \"GET\", path = \"/v1/items\" }}, with `*` for exactly one path segment"
         ));
     };
-    let reason = serde_json::to_value(routes).map_or(Some("routes_invalid"), |routes| {
-        route::routes_error(&routes)
-    });
-    let Some(reason) = reason else {
+    let Some(reason) = route::routes_error(routes) else {
         return Ok(());
     };
     let detail = match reason {
@@ -359,6 +359,9 @@ pub(crate) struct Placement {
     pub(crate) scheme: Option<String>,
     #[serde(default)]
     pub(crate) hmac: Option<String>,
+    /// The only provider endpoints on its host that ever receive this value (ADR-0106 amendment of 2026-10-09).
+    #[serde(default)]
+    pub(crate) routes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,7 +376,8 @@ struct NetworkDeclaration {
     allowed_hosts: BTreeSet<String>,
 }
 
-/// The allowed hosts and every Stored Input placement of a manifest the SDK has already validated.
+/// The allowed hosts and every Stored Input placement of a manifest the SDK has already validated; a placement's
+/// routes are checked again here, so a local run refuses the same manifests publication does.
 pub(crate) fn call_policy(
     bytes: &[u8],
 ) -> Result<(BTreeSet<String>, BTreeMap<String, Placement>), String> {
@@ -381,6 +385,9 @@ pub(crate) fn call_policy(
         .ok()
         .and_then(|source| toml::from_str(source).ok())
         .ok_or_else(|| "Assistant manifest network declarations are invalid".to_owned())?;
+    for (id, placement) in &manifest.stored_inputs {
+        validate_stored_input_routes(id, placement.routes.as_ref())?;
+    }
     Ok((manifest.network.allowed_hosts, manifest.stored_inputs))
 }
 
@@ -451,7 +458,9 @@ fn valid_creators(creators: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublicationIdentity, StoredInputHelp, integration_ids, stored_input_help};
+    use super::{
+        PublicationIdentity, StoredInputHelp, call_policy, integration_ids, stored_input_help,
+    };
 
     const VALID: &str = r#"
 [shimpz]
@@ -549,6 +558,29 @@ description = "Greets people by name in one short, friendly sentence."
                 "{routes}"
             );
         }
+    }
+
+    #[test]
+    fn a_local_run_carries_each_placements_routes_and_refuses_a_placement_without_them() {
+        let placed = "[network]\nallowed_hosts = [\"api.exa.ai\"]\n\n[stored_inputs.exa-api-key]\n\
+                      host = \"api.exa.ai\"\nheader = \"x-api-key\"\n";
+        let (hosts, placements) =
+            call_policy(format!("{placed}{ROUTES}\n").as_bytes()).expect("call policy");
+        assert!(hosts.contains("api.exa.ai"));
+        assert_eq!(
+            placements["exa-api-key"].routes,
+            Some(serde_json::json!([{"method": "POST", "path": "/search"}]))
+        );
+        let error = call_policy(placed.as_bytes()).unwrap_err();
+        assert!(
+            error.contains("missing [stored_inputs.exa-api-key].routes"),
+            "{error}"
+        );
+        let error = call_policy(format!("{placed}routes = []\n").as_bytes()).unwrap_err();
+        assert!(
+            error.contains("[stored_inputs.exa-api-key].routes is invalid"),
+            "{error}"
+        );
     }
 
     #[test]

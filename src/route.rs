@@ -13,6 +13,7 @@ const METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 const MAX_ROUTES: usize = 32;
 const MAX_PATH: usize = 512;
 const MAX_LITERAL: usize = 64;
+const MAX_SEGMENT: usize = 256;
 const MAX_SELECTORS: usize = 8;
 const MAX_SELECTOR_VALUES: usize = 16;
 const MAX_SELECTOR_VALUE: usize = 256;
@@ -47,6 +48,82 @@ pub(crate) fn routes_error(routes: &Value) -> Option<&'static str> {
         declared.push((method, path));
     }
     None
+}
+
+/// Return the reference matcher's stable reason when Team refuses to send a credential with these routes on one call.
+///
+/// `target` is the request target as sent: the path, then an optional `?` and raw query. A path with
+/// percent-encoding, an empty, dot, or non-unreserved segment, a credential-endpoint segment, or a trailing slash
+/// matches no route, so the call is refused rather than normalized.
+pub(crate) fn call_error(routes: &Value, method: &str, target: &str) -> Option<&'static str> {
+    if let Some(reason) = routes_error(routes) {
+        return Some(reason);
+    }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let Some(segments) = path
+        .strip_prefix('/')
+        .map(|path| path.split('/').collect::<Vec<_>>())
+        .filter(|segments| segments.iter().all(|segment| concrete(segment)))
+    else {
+        return Some("route_path");
+    };
+    let admitted = routes.as_array().into_iter().flatten().any(|route| {
+        route["method"] == method
+            && matches(route["path"].as_str().unwrap_or_default(), &segments)
+            && selected(route.get("query"), query)
+    });
+    (!admitted).then_some("route")
+}
+
+/// One concrete call segment: 1 to 256 unreserved characters other than `.` and `..`, never a credential endpoint.
+fn concrete(segment: &str) -> bool {
+    literal(segment, MAX_SEGMENT) && !credential_segment(segment)
+}
+
+fn matches(pattern: &str, segments: &[&str]) -> bool {
+    let expected = pattern
+        .strip_prefix('/')
+        .unwrap_or_default()
+        .split('/')
+        .collect::<Vec<_>>();
+    expected.len() == segments.len()
+        && expected
+            .iter()
+            .zip(segments)
+            .all(|(part, segment)| *part == WILDCARD || part == segment)
+}
+
+/// Each selector appears exactly once, compared without case, under its exact name with one listed raw value.
+///
+/// A selected route's query has no `;` and only unreserved parameter names, so no encoded, case-varied, or
+/// alternately separated alias of a selector can reach a provider that would read it differently.
+fn selected(selectors: Option<&Value>, query: &str) -> bool {
+    let Some(selectors) = selectors
+        .and_then(Value::as_array)
+        .filter(|selectors| !selectors.is_empty())
+    else {
+        return true;
+    };
+    let pairs: Vec<(&str, &str)> = if query.is_empty() {
+        Vec::new()
+    } else {
+        query
+            .split('&')
+            .map(|part| part.split_once('=').unwrap_or((part, "")))
+            .collect()
+    };
+    if query.contains(';') || !pairs.iter().all(|(name, _)| selector_name(name)) {
+        return false;
+    }
+    selectors.iter().all(|selector| {
+        let declared = selector["name"].as_str().unwrap_or_default();
+        let found: Vec<&(&str, &str)> = pairs
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(declared))
+            .collect();
+        matches!(found.as_slice(), [(name, value)] if *name == declared
+            && selector["values"].as_array().is_some_and(|values| values.iter().any(|listed| listed == value)))
+    })
 }
 
 /// One admitted route's method and path, or the reason it is refused.
@@ -185,9 +262,10 @@ fn values(fields: &Map<String, Value>) -> bool {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::routes_error;
+    use super::{call_error, routes_error};
 
     const ROUTE_VECTORS: &str = include_str!("../contracts/assistant/route-vectors.json");
+    const MATCH_VECTORS: &str = include_str!("../contracts/assistant/route-match-vectors.json");
 
     fn cases(vectors: &str) -> Vec<Value> {
         let vectors: Value = serde_json::from_str(vectors).expect("vectors");
@@ -234,5 +312,37 @@ mod tests {
             assert_eq!(routes_error(&routes), Some(reason), "{routes}");
         }
         assert_eq!(routes_error(&route("/v1/*/items")), None);
+    }
+
+    #[test]
+    fn calls_match_routes_as_the_developers_golden_vectors_require() {
+        let cases = cases(MATCH_VECTORS);
+        assert!(!cases.is_empty());
+        for case in cases {
+            let valid = case["valid"].as_bool().expect("valid");
+            let error = call_error(
+                &case["routes"],
+                case["method"].as_str().expect("method"),
+                case["target"].as_str().expect("target"),
+            );
+            assert_eq!(error.is_none(), valid, "{}: {error:?}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn each_call_refusal_carries_the_reference_matchers_reason() {
+        let routes = json!([{"method": "GET", "path": "/v1/*"}]);
+        assert_eq!(
+            call_error(&json!([]), "GET", "/v1/a"),
+            Some("routes_invalid")
+        );
+        assert_eq!(call_error(&routes, "GET", "v1/a"), Some("route_path"));
+        assert_eq!(call_error(&routes, "GET", "/v1/%61"), Some("route_path"));
+        assert_eq!(
+            call_error(&routes, "GET", "/v1/oauth_token"),
+            Some("route_path")
+        );
+        assert_eq!(call_error(&routes, "POST", "/v1/a"), Some("route"));
+        assert_eq!(call_error(&routes, "GET", "/v1/a?x=1"), None);
     }
 }
