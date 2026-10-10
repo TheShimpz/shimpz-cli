@@ -506,22 +506,24 @@ impl Context {
             None => None,
         };
         let release = self.resolve(selected)?;
-        validate_forward_release(&release, Some(installed))?;
+        // The failed-release outcome is decided before the selection is admitted: a remembered failure, expired or
+        // not, never keeps the installed release from resuming (ADR-0103, amended 2026-10-09).
         let selected_failed =
             channel && state::failed_release_matches(&self.paths, &release.reference)?;
-        Ok(match failed_release_decision(stopped, selected_failed) {
-            FailedReleaseDecision::UseSelected => Some(StartSelection {
-                release,
-                preserve_failed_release: false,
-                may_hand_off: !options.candidate,
-            }),
-            FailedReleaseDecision::ResumeInstalled => Some(StartSelection {
-                release: self.resolve(Some(&installed.release_ref))?,
-                preserve_failed_release: true,
-                may_hand_off: false,
-            }),
-            FailedReleaseDecision::KeepRunning => None,
-        })
+        let (release, preserve_failed_release, may_hand_off) =
+            match failed_release_decision(stopped, selected_failed) {
+                FailedReleaseDecision::UseSelected => (release, false, !options.candidate),
+                FailedReleaseDecision::ResumeInstalled => {
+                    (self.resolve(Some(&installed.release_ref))?, true, false)
+                }
+                FailedReleaseDecision::KeepRunning => return Ok(None),
+            };
+        validate_forward_release(&release, Some(installed))?;
+        Ok(Some(StartSelection {
+            release,
+            preserve_failed_release,
+            may_hand_off,
+        }))
     }
 
     fn update(&self) -> Result<String, String> {
@@ -3434,6 +3436,7 @@ mod tests {
     #[cfg(unix)]
     fn selection(
         home: &Path,
+        installed: &ResolvedRelease,
         stable: &ResolvedRelease,
         sets: &[&ResolvedRelease],
         failed: Option<&str>,
@@ -3462,7 +3465,7 @@ mod tests {
             release: exact.map(str::to_owned),
             candidate: false,
         };
-        let installed = installed_from(&developer(9, '1'));
+        let installed = installed_from(installed);
         Ok(context
             .select_start(&options, &installed, stopped)?
             .map(|selected| {
@@ -3525,7 +3528,15 @@ mod tests {
         let sets = [&newer, &installed, &requested];
         let record = |release: &ResolvedRelease| format!("release={}\n", release.reference);
         let select = |failed: Option<&str>, exact, stopped| {
-            selection(home.path(), &newer, &sets, failed, exact, stopped)
+            selection(
+                home.path(),
+                &installed,
+                &newer,
+                &sets,
+                failed,
+                exact,
+                stopped,
+            )
         };
         // A newer publication is not news: the scheduler repairs the installed developer release.
         assert_eq!(
@@ -3544,6 +3555,44 @@ mod tests {
         assert_eq!(
             select(Some(&record(&requested)), Some(&requested.reference), false),
             Ok(Some((requested.reference.clone(), false, true)))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expired_failed_stable_never_keeps_the_installed_release_from_resuming() {
+        let home = tempfile::tempdir().unwrap();
+        let installed = release(2, 'b');
+        let mut stable = release(3, 'c');
+        stable.metadata.validity = Some(release::Validity {
+            issued_at: 1,
+            expires: 2,
+        });
+        let sets = [&installed, &stable];
+        let failed = format!("release={}\n", stable.reference);
+        let select = |failed: Option<&str>, stopped| {
+            selection(
+                home.path(),
+                &installed,
+                &stable,
+                &sets,
+                failed,
+                None,
+                stopped,
+            )
+        };
+        // A stopped Space resumes its installed release, preserving the memory of the expired failure.
+        assert_eq!(
+            select(Some(&failed), true),
+            Ok(Some((installed.reference.clone(), true, false)))
+        );
+        // A running Space keeps running.
+        assert_eq!(select(Some(&failed), false), Ok(None));
+        // Without the memory, the expired channel is still refused as a change.
+        let refusal = select(None, true).unwrap_err();
+        assert!(
+            refusal.contains("expired at 1970-01-01 00:00 UTC"),
+            "{refusal}"
         );
     }
 
