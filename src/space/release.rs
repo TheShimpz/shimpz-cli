@@ -15,6 +15,11 @@
 //! against the one pinned key before any field is read, so no registry or package credential alone can select what a
 //! Space applies or which CLI it runs. A developer release is admitted only from this host's own image store and
 //! carries none.
+//!
+//! The metadata of a published set also carries its signed validity window, `issued_at` and `expires` in Unix
+//! seconds, at most [`VALIDITY_SECONDS`] apart. [`require_current`] admits a set for a change only inside that window,
+//! tolerating [`CLOCK_SKEW_SECONDS`] of host clock error at either end; the lifecycle never judges the installed
+//! release by it, so an expired window never stops, restarts, or rolls back a Space (ADR-0103, amended 2026-10-09).
 
 use std::collections::BTreeMap;
 
@@ -37,7 +42,15 @@ const DEVELOPER_NAMESPACE: &str = "localhost/";
 const PUBLISHED_SCHEMA: &str = "local-v2";
 const DEVELOPER_SCHEMA: &str = "local-dev-v2";
 const MACOS_CLI_KEY: &str = "cli_macos_arm64_sha256";
-const KEYS: [&str; 10] = [
+const ISSUED_AT_KEY: &str = "issued_at";
+const EXPIRES_KEY: &str = "expires";
+/// The fields only a published set carries.
+const PUBLISHED_ONLY_KEYS: [&str; 3] = [MACOS_CLI_KEY, ISSUED_AT_KEY, EXPIRES_KEY];
+/// The longest signed validity window of a published release set: 30 days.
+pub(crate) const VALIDITY_SECONDS: u64 = 30 * 86_400;
+/// The host clock error tolerated at either end of a validity window: five minutes.
+pub(crate) const CLOCK_SKEW_SECONDS: u64 = 5 * 60;
+const KEYS: [&str; 12] = [
     "schema",
     "ordinal",
     "umbrella_revision",
@@ -48,6 +61,8 @@ const KEYS: [&str; 10] = [
     "team",
     "brain",
     "egress",
+    ISSUED_AT_KEY,
+    EXPIRES_KEY,
 ];
 
 /// One platform component's OCI package, admitted under the published or the developer namespace.
@@ -90,6 +105,15 @@ pub(crate) struct Release {
     pub(crate) egress: String,
     /// The stored-format epoch of the disposable runtime state this release reads.
     pub(crate) state_epoch: u32,
+    /// The signed validity window of a published release; a developer release carries none.
+    pub(crate) validity: Option<Validity>,
+}
+
+/// A published release set's signed validity window, in Unix seconds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Validity {
+    pub(crate) issued_at: u64,
+    pub(crate) expires: u64,
 }
 
 impl Release {
@@ -164,7 +188,7 @@ pub(crate) fn parse(
     let values = key_values(document, 2_048, "the Local release metadata is malformed")?;
     let keys = KEYS
         .iter()
-        .filter(|key| !developer || **key != MACOS_CLI_KEY);
+        .filter(|key| !developer || !PUBLISHED_ONLY_KEYS.contains(key));
     if values.len() != keys.clone().count() || keys.into_iter().any(|key| !values.contains_key(key))
     {
         return Err("the Local release metadata contains an unknown or missing field".into());
@@ -204,6 +228,11 @@ pub(crate) fn parse(
         brain: values["brain"].into(),
         egress: values["egress"].into(),
         state_epoch: parse_state_epoch(state_epoch)?,
+        validity: if developer {
+            None
+        } else {
+            Some(parse_validity(values[ISSUED_AT_KEY], values[EXPIRES_KEY])?)
+        },
     };
     for (key, package, value) in release.members() {
         let admitted = if developer {
@@ -216,6 +245,74 @@ pub(crate) fn parse(
         }
     }
     Ok(release)
+}
+
+/// Parse a signed validity window: two positive decimal Unix times without leading zeros, `expires` later than
+/// `issued_at` by at most [`VALIDITY_SECONDS`].
+fn parse_validity(issued_at: &str, expires: &str) -> Result<Validity, String> {
+    let time = |value: &str| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|time| *time > 0 && time.to_string() == value)
+    };
+    match (time(issued_at), time(expires)) {
+        (Some(issued_at), Some(expires))
+            if expires > issued_at && expires - issued_at <= VALIDITY_SECONDS =>
+        {
+            Ok(Validity { issued_at, expires })
+        }
+        _ => Err("the Local release validity window is invalid".into()),
+    }
+}
+
+/// Admit a published release for a change at host time `now`, in Unix seconds, only inside its signed validity
+/// window widened by [`CLOCK_SKEW_SECONDS`] at either end. A release without a window is refused: only a developer
+/// release has none, and the lifecycle never passes one here.
+pub(crate) fn require_current(release: &Release, now: u64) -> Result<(), String> {
+    let validity = release
+        .validity
+        .ok_or_else(|| "the Local release carries no validity window".to_owned())?;
+    if validity.issued_at > now.saturating_add(CLOCK_SKEW_SECONDS) {
+        return Err(format!(
+            "the Local release ordinal {} was issued at {}, later than this host's clock; nothing was applied. Correct the host clock and retry",
+            release.ordinal,
+            utc(validity.issued_at)
+        ));
+    }
+    if now >= validity.expires.saturating_add(CLOCK_SKEW_SECONDS) {
+        return Err(format!(
+            "the Local release ordinal {} expired at {}; nothing was applied. Correct this host's clock if it is wrong, or retry after the release channel is renewed",
+            release.ordinal,
+            utc(validity.expires)
+        ));
+    }
+    Ok(())
+}
+
+/// A Unix time as a UTC minute, such as `2026-10-09 14:05 UTC`.
+fn utc(seconds: u64) -> String {
+    // The civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let shifted = seconds / 86_400 + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    let minute = seconds % 86_400 / 60;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        minute / 60,
+        minute % 60
+    )
 }
 
 /// A published or developer release set reference.
@@ -329,6 +426,9 @@ mod tests {
     const TEAM_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-team-local";
     const BRAIN_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-brain";
     const EGRESS_REPOSITORY: &str = "ghcr.io/theshimpz/shimpz-egress";
+    /// 2026-10-09 00:00 UTC and exactly the longest window after it.
+    const ISSUED_AT: u64 = 1_791_504_000;
+    const EXPIRES: u64 = ISSUED_AT + VALIDITY_SECONDS;
 
     /// Parse a published set carrying a correct signature over exactly `document` and `epoch`.
     fn signed(document: &str, epoch: &str) -> Result<Release, String> {
@@ -362,7 +462,7 @@ mod tests {
 
     fn valid() -> String {
         format!(
-            "schema=local-v2\nordinal=42\numbrella_revision={HEX_40}\ncli_revision={HEX_40}\ncli_linux_amd64_sha256={HEX_64}\ncli_macos_arm64_sha256={HEX_64}\nadmin={ADMIN_REPOSITORY}@sha256:{HEX_64}\nteam={TEAM_REPOSITORY}@sha256:{HEX_64}\nbrain={BRAIN_REPOSITORY}@sha256:{HEX_64}\negress={EGRESS_REPOSITORY}@sha256:{HEX_64}\n"
+            "schema=local-v2\nordinal=42\numbrella_revision={HEX_40}\ncli_revision={HEX_40}\ncli_linux_amd64_sha256={HEX_64}\ncli_macos_arm64_sha256={HEX_64}\nadmin={ADMIN_REPOSITORY}@sha256:{HEX_64}\nteam={TEAM_REPOSITORY}@sha256:{HEX_64}\nbrain={BRAIN_REPOSITORY}@sha256:{HEX_64}\negress={EGRESS_REPOSITORY}@sha256:{HEX_64}\nissued_at={ISSUED_AT}\nexpires={EXPIRES}\n"
         )
     }
 
@@ -370,6 +470,7 @@ mod tests {
         valid()
             .replace("schema=local-v2", "schema=local-dev-v2")
             .replace(&format!("cli_macos_arm64_sha256={HEX_64}\n"), "")
+            .replace(&format!("issued_at={ISSUED_AT}\nexpires={EXPIRES}\n"), "")
             .replace(
                 &format!("admin={ADMIN_REPOSITORY}@sha256:{HEX_64}"),
                 &format!("admin=localhost/shimpz-admin@sha256:{OTHER_64}"),
@@ -384,6 +485,13 @@ mod tests {
         assert_eq!(release.cli_macos_arm64_sha256.as_deref(), Some(HEX_64));
         assert_eq!(release.admin, format!("{ADMIN_REPOSITORY}@sha256:{HEX_64}"));
         assert_eq!(release.state_epoch, 3);
+        assert_eq!(
+            release.validity,
+            Some(Validity {
+                issued_at: ISSUED_AT,
+                expires: EXPIRES
+            })
+        );
         assert!(valid_release_ref(&published_ref()));
         assert!(!valid_release_ref(&format!("{RELEASE_REPOSITORY}:stable")));
     }
@@ -408,6 +516,15 @@ mod tests {
             ),
             (
                 document.replace("ordinal=42", "ordinal=43"),
+                "3",
+                signature.clone(),
+            ),
+            // The signature of this set over a later expiry.
+            (
+                document.replace(
+                    &format!("expires={EXPIRES}"),
+                    &format!("expires={}", EXPIRES + 1),
+                ),
                 "3",
                 signature.clone(),
             ),
@@ -440,8 +557,8 @@ mod tests {
     /// private half of this vector's key was discarded after signing.
     #[test]
     fn an_openssl_release_signature_verifies() {
-        const KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEngE4uojihMuGR7+jeQpGEZ+Dd/+5h35NWQS8ECmu4H3jmn+Fo8hYs8Osa81wbspQ1PhFf+bAQtu/Ewuvf65AcA==";
-        const SIGNATURE: &str = "MEUCIQDz/VJ+GgG2Z8vYMfdrJTFIjwD4C9BeYDdIdWiRKAu3fwIgDxkrI+ALKJmA3mmy1td9QhSQFbpQgqsl6iQOeJtWBO8=";
+        const KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETbfbLmGJxyq2bWGtRSdlOquPktrfPHYvEixu+RaWAUYEb/eDOZMR5wBbROnXsVWCs357ZEL519jNLmdSIM1Z9A==";
+        const SIGNATURE: &str = "MEYCIQCrnWKb6bzq/kFZePhAymGLY5I2q+ZGpnsplyE2a0kUbQIhAO/QhDlNsL7nX1njWX0VdpZ8pxH5lh0LuLpR3WVCvNa4";
         assert_eq!(verify_signature(KEY, &valid(), "3", SIGNATURE), Ok(()));
         assert!(verify_signature(KEY, &valid(), "4", SIGNATURE).is_err());
         assert!(verify_signature(test_signing::public_key(), &valid(), "3", SIGNATURE).is_err());
@@ -501,6 +618,7 @@ mod tests {
     fn the_reference_namespace_selects_the_only_admissible_schema() {
         let release = unsigned(&developer_ref(), &developer(), "1").unwrap();
         assert_eq!(release.cli_macos_arm64_sha256, None);
+        assert_eq!(release.validity, None);
         assert_eq!(
             release.admin,
             format!("localhost/shimpz-admin@sha256:{OTHER_64}")
@@ -518,6 +636,7 @@ mod tests {
         for invalid in [
             developer().replace("schema=local-dev-v2", "schema=local-v2"),
             format!("{}cli_macos_arm64_sha256={HEX_64}\n", developer()),
+            format!("{}issued_at={ISSUED_AT}\nexpires={EXPIRES}\n", developer()),
             developer().replace("localhost/shimpz-admin", "localhost/shimpz-brain"),
             developer().replace("localhost/shimpz-admin", "127.0.0.1:5000/shimpz-admin"),
         ] {
@@ -534,6 +653,89 @@ mod tests {
             assert!(!valid_release_ref(&invalid), "accepted: {invalid}");
             assert!(unsigned(&invalid, &valid(), "1").is_err());
         }
+    }
+
+    #[test]
+    fn a_published_set_carries_only_a_positive_window_of_at_most_thirty_days() {
+        let window = |issued_at: &str, expires: &str| {
+            signed(
+                &valid()
+                    .replace(
+                        &format!("issued_at={ISSUED_AT}"),
+                        &format!("issued_at={issued_at}"),
+                    )
+                    .replace(&format!("expires={EXPIRES}"), &format!("expires={expires}")),
+                "1",
+            )
+        };
+        assert!(window("1", &(1 + VALIDITY_SECONDS).to_string()).is_ok());
+        let issued_at = ISSUED_AT.to_string();
+        for (issued_at, expires) in [
+            // Inverted, empty, and one second longer than the longest window.
+            (issued_at.clone(), (ISSUED_AT - 1).to_string()),
+            (issued_at.clone(), issued_at.clone()),
+            (issued_at.clone(), (EXPIRES + 1).to_string()),
+            // Not a positive decimal without leading zeros, or beyond u64.
+            ("0".to_owned(), "1".to_owned()),
+            (format!("0{ISSUED_AT}"), EXPIRES.to_string()),
+            (format!("+{ISSUED_AT}"), EXPIRES.to_string()),
+            (issued_at.clone(), "18446744073709551616".to_owned()),
+            (issued_at.clone(), "soon".to_owned()),
+        ] {
+            assert_eq!(
+                window(&issued_at, &expires),
+                Err("the Local release validity window is invalid".into()),
+                "accepted: {issued_at} {expires}"
+            );
+        }
+        for missing in ["issued_at", "expires"] {
+            let document = valid()
+                .split_inclusive('\n')
+                .filter(|line| !line.starts_with(missing))
+                .collect::<String>();
+            assert!(
+                signed(&document, "1").is_err(),
+                "accepted without {missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_is_current_only_inside_its_window_widened_by_the_clock_tolerance() {
+        let release = signed(&valid(), "1").unwrap();
+        for now in [
+            ISSUED_AT - CLOCK_SKEW_SECONDS,
+            ISSUED_AT,
+            EXPIRES - 1,
+            EXPIRES + CLOCK_SKEW_SECONDS - 1,
+        ] {
+            assert_eq!(require_current(&release, now), Ok(()), "refused at {now}");
+        }
+        assert_eq!(
+            require_current(&release, ISSUED_AT - CLOCK_SKEW_SECONDS - 1),
+            Err("the Local release ordinal 42 was issued at 2026-10-09 00:00 UTC, later than this host's clock; nothing was applied. Correct the host clock and retry".into())
+        );
+        for now in [EXPIRES + CLOCK_SKEW_SECONDS, u64::MAX] {
+            assert_eq!(
+                require_current(&release, now),
+                Err("the Local release ordinal 42 expired at 2026-11-08 00:00 UTC; nothing was applied. Correct this host's clock if it is wrong, or retry after the release channel is renewed".into())
+            );
+        }
+        // A host clock before 1970 reads as zero, which is earlier than every window.
+        assert!(require_current(&release, 0).is_err());
+        let developer = unsigned(&developer_ref(), &developer(), "1").unwrap();
+        assert_eq!(
+            require_current(&developer, ISSUED_AT),
+            Err("the Local release carries no validity window".into())
+        );
+    }
+
+    #[test]
+    fn utc_names_the_civil_minute() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(951_825_599), "2000-02-29 11:59 UTC");
+        assert_eq!(utc(4_107_542_399), "2100-02-28 23:59 UTC");
+        assert_eq!(utc(4_107_542_400), "2100-03-01 00:00 UTC");
     }
 
     #[test]

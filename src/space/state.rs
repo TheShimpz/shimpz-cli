@@ -567,6 +567,10 @@ mod tests {
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
                 state_epoch: 1,
+                validity: Some(crate::space::release::Validity {
+                    issued_at: 1,
+                    expires: 2,
+                }),
             },
         }
     }
@@ -576,6 +580,7 @@ mod tests {
         let mut metadata = release().metadata;
         metadata.team = format!("localhost/shimpz-team-local@sha256:{}", "c".repeat(64));
         metadata.cli_macos_arm64_sha256 = None;
+        metadata.validity = None;
         ResolvedRelease {
             reference: format!(
                 "{}@sha256:{}",

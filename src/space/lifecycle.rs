@@ -534,6 +534,11 @@ impl Context {
         output::progress(UPDATE_PROGRESS);
         let release = self.resolve(None)?;
         validate_forward_release(&release, Some(&installed))?;
+        // An unchanged `stable` whose window expired changes nothing, but an explicit update reports it: a channel
+        // nobody renews may be frozen.
+        if release::valid_published_release_ref(&release.reference) {
+            release::require_current(&release.metadata, poll::now())?;
+        }
         let selected_failed = state::failed_release_matches(&self.paths, &release.reference)?;
         let decision = update_decision(&installed, &release, stopped, selected_failed);
         if let Some(outcome) = run_update_effect(decision, || {
@@ -2325,16 +2330,20 @@ fn validate_forward_release(
     release: &ResolvedRelease,
     installed: Option<&Installed>,
 ) -> Result<(), String> {
-    let Some(installed) = installed else {
-        return Ok(());
-    };
-    if release::valid_developer_release_ref(&release.reference) || installed.developer() {
+    if release::valid_developer_release_ref(&release.reference) {
         return Ok(());
     }
-    let same_reference = release.reference == installed.release_ref;
-    let same_ordinal = release.metadata.ordinal == installed.ordinal;
-    if release.metadata.ordinal < installed.ordinal || same_reference != same_ordinal {
-        return Err("the Local release channel moved backward or became ambiguous".into());
+    if let Some(installed) = installed.filter(|installed| !installed.developer()) {
+        let same_reference = release.reference == installed.release_ref;
+        let same_ordinal = release.metadata.ordinal == installed.ordinal;
+        if release.metadata.ordinal < installed.ordinal || same_reference != same_ordinal {
+            return Err("the Local release channel moved backward or became ambiguous".into());
+        }
+    }
+    // Only a change is judged by the signed validity window: the installed release keeps starting, repairing, and
+    // rolling back whatever its window says (ADR-0103, amended 2026-10-09).
+    if installed.is_none_or(|installed| installed.release_ref != release.reference) {
+        release::require_current(&release.metadata, poll::now())?;
     }
     Ok(())
 }
@@ -2974,7 +2983,17 @@ mod tests {
                 brain: format!("ghcr.io/theshimpz/shimpz-brain@sha256:{HEX}"),
                 egress: format!("ghcr.io/theshimpz/shimpz-egress@sha256:{HEX}"),
                 state_epoch: 1,
+                validity: Some(current_window()),
             },
+        }
+    }
+
+    /// A validity window that holds now: issued a minute ago for the longest window.
+    fn current_window() -> release::Validity {
+        let issued_at = poll::now() - 60;
+        release::Validity {
+            issued_at,
+            expires: issued_at + release::VALIDITY_SECONDS,
         }
     }
 
@@ -2983,6 +3002,7 @@ mod tests {
         let mut metadata = release(ordinal, 'b').metadata;
         metadata.admin = format!("localhost/shimpz-admin@sha256:{}", "e".repeat(64));
         metadata.cli_macos_arm64_sha256 = None;
+        metadata.validity = None;
         ResolvedRelease {
             reference: format!(
                 "localhost/shimpz-local-release@sha256:{}",
@@ -3037,8 +3057,14 @@ mod tests {
             Some(hash) => ("local-v2", format!("cli_macos_arm64_sha256={hash}\n")),
             None => ("local-dev-v2", String::new()),
         };
+        let window = metadata.validity.map_or_else(String::new, |validity| {
+            format!(
+                "issued_at={}\nexpires={}\n",
+                validity.issued_at, validity.expires
+            )
+        });
         format!(
-            "schema={schema}\nordinal={}\numbrella_revision={}\ncli_revision={}\ncli_linux_amd64_sha256={}\n{macos}admin={}\nteam={}\nbrain={}\negress={}\n",
+            "schema={schema}\nordinal={}\numbrella_revision={}\ncli_revision={}\ncli_linux_amd64_sha256={}\n{macos}admin={}\nteam={}\nbrain={}\negress={}\n{window}",
             metadata.ordinal,
             metadata.umbrella_revision,
             metadata.cli_revision,
@@ -4265,6 +4291,48 @@ mod tests {
                 .with_extension("previous")
                 .exists()
         );
+    }
+
+    #[test]
+    fn only_a_change_is_judged_by_the_signed_validity_window() {
+        let window = |mut release: ResolvedRelease, issued_at: u64, expires: u64| {
+            release.metadata.validity = Some(release::Validity { issued_at, expires });
+            release
+        };
+        let later = poll::now() + 3_600;
+        let installed = installed_from(&release(2, 'b'));
+        let developer_installed = installed_from(&developer(9, '1'));
+        // The installed release keeps starting, repairing, and rolling back after its window expired.
+        assert!(validate_forward_release(&window(release(2, 'b'), 1, 2), Some(&installed)).is_ok());
+        // A fresh install, a forward update, and the return from a developer release need a current window.
+        for (candidate, installed) in [
+            (window(release(3, 'c'), 1, 2), None),
+            (window(release(3, 'c'), 1, 2), Some(&installed)),
+            (window(release(1, 'a'), 1, 2), Some(&developer_installed)),
+        ] {
+            let refusal = validate_forward_release(&candidate, installed).unwrap_err();
+            assert!(
+                refusal.contains("expired at 1970-01-01 00:00 UTC"),
+                "{refusal}"
+            );
+        }
+        let refusal = validate_forward_release(
+            &window(release(3, 'c'), later, later + 60),
+            Some(&installed),
+        )
+        .unwrap_err();
+        assert!(
+            refusal.contains("later than this host's clock"),
+            "{refusal}"
+        );
+        // A backward or ambiguous channel is refused before its window is read.
+        assert_eq!(
+            validate_forward_release(&window(release(1, 'a'), 1, 2), Some(&installed)),
+            Err("the Local release channel moved backward or became ambiguous".into())
+        );
+        // A developer release carries no window, and a current one admits the change.
+        assert!(validate_forward_release(&developer(9, '1'), None).is_ok());
+        assert!(validate_forward_release(&release(3, 'c'), Some(&installed)).is_ok());
     }
 
     #[test]
