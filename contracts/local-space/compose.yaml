@@ -281,7 +281,7 @@ services:
       com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       com.shimpz.local.kind: assistant-release
     environment:
-      SHIMPZ_EGRESS_ALLOW: developers.shimpz.com,ghcr.io,tuf-repo-cdn.sigstore.dev,rekor.sigstore.dev,pkg-containers.githubusercontent.com
+      SHIMPZ_EGRESS_ALLOW: developers.shimpz.com,ghcr.io,tuf-repo-cdn.sigstore.dev,pkg-containers.githubusercontent.com
       SHIMPZ_EGRESS_AUDIT_LOG: /var/log/assistant-release/audit.jsonl
       SHIMPZ_EGRESS_MAX_CONCURRENCY: "16"
       SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "4"
