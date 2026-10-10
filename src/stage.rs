@@ -71,7 +71,7 @@ const MAX_CONTRACT_BYTES: usize = 524_288;
 /// Final-image files are immutable and root-owned, exactly as Team admits them.
 const FINAL_FILE_MODE: u32 = 0o444;
 
-const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
+const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS build
 
 WORKDIR /opt/shimpz
@@ -99,7 +99,7 @@ RUN --network=none /opt/shimpz/runtime/bin/python3.14 -m shimpz._bridge contract
     && find /opt/shimpz -path /opt/shimpz/runtime -prune -o \
         -type f -exec chmod 0444 {} +
 
-FROM gcr.io/distroless/python3-debian13:nonroot@sha256:0e52dfee02b1aba142e77b004f6ea11210b79456b51f10d70e9bd631cbc21d98
+FROM gcr.io/distroless/python3-debian13:nonroot@sha256:83aa8d4f74a4d7f7cf2d472054139bef71a927b76c680c0f2e1021d6b1d6d732
 
 COPY --from=build /usr/local/bin/python3.14 /usr/local/bin/python3.14
 COPY --from=build /usr/local/bin/python3 /usr/local/bin/python3
