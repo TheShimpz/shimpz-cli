@@ -23,6 +23,7 @@ mod private_file;
 mod provider;
 mod publish;
 mod python;
+mod route;
 mod snapshot_files;
 mod snapshot_lock;
 mod source_package;

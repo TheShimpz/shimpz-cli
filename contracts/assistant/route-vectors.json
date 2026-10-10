@@ -1,0 +1,1258 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "exact literal routes",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/search"
+        },
+        {
+          "method": "POST",
+          "path": "/contents"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "one wildcard segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/*/insights"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "one path under two methods",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v23.0/*/messages"
+        },
+        {
+          "method": "PUT",
+          "path": "/v23.0/*/messages"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "every closed method",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items"
+        },
+        {
+          "method": "HEAD",
+          "path": "/v1/items"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/items"
+        },
+        {
+          "method": "PUT",
+          "path": "/v1/items"
+        },
+        {
+          "method": "PATCH",
+          "path": "/v1/items"
+        },
+        {
+          "method": "DELETE",
+          "path": "/v1/items"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "selector with an encoded value",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/me/accounts",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2Cname"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "eight selectors of sixteen values",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "s0",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s1",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s2",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s3",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s4",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s5",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s6",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            },
+            {
+              "name": "s7",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "thirty-two routes",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items0"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items2"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items3"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items4"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items5"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items6"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items7"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items8"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items9"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items10"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items11"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items12"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items13"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items14"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items15"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items16"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items17"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items18"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items19"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items20"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items21"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items22"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items23"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items24"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items25"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items26"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items27"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items28"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items29"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items30"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items31"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "literal of sixty-four characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "path of 512 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "selector value of 256 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "region",
+              "values": [
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "no routes",
+      "routes": [],
+      "valid": false
+    },
+    {
+      "name": "routes not a list",
+      "routes": {
+        "method": "GET",
+        "path": "/v1/items"
+      },
+      "valid": false
+    },
+    {
+      "name": "thirty-three routes",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items0"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items2"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items3"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items4"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items5"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items6"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items7"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items8"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items9"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items10"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items11"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items12"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items13"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items14"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items15"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items16"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items17"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items18"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items19"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items20"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items21"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items22"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items23"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items24"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items25"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items26"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items27"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items28"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items29"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items30"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items31"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items32"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "duplicate method and path",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "region",
+              "values": [
+                "eu"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "route not an object",
+      "routes": [
+        "GET /v1/items"
+      ],
+      "valid": false
+    },
+    {
+      "name": "lowercase method",
+      "routes": [
+        {
+          "method": "get",
+          "path": "/v1/items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "method outside the closed set",
+      "routes": [
+        {
+          "method": "TRACE",
+          "path": "/v1/items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "unknown route member",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "host": "api.example.org"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "route without a path",
+      "routes": [
+        {
+          "method": "GET"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "path not a string",
+      "routes": [
+        {
+          "method": "GET",
+          "path": [
+            "v1",
+            "items"
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "relative path",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "v1/items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "path with a trailing line feed",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items\n"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "root path",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "trailing slash",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items/"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "empty segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1//items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "dot segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/./items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "dot-dot segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/../items"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "percent-encoded segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/it%65ms"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "partial wildcard segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/item*"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "double wildcard segment",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/**"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "colon in a segment",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v1/items:batchGet"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "literal of sixty-five characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "path over 512 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: OAuth exchange",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v26.0/oauth/access_token"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: token debugging",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/debug_token"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: API keys",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v1/organization/api_keys"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: camel-case access token",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v1/generateAccessToken"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: authorizations",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/authorizations"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: client secrets",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v1/realtime/client-secrets"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: uppercase tokens",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/user/Tokens"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: credentials",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/credentials"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "credential path: password reset",
+      "routes": [
+        {
+          "method": "POST",
+          "path": "/v1/password"
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "empty selector list",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": []
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "nine selectors",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "s0",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s1",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s2",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s3",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s4",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s5",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s6",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s7",
+              "values": [
+                "v"
+              ]
+            },
+            {
+              "name": "s8",
+              "values": [
+                "v"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector names differing only in case",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id"
+              ]
+            },
+            {
+              "name": "Fields",
+              "values": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector not an object",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            "fields=id"
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "unknown selector member",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id"
+              ],
+              "default": "id"
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector name not a string",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": 7,
+              "values": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector name with a reserved character",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fi%65lds",
+              "values": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector without values",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": []
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector values not a list",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": "id"
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "seventeen selector values",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "v0",
+                "v1",
+                "v2",
+                "v3",
+                "v4",
+                "v5",
+                "v6",
+                "v7",
+                "v8",
+                "v9",
+                "v10",
+                "v11",
+                "v12",
+                "v13",
+                "v14",
+                "v15",
+                "v16"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "duplicate selector values",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id",
+                "id"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector value not a string",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                1
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector value with a raw reserved character",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id,name"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector value with lowercase percent hexadecimal",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2cname"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "empty selector value",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                ""
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector value ending inside a percent triplet",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "fields",
+              "values": [
+                "id%2"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    },
+    {
+      "name": "selector value over 256 characters",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/v1/items",
+          "query": [
+            {
+              "name": "region",
+              "values": [
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              ]
+            }
+          ]
+        }
+      ],
+      "valid": false
+    }
+  ]
+}

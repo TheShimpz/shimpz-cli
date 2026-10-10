@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
-use crate::identifier;
+use crate::{identifier, route};
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct PublicationIdentity {
@@ -104,6 +104,9 @@ impl PublicationIdentity {
         validate_description(description.as_ref())?;
         validate_links(links.as_ref())?;
         validate_stored_input_help(&stored_inputs)?;
+        for (id, declaration) in &stored_inputs {
+            validate_stored_input_routes(id, declaration.get("routes"))?;
+        }
         Ok(identity)
     }
 }
@@ -157,6 +160,54 @@ fn validate_stored_input_help(stored_inputs: &BTreeMap<String, toml::Value>) -> 
         }
     }
     Ok(())
+}
+
+/// Every Stored Input names the only provider endpoints on its host that ever receive its value, as the Developers
+/// route grammar admits them (ADR-0106 amendment of 2026-10-09).
+pub(crate) fn validate_stored_input_routes(
+    id: &str,
+    routes: Option<&toml::Value>,
+) -> Result<(), String> {
+    let name = if identifier::declared(id) {
+        format!("[stored_inputs.{id}]")
+    } else {
+        "[stored_inputs]".to_owned()
+    };
+    let Some(routes) = routes else {
+        return Err(format!(
+            "Assistant manifest is missing {name}.routes: declare each provider endpoint that receives this secret as \
+             {{ method = \"GET\", path = \"/v1/items\" }}, with `*` for exactly one path segment"
+        ));
+    };
+    let reason = serde_json::to_value(routes).map_or(Some("routes_invalid"), |routes| {
+        route::routes_error(&routes)
+    });
+    let Some(reason) = reason else {
+        return Ok(());
+    };
+    let detail = match reason {
+        "routes_invalid" => "declare a list of 1 to 32 routes",
+        "route_duplicate" => "declare each method and path only once",
+        "route_path_invalid" => {
+            "write each path as `/`-prefixed segments of 1 to 64 unreserved characters, or `*` for exactly one \
+             segment, at most 512 characters, without empty, `.`, or `..` segments or a trailing slash"
+        }
+        "route_credential" => {
+            "a route never names an endpoint that issues, lists, or exchanges credentials (a segment containing \
+             apikey, authoriz, credential, oauth, password, secret, or token)"
+        }
+        "route_query_invalid" => {
+            "declare 1 to 8 query selectors, each a distinct unreserved `name` with 1 to 16 distinct `values` of \
+             unreserved characters or uppercase percent escapes"
+        }
+        _ => {
+            "give each route only a `method` of GET, HEAD, POST, PUT, PATCH, or DELETE, a `path`, and an optional \
+              `query`"
+        }
+    };
+    Err(format!(
+        "Assistant manifest {name}.routes is invalid: {detail}"
+    ))
 }
 
 fn validate_links(links: Option<&toml::Value>) -> Result<(), String> {
@@ -471,10 +522,78 @@ description = "Greets people by name in one short, friendly sentence."
     const HELP: &str = "Create an API key in the Exa dashboard and copy it.";
     const HELP_URL: &str = "https://dashboard.exa.ai/api-keys";
 
+    const ROUTES: &str = "routes = [{ method = \"POST\", path = \"/search\" }]";
+
     fn with_stored_input(fields: &str) -> String {
         format!(
-            "{VALID}\n[stored_inputs.exa-api-key]\nkind = \"password\"\nlabel = \"Exa API key\"\n{fields}\n"
+            "{VALID}\n[stored_inputs.exa-api-key]\nkind = \"password\"\nlabel = \"Exa API key\"\n{ROUTES}\n{fields}\n"
         )
+    }
+
+    fn with_routes(routes: &str) -> String {
+        format!(
+            "{VALID}\n[stored_inputs.exa-api-key]\nkind = \"password\"\nlabel = \"Exa API key\"\n\
+             description = \"{HELP}\"\nhelp_url = \"{HELP_URL}\"\n{routes}\n"
+        )
+    }
+
+    #[test]
+    fn admits_a_stored_input_with_its_reviewed_routes_and_selectors() {
+        for routes in [
+            "routes = [{ method = \"POST\", path = \"/search\" }, { method = \"POST\", path = \"/contents\" }]",
+            "[[stored_inputs.exa-api-key.routes]]\nmethod = \"GET\"\npath = \"/v26.0/*/insights\"\n\
+             query = [{ name = \"fields\", values = [\"id%2Cname\"] }]",
+        ] {
+            assert!(
+                PublicationIdentity::parse(with_routes(routes).as_bytes()).is_ok(),
+                "{routes}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_stored_input_without_valid_reviewed_routes() {
+        for (routes, expected) in [
+            ("", "missing [stored_inputs.exa-api-key].routes"),
+            ("routes = []", "declare a list of 1 to 32 routes"),
+            ("routes = \"/search\"", "declare a list of 1 to 32 routes"),
+            (
+                "routes = [{ method = \"get\", path = \"/search\" }]",
+                "only a `method` of GET",
+            ),
+            (
+                "routes = [{ method = \"GET\", path = \"/search/\" }]",
+                "`/`-prefixed segments",
+            ),
+            (
+                "routes = [{ method = \"POST\", path = \"/v1/api_keys\" }]",
+                "never names an endpoint that issues",
+            ),
+            (
+                "routes = [{ method = \"GET\", path = \"/a\", query = [{ name = \"f\", values = [\"a,b\"] }] }]",
+                "1 to 8 query selectors",
+            ),
+            (
+                "routes = [{ method = \"GET\", path = \"/a\" }, { method = \"GET\", path = \"/a\" }]",
+                "each method and path only once",
+            ),
+            (
+                "routes = [{ method = \"GET\", path = 1979-05-27 }]",
+                "`/`-prefixed segments",
+            ),
+        ] {
+            let error = PublicationIdentity::parse(with_routes(routes).as_bytes()).unwrap_err();
+            assert!(error.contains(expected), "{routes}: {error}");
+            assert!(
+                error.contains("[stored_inputs.exa-api-key].routes"),
+                "{error}"
+            );
+        }
+        let unnamed = super::validate_stored_input_routes("Bad Key", None).unwrap_err();
+        assert!(
+            unnamed.contains("missing [stored_inputs].routes"),
+            "{unnamed}"
+        );
     }
 
     #[test]
