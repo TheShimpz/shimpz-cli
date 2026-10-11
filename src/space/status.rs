@@ -76,12 +76,32 @@ impl Component {
     }
 }
 
+impl Observation {
+    pub(crate) const fn service(self) -> &'static str {
+        self.component.service
+    }
+
+    /// The same observation of a running component that is not attached as the graph declares it.
+    #[must_use]
+    pub(crate) const fn detached(self) -> Self {
+        match self.runtime {
+            Runtime::Running(_) => Self {
+                runtime: Runtime::Running(Health::Detached),
+                ..self
+            },
+            _ => self,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Health {
     Unavailable,
     Starting,
     Healthy,
     Unhealthy,
+    /// Running, but not attached to its declared networks or published port.
+    Detached,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -362,6 +382,9 @@ fn service_problem(observation: Observation) -> Option<String> {
         Runtime::Running(Health::Unavailable) => format!("{label} health is unavailable."),
         Runtime::Running(Health::Starting) => format!("{label} is starting."),
         Runtime::Running(Health::Unhealthy) => format!("{label} is unhealthy."),
+        Runtime::Running(Health::Detached) => {
+            format!("{label} runs without its declared network or published port.")
+        }
         Runtime::Paused => format!("{label} is paused."),
         Runtime::Restarting => format!("{label} is restarting."),
         Runtime::Removing => format!("{label} is being removed."),
@@ -647,6 +670,21 @@ mod tests {
                     .contains("  - Account setup")
             );
         }
+    }
+
+    #[test]
+    fn a_healthy_admin_running_detached_is_unavailable_and_leads_to_a_start() {
+        let mut observations = healthy_observations();
+        assert_eq!(observations[0].service(), "admin");
+        observations[0] = observations[0].detached();
+        let rendered = render(&installed(), true, false, &observations, &[]).unwrap();
+        assert!(rendered.starts_with("Shimpz Space needs attention.\nAdmin: unavailable\n"));
+        assert!(
+            rendered.contains("  - Admin runs without its declared network or published port.")
+        );
+        assert!(rendered.ends_with("\nNext: shimpz start"));
+        let stopped = stopped_observations()[0];
+        assert_eq!(stopped.detached(), stopped);
     }
 
     #[test]

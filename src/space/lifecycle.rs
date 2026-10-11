@@ -166,11 +166,25 @@ pub(crate) fn status() -> Result<String, String> {
     let graph_current = installed_graph_is_current(&paths, profile)?;
     let inventory = Inventory::inspect(&engine, &paths, profile.storage())?;
     let snapshot = runtime_snapshot(&engine, &inventory)?;
+    // A container's health check runs inside it, so a member Docker started detached can still report healthy.
+    let detached =
+        members::detached_services(&engine, &inventory.project_containers, installed.port)?;
+    let components: Vec<_> = snapshot
+        .components
+        .into_iter()
+        .map(|observation| {
+            if detached.contains(&observation.service()) {
+                observation.detached()
+            } else {
+                observation
+            }
+        })
+        .collect();
     status_report::render(
         &installed,
         graph_current,
         stopped,
-        &snapshot.components,
+        &components,
         &snapshot.assistants,
     )
 }
