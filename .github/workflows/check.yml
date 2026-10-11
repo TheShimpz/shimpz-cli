@@ -46,6 +46,7 @@ jobs:
         run: |
           cargo llvm-cov --all-features --locked --json --output-path coverage.json
           for file in \
+            src/space/attachment.rs \
             src/space/graph.rs \
             src/space/host.rs \
             src/space/release.rs \
