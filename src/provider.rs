@@ -722,7 +722,7 @@ mod tests {
     fn places_a_stored_input_only_on_calls_its_routes_admit_as_the_golden_vectors_require() {
         let vectors: Value = serde_json::from_str(MATCH_VECTORS).expect("vectors");
         let cases = vectors["cases"].as_array().expect("cases");
-        assert!(!cases.is_empty());
+        assert_ne!(*cases, [] as [Value; 0]);
         for case in cases {
             let frame = json!({"type": "fetch", "method": case["method"],
                 "url": format!("https://api.example.com{}", case["target"].as_str().expect("target")),
@@ -936,7 +936,7 @@ mod tests {
             INTEGRATION_HOSTS.map(|(provider, _)| provider)
         );
         for (_, routes) in INTEGRATION_ROUTES {
-            assert!(!routes.is_empty());
+            assert_ne!(routes, []);
             for (method, pattern) in routes {
                 assert!(METHODS.contains(method), "{method}");
                 assert!(pattern.starts_with('/'), "{pattern}");

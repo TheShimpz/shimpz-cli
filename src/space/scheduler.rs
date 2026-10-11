@@ -1202,7 +1202,7 @@ mod tests {
         let paths = Paths::under(home.path()).unwrap();
         let (result, calls) = scripted_unload(HostProfile::Linux, &paths, false, Vec::new());
         result.unwrap();
-        assert!(calls.is_empty());
+        assert_eq!(calls, [] as [String; 0]);
 
         let (result, calls) =
             scripted_unload(HostProfile::Wsl, &paths, true, vec![Ok(probe(0, ""))]);

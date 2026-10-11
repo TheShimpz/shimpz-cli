@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn production_tools_have_only_absolute_fixed_candidates() {
         for tool in TOOLS {
-            assert!(!tool.candidates().is_empty());
+            assert_ne!(tool.candidates(), [] as [&str; 0]);
             assert!(tool.candidates().iter().all(|path| path.starts_with('/')));
             assert!(tool.candidates().iter().all(|path| !path.contains("..")));
         }

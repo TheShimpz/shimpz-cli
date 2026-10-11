@@ -4841,7 +4841,9 @@ mod tests {
     fn hex_bytes(value: &str) -> Vec<u8> {
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
@@ -6105,7 +6107,10 @@ mod tests {
             snapshot.components,
             components.map(|component| status_report::observe(component, None).unwrap())
         );
-        assert!(snapshot.assistants.is_empty());
+        assert_eq!(
+            snapshot.assistants,
+            [] as [status_report::AssistantObservation; 0]
+        );
     }
 
     #[cfg(unix)]

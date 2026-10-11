@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn declared_routes_follow_the_developers_golden_vectors() {
         let cases = cases(ROUTE_VECTORS);
-        assert!(!cases.is_empty());
+        assert_ne!(cases, [] as [Value; 0]);
         for case in cases {
             let valid = case["valid"].as_bool().expect("valid");
             assert_eq!(
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn calls_match_routes_as_the_developers_golden_vectors_require() {
         let cases = cases(MATCH_VECTORS);
-        assert!(!cases.is_empty());
+        assert_ne!(cases, [] as [Value; 0]);
         for case in cases {
             let valid = case["valid"].as_bool().expect("valid");
             let error = call_error(
