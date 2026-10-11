@@ -49,6 +49,11 @@ tar = "0.4"
 name = "shimpz"
 path = "src/main.rs"
 
+# Development and test builds keep only line tables: backtraces and panics still name file:line, while full variable
+# debug info, which nothing here reads, no longer slows every link and grows the build cache.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 codegen-units = 1
 lto = "fat"
