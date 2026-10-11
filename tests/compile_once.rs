@@ -10,12 +10,9 @@ use std::process::Command;
 
 #[test]
 fn compiles_requirements_once_per_action_run() {
-    let directory =
-        std::env::temp_dir().join(format!("shimpz-compile-once-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).unwrap();
-    let log = directory.join("uv.log");
-    let shim = directory.join("uv");
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("uv.log");
+    let shim = directory.path().join("uv");
     let script = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "uv 0.11.32"

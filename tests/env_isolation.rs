@@ -15,9 +15,8 @@ const ICON: &str = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3B
 
 #[test]
 fn action_subprocess_cannot_read_integration_or_ambient_secrets() {
-    let dir = std::env::temp_dir().join(format!("shimpz-envtest-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let dir = temporary.path();
     let dump = dir.join("child-env.txt");
     let fake_uv = dir.join("uv");
     let script = format!(

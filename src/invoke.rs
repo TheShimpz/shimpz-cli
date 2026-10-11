@@ -316,11 +316,8 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let directory =
-            std::env::temp_dir().join(format!("shimpz-input-fifo-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        let fifo = directory.join("input");
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("input");
         assert!(
             std::process::Command::new("mkfifo")
                 .arg(&fifo)

@@ -74,10 +74,9 @@ fn trusted_environment(root: &Path) -> PathBuf {
 
 #[test]
 fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
-    let root = std::env::temp_dir().join(format!("shimpz-bridge-isolation-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let python = trusted_environment(&root);
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let python = trusted_environment(root);
     let project = root.join("assistant");
     copy_fixture(&project);
     let sentinel = root.join("shadow-executed");
@@ -112,7 +111,6 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let executed = sentinel.exists();
     let bytecode = project.join("actions/__pycache__").exists();
-    let _ = fs::remove_dir_all(&root);
     assert!(!executed, "the project's shimpz/ package ran: {stderr}");
     assert!(!bytecode, "the bridge wrote bytecode into the project");
     // The trusted bridge answered with a valid catalog, so staging built its language pack and asked the same

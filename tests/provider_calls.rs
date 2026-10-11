@@ -9,15 +9,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use tempfile::TempDir;
+
 /// A fake `uv` whose `invoke` records its invocation line, asks for one provider call to `url`, and returns Team's
 /// reply as its result, or fails after writing the invocation to stderr.
-fn fake_uv(name: &str, url: &str, fail_invocation: bool) -> (PathBuf, PathBuf) {
-    let directory =
-        std::env::temp_dir().join(format!("shimpz-provider-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).unwrap();
-    let capture = directory.join("invoke-stdin.json");
-    let shim = directory.join("uv");
+fn fake_uv(url: &str, fail_invocation: bool) -> (TempDir, PathBuf, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let capture = directory.path().join("invoke-stdin.json");
+    let shim = directory.path().join("uv");
     let script = format!(
         r#"#!/bin/sh
 SHIMPZ_INVOKE_STDIN='{capture}'
@@ -54,7 +53,7 @@ exit 1
         url = url.replace('%', "%%"),
     );
     fake_tool::write(&shim, script);
-    (shim, capture)
+    (directory, shim, capture)
 }
 
 fn run_report(shim: &Path, token: Option<&str>) -> Output {
@@ -81,7 +80,7 @@ fn run_report(shim: &Path, token: Option<&str>) -> Output {
 
 #[test]
 fn the_invocation_carries_no_credential_and_an_undeclared_host_is_refused() {
-    let (shim, capture) = fake_uv("undeclared", "https://evil.example/collect", false);
+    let (_directory, shim, capture) = fake_uv("https://evil.example/collect", false);
     let output = run_report(&shim, Some("integration-secret"));
     assert!(
         output.status.success(),
@@ -99,11 +98,7 @@ fn the_invocation_carries_no_credential_and_an_undeclared_host_is_refused() {
 
 #[test]
 fn a_call_to_the_provider_host_without_its_token_is_credential_missing() {
-    let (shim, _capture) = fake_uv(
-        "missing",
-        "https://api.cloudflare.com/client/v4/zones",
-        false,
-    );
+    let (_directory, shim, _capture) = fake_uv("https://api.cloudflare.com/client/v4/zones", false);
     let output = run_report(&shim, None);
     assert!(output.status.success());
     assert_eq!(
@@ -114,7 +109,7 @@ fn a_call_to_the_provider_host_without_its_token_is_credential_missing() {
 
 #[test]
 fn discards_private_invocation_stderr_on_failure() {
-    let (shim, _capture) = fake_uv("private-failure", "https://evil.example/", true);
+    let (_directory, shim, _capture) = fake_uv("https://evil.example/", true);
 
     let output = run_report(&shim, Some("integration-secret"));
 
@@ -126,17 +121,11 @@ fn discards_private_invocation_stderr_on_failure() {
 
 #[test]
 fn a_call_outside_the_integrations_reviewed_routes_is_refused_with_its_token_set() {
-    for (name, url) in [
-        (
-            "token-route",
-            "https://api.cloudflare.com/client/v4/user/tokens/verify",
-        ),
-        (
-            "encoded-route",
-            "https://api.cloudflare.com/client/v4/zones/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/%2e%2e/%2e%2e/user/tokens",
-        ),
+    for url in [
+        "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        "https://api.cloudflare.com/client/v4/zones/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/%2e%2e/%2e%2e/user/tokens",
     ] {
-        let (shim, _capture) = fake_uv(name, url, false);
+        let (_directory, shim, _capture) = fake_uv(url, false);
         let output = run_report(&shim, Some("integration-secret"));
         assert!(output.status.success(), "{url}");
         assert_eq!(
