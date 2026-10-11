@@ -1,5 +1,7 @@
 //! Complete Local Space lifecycle.
 
+#[cfg(unix)]
+mod attachment;
 pub(crate) mod command;
 #[cfg(unix)]
 pub(crate) mod deploy;
