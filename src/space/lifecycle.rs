@@ -366,6 +366,7 @@ impl Context {
     }
 
     fn install(&self, exact_release: Option<&str>, candidate: bool) -> Result<String, String> {
+        self.preflight()?;
         let marker = self.paths.marker_is_current()?;
         if !marker {
             adopt_unmarked_home(&self.paths)?;
@@ -422,6 +423,29 @@ impl Context {
             output::warning(recommendation);
         }
         self.apply(&release, installed.as_ref(), false, false)
+    }
+
+    /// Measure what the install preflight judges (`host::preflight`) before anything is downloaded or created, and
+    /// show its warnings.
+    fn preflight(&self) -> Result<(), String> {
+        let measure = |path: &Path| {
+            let device = fs::metadata(path).ok()?.dev();
+            let stat = rustix::fs::statvfs(path).ok()?;
+            Some(host::FreeSpace {
+                device,
+                available: stat.f_bavail.saturating_mul(stat.f_frsize),
+            })
+        };
+        let images = self.engine.data_root.as_deref().and_then(measure);
+        let mut storage = vec![(host::Storage::DockerImages, images)];
+        if self.profile == HostProfile::Linux {
+            let data = host::nearest_existing(&self.paths.pool_image).and_then(measure);
+            storage.push((host::Storage::SpaceData, data));
+        }
+        for warning in host::preflight(self.engine.memory, &storage)? {
+            output::warning(&warning);
+        }
+        Ok(())
     }
 
     /// Resolve the `stable` channel or one exact release. A developer release is admitted only from this host's

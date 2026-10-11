@@ -220,6 +220,11 @@ pub(crate) struct Engine {
     docker: PathBuf,
     pub(crate) platform: &'static str,
     pub(crate) cpuset: String,
+    /// The memory Docker reports for its containers, when it reports a positive amount.
+    pub(crate) memory: Option<u64>,
+    /// Docker's data root, only where it positively holds the images on this host's own filesystem: a native Linux
+    /// engine with a classic storage driver.
+    pub(crate) data_root: Option<PathBuf>,
 }
 
 /// A started release status helper waiting for its document. It writes nothing unless committed: an abandoned
@@ -336,7 +341,7 @@ impl Engine {
         let docker = Tool::Docker.resolve()?;
         validate_endpoint(&docker, profile, paths)?;
         // The three engine observations are independent, so they run at once and are judged in this order.
-        let (compose, daemon, processors) = thread::scope(|scope| {
+        let (compose, daemon, info) = thread::scope(|scope| {
             let compose = scope.spawn(|| output(&docker, ["compose", "version", "--short"]));
             // `docker version` fails unless the daemon answers, so one call proves it reachable and reports its
             // versions, including the runc of its default runtime.
@@ -350,13 +355,22 @@ impl Engine {
                     ],
                 )
             });
-            let processors = scope.spawn(|| output(&docker, ["info", "--format", "{{.NCPU}}"]));
+            let info = scope.spawn(|| {
+                output(
+                    &docker,
+                    [
+                        "info",
+                        "--format",
+                        "{{.NCPU}}|{{.MemTotal}}|{{.OperatingSystem}}|{{json .DriverStatus}}|{{.DockerRootDir}}",
+                    ],
+                )
+            });
             let joined = |handle: thread::ScopedJoinHandle<'_, Result<String, String>>| {
                 handle
                     .join()
                     .unwrap_or_else(|_| Err("the Docker engine check failed".into()))
             };
-            (joined(compose), joined(daemon), joined(processors))
+            (joined(compose), joined(daemon), joined(info))
         });
         let compose = compose.map_err(|error| {
             format!(
@@ -369,10 +383,25 @@ impl Engine {
             )
         })?;
         require_engine_versions(&daemon, &compose)?;
-        let processors = processors?.trim().parse::<usize>().ok();
+        let info = info?;
+        let [processors, memory, system, driver, data_root] =
+            info.trim().splitn(5, '|').collect::<Vec<_>>()[..]
+        else {
+            return Err("Docker returned invalid engine information".into());
+        };
         let processors = processors
+            .parse::<usize>()
+            .ok()
             .filter(|value| *value > 0)
             .ok_or_else(|| "Docker returned an invalid CPU count".to_owned())?;
+        let memory = memory.parse::<u64>().ok().filter(|value| *value > 0);
+        // The containerd image store keeps images in containerd's own root, which Docker does not report.
+        let data_root = Some(PathBuf::from(data_root)).filter(|root| {
+            profile == HostProfile::Linux
+                && system != "Docker Desktop"
+                && !driver.contains("io.containerd.snapshotter")
+                && root.is_absolute()
+        });
         let selected = (processors / 2).max(1);
         let cpuset = if selected == 1 {
             "0".into()
@@ -387,6 +416,8 @@ impl Engine {
             docker,
             platform,
             cpuset,
+            memory,
+            data_root,
         })
     }
 
@@ -1177,6 +1208,8 @@ impl Engine {
             docker,
             platform: "linux/amd64",
             cpuset: "0".into(),
+            memory: None,
+            data_root: None,
         }
     }
 
@@ -2109,9 +2142,8 @@ mod tests {
         );
 
         let refused = Engine {
-            docker: PathBuf::from("/usr/bin/false"),
             platform: "linux/amd64",
-            cpuset: "0".into(),
+            ..Engine::with_docker(PathBuf::from("/usr/bin/false"))
         };
         assert_eq!(refused.stop_containers(&[]), Ok(()));
         assert_eq!(
@@ -2139,9 +2171,8 @@ mod tests {
         );
         let _ = fs::remove_file(&calls);
         let engine = Engine {
-            docker: command,
             platform: "linux/amd64",
-            cpuset: "0".into(),
+            ..Engine::with_docker(command)
         };
         for (output, code, expected) in [
             ("busy\n", "0", TeamActivity::Busy),
@@ -2179,9 +2210,8 @@ mod tests {
         );
         let _ = fs::remove_file(&calls);
         let engine = Engine {
-            docker: command,
             platform: "linux/arm64",
-            cpuset: "0".into(),
+            ..Engine::with_docker(command)
         };
         let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
 
@@ -2206,9 +2236,8 @@ mod tests {
     #[test]
     fn macos_controller_names_a_failed_socket_identity_probe() {
         let engine = Engine {
-            docker: PathBuf::from("/usr/bin/false"),
             platform: "linux/arm64",
-            cpuset: "0".into(),
+            ..Engine::with_docker(PathBuf::from("/usr/bin/false"))
         };
         let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
 
@@ -2229,9 +2258,8 @@ mod tests {
         let command = temporary.path().join("docker");
         crate::fake_tool::write(&command, "#!/bin/sh\nprintf 'not-a-group\\n'\n");
         let engine = Engine {
-            docker: command,
             platform: "linux/arm64",
-            cpuset: "0".into(),
+            ..Engine::with_docker(command)
         };
         let image = format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}");
 
@@ -2343,9 +2371,8 @@ mod tests {
             );
             let _ = fs::remove_file(&calls);
             let engine = Engine {
-                docker: command,
                 platform: "linux/amd64",
-                cpuset: "0".into(),
+                ..Engine::with_docker(command)
             };
 
             let (status, _) = engine
