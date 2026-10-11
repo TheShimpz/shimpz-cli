@@ -151,7 +151,7 @@ const ACCOUNT_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// State, exit code, Compose project, service and configuration hash, image, and the capability mount's source.
 const INIT_RECORD_FORMAT: &str = "{{.State.Status}}|{{.State.ExitCode}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{index .Config.Labels \"com.docker.compose.config-hash\"}}|{{.Config.Image}}|{{range .Mounts}}{{if eq .Destination \"/run/shimpz-account-egress\"}}{{.Type}}:{{.Name}}{{end}}{{end}}";
 const SPACE_PROJECT: &str = "shimpz-space";
-const COMPOSE_UP: [&str; 9] = [
+pub(crate) const COMPOSE_UP: [&str; 9] = [
     "up",
     "-d",
     "--wait",

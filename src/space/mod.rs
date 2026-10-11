@@ -49,6 +49,8 @@ pub(crate) mod lifecycle {
         Err("Local Space on Windows must run inside WSL2 with systemd".into())
     }
 }
+#[cfg(unix)]
+pub(crate) mod members;
 pub(crate) mod paths;
 #[cfg(unix)]
 pub(crate) mod poll;

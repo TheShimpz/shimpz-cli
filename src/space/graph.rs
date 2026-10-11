@@ -6,16 +6,83 @@ const VOLUME_NOCOPY_TOKEN: &str = "{{SHIMPZ_VOLUME_NOCOPY}}";
 
 /// The one-shot service that creates or validates the Account egress capability, then exits.
 pub(crate) const ACCOUNT_EGRESS_INIT: &str = "shimpz-account-egress-init";
+/// The container port Admin publishes, the only published port of the graph.
+pub(crate) const ADMIN_PUBLISHED_PORT: &str = "4600/tcp";
+/// The only host address Admin's published port binds.
+pub(crate) const ADMIN_PUBLISHED_HOST: &str = "127.0.0.1";
+
+/// One long-running service as the template declares it: its fixed container name, the logical keys of exactly the
+/// networks it joins, and whether it publishes Admin's port.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Member {
+    pub(crate) service: &'static str,
+    pub(crate) container: &'static str,
+    pub(crate) networks: &'static [&'static str],
+    pub(crate) publishes_admin: bool,
+}
+
 /// Every long-running service of the graph, in the template's order.
-pub(crate) const LONG_RUNNING_SERVICES: [&str; 7] = [
-    "team",
-    "shimpz-assistant-egress",
-    "shimpz-assistant-release",
-    "shimpz-account-egress",
-    "shimpz-brain-egress",
-    "brain",
-    "admin",
+pub(crate) const MEMBERS: [Member; 7] = [
+    Member {
+        service: "team",
+        container: "shimpz-team",
+        networks: &[
+            "control",
+            "brain_runtime",
+            "account_egress",
+            "assistant_release",
+            "assistant_egress",
+        ],
+        publishes_admin: false,
+    },
+    Member {
+        service: "shimpz-assistant-egress",
+        container: "shimpz-assistant-egress",
+        networks: &["assistant_egress", "assistant_egress_out"],
+        publishes_admin: false,
+    },
+    Member {
+        service: "shimpz-assistant-release",
+        container: "shimpz-assistant-release",
+        networks: &["assistant_release", "assistant_release_out"],
+        publishes_admin: false,
+    },
+    Member {
+        service: "shimpz-account-egress",
+        container: "shimpz-account-egress",
+        networks: &["account_egress", "account_egress_out"],
+        publishes_admin: false,
+    },
+    Member {
+        service: "shimpz-brain-egress",
+        container: "shimpz-brain-egress",
+        networks: &["brain_egress", "brain_egress_out"],
+        publishes_admin: false,
+    },
+    Member {
+        service: "brain",
+        container: "shimpz-brain",
+        networks: &["brain_runtime", "brain_egress"],
+        publishes_admin: false,
+    },
+    Member {
+        service: "admin",
+        container: "shimpz-admin",
+        networks: &["control", "egress"],
+        publishes_admin: true,
+    },
 ];
+
+/// Every long-running service of the graph, in the template's order.
+pub(crate) const LONG_RUNNING_SERVICES: [&str; 7] = {
+    let mut services = [""; 7];
+    let mut index = 0;
+    while index < MEMBERS.len() {
+        services[index] = MEMBERS[index].service;
+        index += 1;
+    }
+    services
+};
 
 /// Every Local Docker network and volume carries this explicit name prefix before its hyphenated logical key, so the
 /// Space never relies on Compose's default `<project>_<key>` naming.
@@ -200,6 +267,55 @@ mod tests {
             graph["services"][ACCOUNT_EGRESS_INIT]["restart"].as_str(),
             Some("no")
         );
+    }
+
+    #[test]
+    fn the_member_table_is_exactly_the_templates_names_networks_and_published_port() {
+        for profile in [StorageProfile::LinuxLuks, StorageProfile::ManagedDisk] {
+            let graph: Value = serde_norway::from_str(&render(profile)).unwrap();
+            let services = graph["services"].as_mapping().unwrap();
+            let declared: Vec<_> = services
+                .keys()
+                .map(|key| key.as_str().unwrap())
+                .filter(|service| *service != ACCOUNT_EGRESS_INIT)
+                .collect();
+            assert_eq!(declared, LONG_RUNNING_SERVICES);
+            assert_eq!(
+                graph["services"][ACCOUNT_EGRESS_INIT]["network_mode"],
+                "none"
+            );
+            assert!(
+                graph["services"][ACCOUNT_EGRESS_INIT]
+                    .get("ports")
+                    .is_none()
+            );
+            for member in MEMBERS {
+                let service = &graph["services"][member.service];
+                assert_eq!(service["container_name"], member.container);
+                let networks: Vec<_> = service["networks"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .map(|network| network.as_str().unwrap())
+                    .collect();
+                assert_eq!(networks, member.networks, "{}", member.service);
+                let ports = service.get("ports").map(|ports| {
+                    ports
+                        .as_sequence()
+                        .unwrap()
+                        .iter()
+                        .map(|port| port.as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                });
+                let published = member.publishes_admin.then(|| {
+                    vec![format!(
+                        "{ADMIN_PUBLISHED_HOST}:${{SHIMPZ_PORT:-7777}}:{}",
+                        ADMIN_PUBLISHED_PORT.strip_suffix("/tcp").unwrap()
+                    )]
+                });
+                assert_eq!(ports, published, "{}", member.service);
+            }
+        }
     }
 
     #[test]

@@ -17,9 +17,10 @@ use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
 
 use super::deploy;
-use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
+use super::docker::{COMPOSE_UP, Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
+use super::members;
 use super::paths::Paths;
 use super::poll;
 use super::release;
@@ -792,6 +793,7 @@ impl Context {
         if !started.success() {
             return Err(None);
         }
+        members::converge(&self.engine, &self.paths, candidate.port).map_err(Some)?;
         self.validate_started_storage(candidate.space_id)
             .map_err(Some)?;
         output::progress("Verifying Supervisor authentication compatibility...");
@@ -1149,7 +1151,7 @@ impl Context {
         if !confirm(&names)? {
             return Err("the corrupt Local Space was preserved; nothing changed".into());
         }
-        let admin = self.prepare_admin_for_recovery()?;
+        let admin = self.prepare_admin_for_recovery(inventory)?;
         let admin_port = match admin {
             AdminAttestation::Running { port } if admin_available(port) => Some(port),
             _ => None,
@@ -1431,21 +1433,8 @@ impl Context {
         ) {
             // A restoration that could not run, or outlived its deadline, is a failed restoration: the rollback
             // status is still recorded.
-            Ok(_) => match self.engine.compose(
-                &self.paths,
-                [
-                    "up",
-                    "-d",
-                    "--wait",
-                    "--wait-timeout",
-                    "120",
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    "--remove-orphans",
-                ],
-            ) {
-                Ok(status) => status.success(),
+            Ok(_) => match self.start_previous(installed.port) {
+                Ok(started) => started,
                 Err(error) => {
                     output::warning(&format!(
                         "the previous release could not be started: {error}"
@@ -1487,6 +1476,16 @@ impl Context {
             return Err(format!("{primary}; {}", self.disable_automatic_updates()));
         }
         Err(primary)
+    }
+
+    /// Bring the restored previous release up and prove its running members attached as declared, with Admin
+    /// published on `port`. `Ok(false)` is a start Compose already reported as failed.
+    fn start_previous(&self, port: u16) -> Result<bool, String> {
+        if !self.engine.compose(&self.paths, COMPOSE_UP)?.success() {
+            return Ok(false);
+        }
+        members::converge(&self.engine, &self.paths, port)?;
+        Ok(true)
     }
 
     /// Project the rollback status to the restored Admin, warning when it cannot receive it, and return the cause of
@@ -1537,36 +1536,24 @@ impl Context {
     fn start_admin_for_reset(&self) -> Result<(), String> {
         if state::stopped(&self.paths)? {
             output::progress("Starting the Shimpz Space for reset authorization...");
-            let started = self.engine.compose(
-                &self.paths,
-                [
-                    "up",
-                    "-d",
-                    "--wait",
-                    "--wait-timeout",
-                    "120",
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    "--remove-orphans",
-                ],
-            )?;
+            let started = self.engine.compose(&self.paths, COMPOSE_UP)?;
             if !started.success() {
                 return Err("the stopped Space could not start for reset authorization".into());
             }
         }
         self.start_container_if_present("shimpz-team")?;
-        let mut attestation = self.admin_attestation()?;
-        if attestation == AdminAttestation::Stopped {
+        if self.admin_attestation()? == AdminAttestation::Stopped {
             let status = self
                 .engine
                 .run_quiet_status("Docker Admin container start", ["start", "shimpz-admin"])?;
             if !status.success() {
                 return Err("the owned Admin container could not be started".into());
             }
-            attestation = self.admin_attestation()?;
         }
         let expected = state::read_installed(&self.paths, self.profile)?.port;
+        // The graph is current here, so a member Docker started detached is recreated before Admin is attested.
+        members::converge(&self.engine, &self.paths, expected)?;
+        let attestation = self.admin_attestation()?;
         if attestation == (AdminAttestation::Running { port: expected })
             && admin_available(expected)
         {
@@ -1575,7 +1562,10 @@ impl Context {
         Err("the Local Supervisor is unavailable; run shimpz install for bounded recovery".into())
     }
 
-    fn prepare_admin_for_recovery(&self) -> Result<AdminAttestation, String> {
+    fn prepare_admin_for_recovery(
+        &self,
+        inventory: &Inventory,
+    ) -> Result<AdminAttestation, String> {
         let mut attestation = self.admin_attestation()?;
         if attestation == AdminAttestation::Absent {
             return Ok(attestation);
@@ -1601,6 +1591,17 @@ impl Context {
                 return Ok(AdminAttestation::Stopped);
             }
             attestation = self.admin_attestation()?;
+        }
+        // The graph of a corrupt Space is untrusted, so a member Docker started detached is only reported: recovery
+        // then uses owned-resource cleanup instead of an Admin it cannot reach as declared.
+        if let AdminAttestation::Running { port } = attestation
+            && !members::detached_services(&self.engine, &inventory.project_containers, port)?
+                .is_empty()
+        {
+            output::info(
+                "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
+            );
+            return Ok(AdminAttestation::Stopped);
         }
         Ok(attestation)
     }
@@ -4057,7 +4058,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space-release-status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"$(printf '%s' \"${{5#shimpz-space-}}\" | tr - _)\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space-release-status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"$(printf '%s' \"${{5#shimpz-space-}}\" | tr - _)\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *NetworkSettings.Networks*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|true|shimpz-space-control shimpz-space-egress |{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}}]}}' '{team_id}|/shimpz-team|team|true|shimpz-space-control shimpz-space-brain-runtime shimpz-space-account-egress shimpz-space-assistant-release shimpz-space-assistant-egress |{{}}' '{brain_id}|/shimpz-brain|brain|true|shimpz-space-brain-runtime shimpz-space-brain-egress |{{}}' ;;\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 status = home.join("status.log").display(),
                 status_volume = if status_volume {
@@ -6017,7 +6018,11 @@ mod tests {
             scheduled: false,
             recreated: Cell::new(false),
         };
-        assert!(context.prepare_admin_for_recovery().is_ok());
+        assert!(
+            context
+                .prepare_admin_for_recovery(&Inventory::default())
+                .is_ok()
+        );
         let calls = fs::read_to_string(temporary.path().join("calls")).unwrap();
         assert!(
             calls.lines().any(|call| call == "start shimpz-team"),
@@ -6031,6 +6036,95 @@ mod tests {
 
     /// A fake `docker` that logs each call and answers every identifier after `--format` from `map`, whose lines
     /// start with each identifier's full 64-character id.
+    /// A running Space whose Team runs, whose Admin is attested running on `admin_port`, and whose Admin Docker
+    /// started detached until Compose recreates it; every call is logged.
+    #[cfg(unix)]
+    fn detached_admin_docker(root: &Path, admin_port: u16) -> PathBuf {
+        let command = root.join("docker");
+        let networks = "shimpz-space-control shimpz-space-egress ";
+        crate::fake_tool::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{root}/calls'\n\
+                 case \"$*\" in\n  \
+                 ps*) printf '{ADMIN_ID}\\n' ;;\n  \
+                 *NetworkSettings.Networks*) if [ -e '{root}/recreated' ]; then printf '%s\\n' '{ADMIN_ID}|/shimpz-admin|admin|true|{networks}|{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}}]}}'; else printf '%s\\n' '{ADMIN_ID}|/shimpz-admin|admin|true|shimpz-space-control |{{\"4600/tcp\":null}}'; fi ;;\n  \
+                 *PortBindings*) printf 'true|shimpz-space|admin|{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"{admin_port}\"}}]}}\\n' ;;\n  \
+                 *shimpz-team) printf 'true\\n' ;;\n  \
+                 compose*) : > '{root}/recreated' ;;\n  \
+                 *) exit 1 ;;\n\
+                 esac\n",
+                root = root.display(),
+            ),
+        );
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_recreates_an_admin_docker_started_detached_before_it_attests_admin() {
+        let home = tempfile::tempdir().unwrap();
+        // Admin attests another port than the installed one, so the outcome never probes a listener on this host.
+        let docker = detached_admin_docker(home.path(), 7778);
+        let (context, _backup) = installed_space(home.path(), docker);
+
+        assert_eq!(
+            context.start_admin_for_reset().unwrap_err(),
+            "the Local Supervisor is unavailable; run shimpz install for bounded recovery"
+        );
+        let calls = fs::read_to_string(home.path().join("calls")).unwrap();
+        let recreation = calls
+            .lines()
+            .position(|call| call.starts_with("compose "))
+            .unwrap();
+        assert!(
+            calls.lines().nth(recreation).unwrap().ends_with(
+                " up -d --wait --wait-timeout 120 --no-build --pull never --force-recreate --no-deps admin"
+            ),
+            "{calls}"
+        );
+        let last_attestation = calls
+            .lines()
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|call| call.contains("PortBindings"))
+            .unwrap();
+        assert!(recreation < last_attestation, "{calls}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_recovery_reaches_no_admin_docker_started_detached_and_recreates_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let context = Context {
+            paths: Paths::under(&home.path().join("home")).unwrap(),
+            profile: HostProfile::MacOs,
+            engine: Engine::with_docker(detached_admin_docker(home.path(), 7777)),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+        let inventory = Inventory {
+            project_containers: vec![ADMIN_ID.to_owned()],
+            ..Inventory::default()
+        };
+
+        assert_eq!(
+            context.prepare_admin_for_recovery(&inventory),
+            Ok(AdminAttestation::Stopped)
+        );
+        let calls = fs::read_to_string(home.path().join("calls")).unwrap();
+        assert!(
+            !calls.lines().any(|call| call.starts_with("compose ")),
+            "{calls}"
+        );
+        // An Admin attached as declared is handed to recovery as running.
+        fs::write(home.path().join("recreated"), "").unwrap();
+        assert_eq!(
+            context.prepare_admin_for_recovery(&inventory),
+            Ok(AdminAttestation::Running { port: 7777 })
+        );
+    }
+
     #[cfg(unix)]
     fn inspecting_docker(map: &str) -> (tempfile::TempDir, Engine) {
         let temporary = tempfile::tempdir().unwrap();
