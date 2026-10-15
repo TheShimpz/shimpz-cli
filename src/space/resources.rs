@@ -472,10 +472,7 @@ fn validate_dynamic_containers(
                 if fields[0].starts_with("/shimpz-local-")
                     && team_id::valid(fields[5])
                     && identifier::assistant_id(fields[6]) => {}
-            "assistant-egress" if fields[0] == "/shimpz-assistant-egress" => {}
-            "assistant-release" if fields[0] == "/shimpz-assistant-release" => {}
-            "brain-egress" if fields[0] == "/shimpz-brain-egress" => {}
-            "account-egress" if fields[0] == "/shimpz-account-egress" => {}
+            kind if managed_proxy(kind, fields[0]) => {}
             _ => return Err("a managed container has invalid kind or name".into()),
         }
         if fields[4] != "assistant" && !unique.insert(fields[4].to_owned()) {
@@ -483,6 +480,22 @@ fn validate_dynamic_containers(
         }
     }
     Ok(())
+}
+
+/// Whether `name` is the container of the graph's egress proxy whose kind label is `kind`: its container name
+/// without the `shimpz-` prefix.
+fn managed_proxy(kind: &str, name: &str) -> bool {
+    [
+        graph::ASSISTANT_EGRESS,
+        graph::ASSISTANT_RELEASE,
+        graph::BRAIN_EGRESS,
+        graph::ACCOUNT_EGRESS,
+    ]
+    .iter()
+    .any(|member| {
+        member.container.strip_prefix("shimpz-") == Some(kind)
+            && name.strip_prefix('/') == Some(member.container)
+    })
 }
 
 fn validate_dynamic_networks(
@@ -550,6 +563,26 @@ fn require_removed<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admits_only_a_graph_egress_proxy_under_its_own_kind() {
+        for (kind, name) in [
+            ("assistant-egress", "/shimpz-assistant-egress"),
+            ("assistant-release", "/shimpz-assistant-release"),
+            ("brain-egress", "/shimpz-brain-egress"),
+            ("account-egress", "/shimpz-account-egress"),
+        ] {
+            assert!(managed_proxy(kind, name), "{kind}");
+        }
+        for (kind, name) in [
+            ("brain-egress", "/shimpz-account-egress"),
+            ("account-egress", "shimpz-account-egress"),
+            ("team", "/shimpz-team"),
+            ("shimpz-brain-egress", "/shimpz-brain-egress"),
+        ] {
+            assert!(!managed_proxy(kind, name), "{kind} {name}");
+        }
+    }
 
     /// A fake `docker` that logs each call and answers every identifier after `--format` from a `map` file whose
     /// lines start with that identifier's full identity.
