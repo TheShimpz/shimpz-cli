@@ -1,11 +1,11 @@
-//! Owner-private files: the one admission rule, the safe open flags, and atomic replacement.
+//! Owner-private files: the safe open flags, the two admission rules, bounded record reads, and atomic replacement.
 
 #[cfg(unix)]
 use std::fs;
 use std::fs::{File, Metadata, OpenOptions};
-use std::io;
 #[cfg(unix)]
 use std::io::Write;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -42,19 +42,73 @@ pub(crate) enum Refusal {
 }
 
 /// Admit an opened file only as a regular file owned by the effective user, with no group or other permission bits
-/// and a single link.
+/// and a single link. This admits the Creator's own configuration files and locks, which a person may tighten below
+/// 0600 by hand.
 pub(crate) fn admit(metadata: &Metadata) -> Result<(), Refusal> {
-    if !metadata.file_type().is_file() {
-        return Err(Refusal::NotRegularFile);
-    }
+    regular(metadata)?;
     #[cfg(unix)]
     if metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.nlink() != 1
+        || !single_link_of(metadata, rustix::process::geteuid().as_raw())
     {
         return Err(Refusal::NotPrivate);
     }
     Ok(())
+}
+
+/// Admit an opened Local lifecycle record or lock: a regular file with a single link, like [`admit`], but owned by
+/// the real user and with exactly mode 0600. This CLI creates every such file itself with exactly that mode (through
+/// [`replace`] or [`private_open`]) for the user who runs the lifecycle, so any other mode or owner is state it did
+/// not leave and is refused rather than trusted.
+pub(crate) fn admit_record(metadata: &Metadata) -> Result<(), Refusal> {
+    regular(metadata)?;
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o777 != 0o600
+        || !single_link_of(metadata, rustix::process::getuid().as_raw())
+    {
+        return Err(Refusal::NotPrivate);
+    }
+    Ok(())
+}
+
+fn regular(metadata: &Metadata) -> Result<(), Refusal> {
+    if metadata.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(Refusal::NotRegularFile)
+    }
+}
+
+#[cfg(unix)]
+fn single_link_of(metadata: &Metadata, owner: u32) -> bool {
+    metadata.uid() == owner && metadata.nlink() == 1
+}
+
+/// Read a lifecycle record only when [`admit_record`] admits it and it holds at most `limit` bytes, or return
+/// `Ok(None)` when it is absent. It is opened through [`open_read`] and admitted through the open handle, so the checked
+/// file is the one read and no link is ever followed.
+pub(crate) fn read_record(path: &Path, limit: u64, name: &str) -> Result<Option<String>, String> {
+    let refused = || format!("{name} is not a private record");
+    let file = match open_read(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),
+        Err(error) => return Err(format!("{name} could not be opened: {error}")),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("{name} could not be inspected: {error}"))?;
+    if admit_record(&metadata).is_err() || metadata.len() > limit {
+        return Err(refused());
+    }
+    let mut document = String::new();
+    file.take(limit + 1)
+        .read_to_string(&mut document)
+        .map_err(|error| format!("{name} could not be read: {error}"))?;
+    if document.len() as u64 > limit {
+        return Err(refused());
+    }
+    Ok(Some(document))
 }
 
 /// Replace `path` with `contents` through `<path>.tmp`, created exclusively with mode 0600 and synced before the rename.
@@ -98,7 +152,7 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::os::unix::fs::PermissionsExt;
 
-    use super::{Refusal, admit, private_open, replace};
+    use super::{Refusal, admit, admit_record, private_open, read_record, replace};
 
     #[test]
     fn admits_only_a_single_link_owner_private_regular_file() {
@@ -129,6 +183,42 @@ mod tests {
             admit(&fs::metadata(directory.path()).unwrap()),
             Err(Refusal::NotRegularFile)
         );
+    }
+
+    /// A lifecycle record keeps the stricter rule: a hand-tightened mode a Creator file may have is not this CLI's.
+    #[test]
+    fn admits_a_lifecycle_record_only_with_exactly_mode_0600() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("record");
+        replace(&path, b"record\n").unwrap();
+        assert_eq!(admit_record(&fs::metadata(&path).unwrap()), Ok(()));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        assert_eq!(admit(&fs::metadata(&path).unwrap()), Ok(()));
+        assert_eq!(
+            admit_record(&fs::metadata(&path).unwrap()),
+            Err(Refusal::NotPrivate)
+        );
+    }
+
+    #[test]
+    fn reads_a_record_only_through_its_admitted_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("record");
+        let refused = Err("the record is not a private record".to_owned());
+        assert_eq!(read_record(&path, 64, "the record"), Ok(None));
+        replace(&path, b"record\n").unwrap();
+        assert_eq!(
+            read_record(&path, 64, "the record"),
+            Ok(Some("record\n".to_owned()))
+        );
+        assert_eq!(read_record(&path, 6, "the record"), refused);
+
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(read_record(&link, 64, "the record"), refused);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_record(&path, 64, "the record"), refused);
     }
 
     #[test]

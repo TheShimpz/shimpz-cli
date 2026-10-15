@@ -111,7 +111,7 @@ pub(super) fn commit_evidence(
     profile: HostProfile,
     release: &ResolvedRelease,
 ) -> CommitEvidence {
-    let installed = match state::read_private_installed(paths, profile) {
+    let installed = match state::read_installed_if_present(paths, profile) {
         Ok(Some(installed)) => installed,
         Ok(None) => return CommitEvidence::NotCommitted,
         Err(cause) => return CommitEvidence::Unknown(cause),

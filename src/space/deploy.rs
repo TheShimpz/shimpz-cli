@@ -13,7 +13,7 @@ use serde_json::json;
 use super::paths::Paths;
 use super::release;
 use super::state;
-use crate::digest;
+use crate::{digest, private_file};
 
 const MAX_REQUEST_BYTES: u64 = 256;
 
@@ -49,7 +49,7 @@ impl Outcome {
 /// Read the pending request, if any. A malformed request this user owns is removed, so it cannot block later
 /// reconciliation; anything else at that path is refused and kept.
 pub(crate) fn claim(paths: &Paths) -> Result<Option<Request>, String> {
-    let document = match state::read_private_record(
+    let document = match private_file::read_record(
         &paths.deploy_request,
         MAX_REQUEST_BYTES,
         "the deploy request",
@@ -113,7 +113,7 @@ pub(crate) fn finish(
 
 /// Remove the request only while it still holds exactly the claimed bytes.
 fn remove_if_unchanged(paths: &Paths, document: &str) -> Result<(), String> {
-    let current = state::read_private_record(
+    let current = private_file::read_record(
         &paths.deploy_request,
         MAX_REQUEST_BYTES,
         "the deploy request",

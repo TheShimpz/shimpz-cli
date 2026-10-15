@@ -5,8 +5,12 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+use crate::private_file;
+
 pub(crate) const MARKER: &str = "shimpz-space-managed-v1";
 pub(crate) const STORAGE_MARKER: &str = "shimpz-local-storage-v1";
+/// The largest installed environment this CLI writes or admits.
+pub(crate) const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
 
 #[derive(Debug)]
 pub(crate) struct Paths {
@@ -93,22 +97,20 @@ impl Paths {
     }
 
     pub(crate) fn marker_is_current(&self) -> Result<bool, String> {
-        if !self.marker.exists() {
-            return Ok(false);
+        match private_file::read_record(&self.marker, 256, "the Local Space marker")? {
+            None => Ok(false),
+            Some(value) if value == format!("{MARKER}\n") => Ok(true),
+            Some(_) => Err("the Local Space marker is not current".into()),
         }
-        let metadata = self
-            .marker
-            .symlink_metadata()
-            .map_err(|error| format!("could not inspect the Local Space marker: {error}"))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("the Local Space marker is a symbolic link".into());
-        }
-        let value = std::fs::read_to_string(&self.marker)
-            .map_err(|error| format!("could not read the Local Space marker: {error}"))?;
-        if value != format!("{MARKER}\n") {
-            return Err("the Local Space marker is not current".into());
-        }
-        Ok(true)
+    }
+
+    /// The installed environment as an admitted lifecycle record, or `Ok(None)` when it is absent.
+    pub(crate) fn environment_record(&self) -> Result<Option<String>, String> {
+        private_file::read_record(
+            &self.environment,
+            MAX_ENVIRONMENT_BYTES,
+            "the installed Local environment",
+        )
     }
 
     #[cfg(unix)]

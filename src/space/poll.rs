@@ -14,7 +14,7 @@ use ureq::Agent;
 use super::paths::Paths;
 use super::release::RELEASE_REPOSITORY;
 use super::state::{self, Installed};
-use crate::digest;
+use crate::{digest, private_file};
 
 /// Full resolution and health repair still runs this often even when the release is unchanged.
 const FULL_REPAIR_SECONDS: u64 = 30 * 60;
@@ -86,7 +86,7 @@ pub(crate) fn release_digest(release_ref: &str) -> Option<&str> {
 
 /// Read one bounded private record owned by this user; anything else is treated as absent evidence.
 fn read_private_record(path: &std::path::Path, limit: u64) -> Option<String> {
-    state::read_private_record(path, limit, "the Local record")
+    private_file::read_record(path, limit, "the Local record")
         .ok()
         .flatten()
 }
@@ -201,7 +201,7 @@ pub(crate) enum StatusRecord {
 
 /// Classify the status record for exactly `release_ref` at `ordinal`, independent of the clock.
 pub(crate) fn status_record(paths: &Paths, release_ref: &str, ordinal: u64) -> StatusRecord {
-    let document = match state::read_private_record(
+    let document = match private_file::read_record(
         &paths.status,
         MAX_STATUS_BYTES,
         "the Local release status",

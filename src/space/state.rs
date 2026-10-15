@@ -4,19 +4,18 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use super::docker::ResolvedRelease;
 use super::graph;
 use super::host::HostProfile;
 use super::id;
-use super::paths::{MARKER, Paths};
+use super::paths::{MARKER, MAX_ENVIRONMENT_BYTES, Paths};
 use super::release;
 use crate::private_file;
 
 const STOPPED: &str = "shimpz-space-stopped-v1\n";
-const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
 
 #[derive(Debug)]
 pub(crate) struct Installed {
@@ -57,7 +56,7 @@ impl Lock {
         let metadata = file
             .metadata()
             .map_err(|error| format!("could not inspect the Local lifecycle lock: {error}"))?;
-        if !exact_private(&metadata) {
+        if private_file::admit_record(&metadata).is_err() {
             return Err("the Local lifecycle lock is invalid".into());
         }
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
@@ -78,10 +77,10 @@ impl Drop for Lock {
     }
 }
 
+/// The installed environment. Every reader of Local lifecycle state admits its record through
+/// `private_file::read_record`, so a shared, redirected, or special file is refused, never followed.
 pub(crate) fn read_installed(paths: &Paths, profile: HostProfile) -> Result<Installed, String> {
-    let document = fs::read_to_string(&paths.environment)
-        .map_err(|error| format!("could not read the installed Local environment: {error}"))?;
-    parse_installed(&document, paths, profile)
+    parse_installed(&read_environment(paths)?, paths, profile)
 }
 
 /// The Admin, Team, Brain, and egress images the installed environment pins, in that order.
@@ -89,56 +88,27 @@ pub(crate) fn read_installed_images(
     paths: &Paths,
     profile: HostProfile,
 ) -> Result<[String; 4], String> {
-    let document = fs::read_to_string(&paths.environment)
-        .map_err(|error| format!("could not read the installed Local environment: {error}"))?;
+    let document = read_environment(paths)?;
     let values = parse_environment(&document)?;
     validate_environment(&values, paths, profile)?;
     Ok(IMAGE_KEYS.map(|(key, _)| values[key].to_owned()))
 }
 
-/// Read the installed environment only as an admitted private record; `Ok(None)` when it is absent.
-pub(crate) fn read_private_installed(
+/// The installed environment, or `Ok(None)` when it is absent.
+pub(crate) fn read_installed_if_present(
     paths: &Paths,
     profile: HostProfile,
 ) -> Result<Option<Installed>, String> {
-    read_private_record(
-        &paths.environment,
-        MAX_ENVIRONMENT_BYTES,
-        "the installed Local environment",
-    )?
-    .map(|document| parse_installed(&document, paths, profile))
-    .transpose()
+    paths
+        .environment_record()?
+        .map(|document| parse_installed(&document, paths, profile))
+        .transpose()
 }
 
-/// Read a record only when it is an owned, private, single-link regular file of at most `limit` bytes, or return
-/// `Ok(None)` when it is absent. It is opened without following a symlink or blocking on a special file, and admitted
-/// through the open handle, so the checked file is the one read.
-pub(crate) fn read_private_record(
-    path: &Path,
-    limit: u64,
-    name: &str,
-) -> Result<Option<String>, String> {
-    let refused = || format!("{name} is not a private record");
-    let file = match private_file::open_read(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),
-        Err(error) => return Err(format!("{name} could not be opened: {error}")),
-    };
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("{name} could not be inspected: {error}"))?;
-    if !exact_private(&metadata) || metadata.len() > limit {
-        return Err(refused());
-    }
-    let mut document = String::new();
-    file.take(limit + 1)
-        .read_to_string(&mut document)
-        .map_err(|error| format!("{name} could not be read: {error}"))?;
-    if document.len() as u64 > limit {
-        return Err(refused());
-    }
-    Ok(Some(document))
+fn read_environment(paths: &Paths) -> Result<String, String> {
+    paths
+        .environment_record()?
+        .ok_or_else(|| "the installed Local environment is absent".to_owned())
 }
 
 fn parse_installed(
@@ -158,14 +128,6 @@ fn parse_installed(
         ordinal,
         port,
     })
-}
-
-/// A regular file with one link, owned by this user, with exactly mode 0600.
-fn exact_private(metadata: &fs::Metadata) -> bool {
-    metadata.is_file()
-        && metadata.nlink() == 1
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && metadata.permissions().mode() & 0o777 == 0o600
 }
 
 fn parse_environment(document: &str) -> Result<BTreeMap<&str, &str>, String> {
@@ -324,7 +286,7 @@ pub(crate) fn write_environment(
 /// The runtime state record: its stored-format epoch and the identity of the recreation, or fresh start, that wrote
 /// it, so any recreation in between is visible even when the epoch ends where it began.
 pub(crate) fn read_state_record(paths: &Paths) -> Option<String> {
-    read_private_record(&paths.state_epoch, 64, "the Local state epoch")
+    private_file::read_record(&paths.state_epoch, 64, "the Local state epoch")
         .ok()
         .flatten()
 }
@@ -402,15 +364,14 @@ pub(crate) fn remember_failed_release(
 }
 
 pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result<bool, String> {
-    if !paths.failed_release.exists() {
+    let Some(document) = private_file::read_record(
+        &paths.failed_release,
+        256,
+        "the failed Local release record",
+    )?
+    else {
         return Ok(false);
-    }
-    let metadata = paths.failed_release.symlink_metadata().map_err(io_error)?;
-    if metadata.file_type().is_symlink() || !exact_private(&metadata) || metadata.len() > 256 {
-        return Err("the failed Local release record is invalid".into());
-    }
-    let document = fs::read_to_string(&paths.failed_release)
-        .map_err(|_| "the failed Local release record is unreadable".to_owned())?;
+    };
     let recorded = document
         .strip_prefix("release=")
         .and_then(|value| value.strip_suffix('\n'))
@@ -421,24 +382,14 @@ pub(crate) fn failed_release_matches(paths: &Paths, release_ref: &str) -> Result
 }
 
 pub(crate) fn stopped(paths: &Paths) -> Result<bool, String> {
-    let metadata = match paths.stopped.symlink_metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(io_error(error)),
+    let Some(document) = private_file::read_record(
+        &paths.stopped,
+        STOPPED.len() as u64,
+        "the Local stopped-state record",
+    )?
+    else {
+        return Ok(false);
     };
-    if metadata.file_type().is_symlink()
-        || !exact_private(&metadata)
-        || metadata.len() != STOPPED.len() as u64
-    {
-        return Err("the Local stopped-state record is invalid".into());
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&paths.stopped)
-        .map_err(io_error)?;
-    let mut document = String::with_capacity(STOPPED.len());
-    file.read_to_string(&mut document).map_err(io_error)?;
     if document != STOPPED {
         return Err("the Local stopped-state record is malformed".into());
     }
@@ -523,6 +474,8 @@ fn io_error(error: std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     use tempfile::tempdir;
 
     use super::*;
@@ -722,6 +675,34 @@ mod tests {
         }
     }
 
+    /// The installed environment and the failed release record are read only as this user's exact private records:
+    /// a shared or redirected one is refused, never followed.
+    #[test]
+    fn refuses_a_shared_or_redirected_environment_or_failed_release() {
+        use std::os::unix::fs::symlink;
+
+        let (_home, paths) = fresh_paths();
+        let release = release();
+        write_linux(&paths, &release);
+        remember_failed_release(&paths, &release).unwrap();
+        for record in [&paths.environment, &paths.failed_release] {
+            fs::set_permissions(record, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(read_installed(&paths, HostProfile::Linux).is_err());
+        assert!(read_installed_images(&paths, HostProfile::Linux).is_err());
+        assert!(failed_release_matches(&paths, &release.reference).is_err());
+
+        for record in [&paths.environment, &paths.failed_release] {
+            fs::set_permissions(record, fs::Permissions::from_mode(0o600)).unwrap();
+            let elsewhere = record.with_extension("elsewhere");
+            fs::rename(record, &elsewhere).unwrap();
+            symlink(&elsewhere, record).unwrap();
+        }
+        assert!(read_installed(&paths, HostProfile::Linux).is_err());
+        assert!(read_installed_images(&paths, HostProfile::Linux).is_err());
+        assert!(failed_release_matches(&paths, &release.reference).is_err());
+    }
+
     #[test]
     fn remembers_only_one_private_failed_release_digest() {
         let (_home, paths) = fresh_paths();
@@ -768,6 +749,7 @@ mod tests {
         let (_home, paths) = fresh_paths();
 
         fs::write(&paths.stopped, "wrong stopped record\n").unwrap();
+        fs::set_permissions(&paths.stopped, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(stopped(&paths).is_err());
         fs::remove_file(&paths.stopped).unwrap();
 

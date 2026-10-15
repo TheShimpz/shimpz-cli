@@ -281,11 +281,9 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
 }
 
 fn read_space_id(paths: &Paths) -> Result<Option<String>, String> {
-    if !paths.environment.exists() {
+    let Some(document) = paths.environment_record()? else {
         return Ok(None);
-    }
-    let document = std::fs::read_to_string(&paths.environment)
-        .map_err(|error| format!("could not read the Local environment: {error}"))?;
+    };
     let values: Vec<_> = document
         .lines()
         .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="))
