@@ -1,6 +1,6 @@
 //! Space reset, hard reset, and corrupt-Space recovery, with the owned runtime files they remove.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -416,10 +416,7 @@ fn record_retained_bin_entries(paths: &Paths, preserved: &mut PathReport) -> Res
 }
 
 fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Result<bool, String> {
-    let mut tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
+    let mut tty = confirm::terminal()
         .map_err(|_| "recovery requires an interactive terminal; nothing changed".to_owned())?;
     writeln!(tty, "The existing Local Space is corrupt: {reason}").map_err(io_error)?;
     writeln!(
@@ -433,19 +430,12 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
     if !names.is_empty() {
         writeln!(tty, "Containers: {}", names.join(", ")).map_err(io_error)?;
     }
-    loop {
-        match confirm::ask(
-            &mut tty,
-            "Permanently remove this exact owned state and install a fresh Space?",
-        )
-        .map_err(io_error)?
-        {
-            Answer::Yes => return Ok(true),
-            Answer::No => return Ok(false),
-            Answer::Invalid => return Err("the recovery answer is invalid; nothing changed".into()),
-            Answer::Other => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
-        }
-    }
+    confirm::ask_exactly(
+        &mut tty,
+        "Permanently remove this exact owned state and install a fresh Space?",
+    )
+    .map_err(io_error)?
+    .ok_or_else(|| "the recovery answer is invalid; nothing changed".into())
 }
 
 fn hard_reset_prompt(
@@ -453,10 +443,7 @@ fn hard_reset_prompt(
     names: &[String],
     preserved: &[String],
 ) -> Result<bool, String> {
-    let mut tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
+    let mut tty = confirm::terminal()
         .map_err(|_| "hard reset requires an interactive terminal; nothing changed".to_owned())?;
     writeln!(
         tty,

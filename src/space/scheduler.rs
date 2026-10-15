@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::{output, private_file};
 
 use super::command::{self, Tool};
-use super::confirm::{self, Answer};
+use super::confirm;
 use super::host::HostProfile;
 use super::paths::Paths;
 
@@ -558,7 +558,7 @@ fn read_bounded_regular(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn confirm_replace(paths: &[PathBuf]) -> Result<bool, String> {
-    let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") else {
+    let Ok(mut tty) = confirm::terminal() else {
         return Ok(false);
     };
     writeln!(
@@ -567,18 +567,12 @@ fn confirm_replace(paths: &[PathBuf]) -> Result<bool, String> {
         display_paths(paths).join(", ")
     )
     .map_err(io_error)?;
-    loop {
-        match confirm::ask(
-            &mut tty,
-            "Replace only these exact entries to enable automatic Local updates?",
-        )
-        .map_err(io_error)?
-        {
-            Answer::Yes => return Ok(true),
-            Answer::No | Answer::Invalid => return Ok(false),
-            Answer::Other => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
-        }
-    }
+    let answer = confirm::ask_exactly(
+        &mut tty,
+        "Replace only these exact entries to enable automatic Local updates?",
+    )
+    .map_err(io_error)?;
+    Ok(answer == Some(true))
 }
 
 fn write_atomic(path: &Path, value: &str) -> Result<(), String> {
