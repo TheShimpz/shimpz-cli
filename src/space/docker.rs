@@ -132,6 +132,15 @@ fn remove_helper(docker: &Path, name: &str) -> Result<(), String> {
         )),
     }
 }
+
+/// The failure of a helper whose Docker client stopped or failed, which does not prove its container ended: the
+/// container is removed and proved gone, and a failed removal joins `cause`.
+fn helper_failure(docker: &Path, name: &str, cause: String) -> String {
+    match remove_helper(docker, name) {
+        Ok(()) => cause,
+        Err(cleanup) => format!("{cause}; {cleanup}"),
+    }
+}
 const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 /// The most output one captured Docker command may return on either stream before it is stopped.
 const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -679,14 +688,12 @@ impl Engine {
             Ok(_) => "the Local runtime state could not be recreated".to_owned(),
             Err(error) => error,
         };
-        // A stopped or failed Docker client does not prove its container ended, so the deletion is ended here and
-        // proved gone before anything may start on these volumes again.
-        Err(
-            match remove_helper(&self.docker, RUNTIME_STATE_RESET_CONTAINER) {
-                Ok(()) => cause,
-                Err(cleanup) => format!("{cause}; {cleanup}"),
-            },
-        )
+        // The deletion is ended here and proved gone before anything may start on these volumes again.
+        Err(helper_failure(
+            &self.docker,
+            RUNTIME_STATE_RESET_CONTAINER,
+            cause,
+        ))
     }
 
     /// Whether this daemon's store holds exactly `reference` as a repository digest for this Space's platform.
@@ -1100,21 +1107,7 @@ impl Engine {
         if !ADMIN.admits(admin_image) || document.is_empty() || document.len() > 1_024 {
             return Err("the Local reset capability projection is invalid".into());
         }
-        self.validate_reset_capability_volume()?;
-        sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
-        let mount = format!(
-            "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
-        );
-        let name = helper_name(RESET_CAPABILITY_HELPER);
-        let arguments = reset_capability_arguments(
-            self.platform,
-            &self.cpuset,
-            &mount,
-            admin_image,
-            true,
-            reset_capability_write_script(),
-            &name,
-        );
+        let (name, arguments) = self.reset_capability_helper(admin_image, true)?;
         let mut child = capture::spawn(
             Command::new(&self.docker)
                 .args(arguments)
@@ -1141,42 +1134,51 @@ impl Engine {
             (Ok(_), Err(cause)) => cause,
             (Ok(_), Ok(())) => "the Local reset capability could not be projected to Admin".into(),
         };
-        // An unsuccessful client does not prove its container ended: it is removed and proved gone.
-        Err(match remove_helper(&self.docker, &name) {
-            Ok(()) => cause,
-            Err(cleanup) => format!("{cause}; {cleanup}"),
-        })
+        Err(helper_failure(&self.docker, &name, cause))
     }
 
     pub(crate) fn clear_reset_capability(&self, admin_image: &str) -> Result<(), String> {
         if !ADMIN.admits(admin_image) {
             return Err("the Local reset capability cleanup is invalid".into());
         }
+        let (name, arguments) = self.reset_capability_helper(admin_image, false)?;
+        let cause = match self.run_quiet_status("Docker reset capability cleanup", arguments) {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => "the Local reset capability could not be removed".to_owned(),
+            Err(cause) => cause,
+        };
+        Err(helper_failure(&self.docker, &name, cause))
+    }
+
+    /// The name and complete Docker arguments of one reset-capability helper, once the capability volume is proved
+    /// and stale helpers are swept. A `write` helper reads the capability on its input and writes it; any other
+    /// clears it.
+    fn reset_capability_helper(
+        &self,
+        admin_image: &str,
+        write: bool,
+    ) -> Result<(String, Vec<OsString>), String> {
         self.validate_reset_capability_volume()?;
         sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
         let mount = format!(
             "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
         );
         let name = helper_name(RESET_CAPABILITY_HELPER);
+        let script = if write {
+            reset_capability_write_script()
+        } else {
+            reset_capability_clear_script()
+        };
         let arguments = reset_capability_arguments(
             self.platform,
             &self.cpuset,
             &mount,
             admin_image,
-            false,
-            reset_capability_clear_script(),
+            write,
+            script,
             &name,
         );
-        let cause = match self.run_quiet_status("Docker reset capability cleanup", arguments) {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(_) => "the Local reset capability could not be removed".to_owned(),
-            Err(cause) => cause,
-        };
-        // An unsuccessful client does not prove its container ended: it is removed and proved gone.
-        Err(match remove_helper(&self.docker, &name) {
-            Ok(()) => cause,
-            Err(cleanup) => format!("{cause}; {cleanup}"),
-        })
+        Ok((name, arguments))
     }
 
     fn validate_reset_capability_volume(&self) -> Result<(), String> {
