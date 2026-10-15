@@ -30,13 +30,20 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-/// Open `path` only to read it, never following a final symbolic link, blocking on a FIFO before its type is checked,
-/// or leaking the descriptor to a child. The caller admits the file through the returned handle.
+/// Windows `FILE_FLAG_OPEN_REPARSE_POINT`: open a reparse point, such as a symbolic link, itself instead of its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// Open `path` only to read it, never following a final symbolic link (or, on Windows, a final reparse point),
+/// blocking on a FIFO before its type is checked, or leaking the descriptor to a child. The caller admits the file
+/// through the returned handle.
 pub(crate) fn open_read(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
 }
 

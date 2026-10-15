@@ -1,6 +1,6 @@
 //! Collect authored Assistant files without following links.
 
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -425,7 +425,7 @@ fn collect_entry_with_metadata(
 }
 
 fn read_unchanged_file(path: &Path, expected_size: u64) -> Result<Vec<u8>, Error> {
-    let mut file = open_without_following(path).map_err(|_| Error::new("invalid_entry"))?;
+    let mut file = crate::private_file::open_read(path).map_err(|_| Error::new("invalid_entry"))?;
     let metadata = file.metadata().map_err(|_| Error::new("invalid_entry"))?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return reject("invalid_entry");
@@ -441,25 +441,6 @@ fn read_unchanged_file(path: &Path, expected_size: u64) -> Result<Vec<u8>, Error
         return reject("invalid_entry");
     }
     Ok(bytes)
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    configure_no_follow(&mut options);
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn configure_no_follow(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NOFOLLOW);
-}
-
-#[cfg(windows)]
-fn configure_no_follow(options: &mut OpenOptions) {
-    use std::os::windows::fs::OpenOptionsExt;
-    options.custom_flags(0x0020_0000);
 }
 
 #[cfg(unix)]
