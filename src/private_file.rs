@@ -156,6 +156,12 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     fs::File::open(parent)?.sync_all()
 }
 
+/// Directory entries need no explicit sync on this platform.
+#[cfg(not(unix))]
+pub(crate) fn sync_parent(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::fs::{self, OpenOptions};

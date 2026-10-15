@@ -185,7 +185,7 @@ fn store_at(path: &Path, credentials: &Credentials) -> Result<(), String> {
         .map_err(|_| "CLI credentials cannot be stored".to_owned())?;
     file.commit()
         .map_err(|_| "CLI credentials cannot be replaced".to_owned())?;
-    sync_directory(parent)
+    sync_parent(path)
 }
 
 fn clear_at(path: &Path) -> Result<(), String> {
@@ -193,7 +193,7 @@ fn clear_at(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     fs::remove_file(path).map_err(|_| "local CLI credentials cannot be removed".to_owned())?;
-    path.parent().map_or(Ok(()), sync_directory)
+    sync_parent(path)
 }
 
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
@@ -221,16 +221,9 @@ fn secure_open_file(file: &File) -> Result<(), String> {
     require_secure_file(&metadata)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
+fn sync_parent(path: &Path) -> Result<(), String> {
+    private_file::sync_parent(path)
         .map_err(|_| "CLI credential directory cannot be synchronized".to_owned())
-}
-
-#[cfg(not(unix))]
-const fn sync_directory(_: &Path) -> Result<(), String> {
-    Ok(())
 }
 
 fn configure_atomic_secure_open(options: &mut AtomicOpenOptions) {
