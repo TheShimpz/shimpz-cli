@@ -37,12 +37,8 @@ impl Inventory {
     ) -> Result<Self, String> {
         let project = project_filter();
         let profile = format!("label=com.shimpz.local.profile={PROFILE}");
-        let local_filter = [
-            "--filter",
-            "label=com.shimpz.local.managed=1",
-            "--filter",
-            &profile,
-        ];
+        let managed = format!("label={}", graph::MANAGED_LABEL);
+        let local_filter = ["--filter", &managed, "--filter", &profile];
         let (reserved, controller, lists) = thread::scope(|scope| {
             let reserved: Vec<_> = graph::CONTAINERS
                 .iter()

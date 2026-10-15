@@ -12,6 +12,10 @@ pub(crate) const PROJECT: &str = "shimpz-space";
 pub(crate) const ADMIN_PUBLISHED_PORT: &str = "4600/tcp";
 /// The only host address Admin's published port binds.
 pub(crate) const ADMIN_PUBLISHED_HOST: &str = "127.0.0.1";
+/// The label every Space-managed container and network outside the Compose project carries.
+pub(crate) const MANAGED_LABEL: &str = "com.shimpz.local.managed=1";
+/// The label key naming a Space-managed container's or network's kind.
+pub(crate) const KIND_LABEL: &str = "com.shimpz.local.kind";
 
 /// One long-running service as the template declares it: its fixed container name, the logical keys of exactly the
 /// networks it joins, whether it publishes Admin's port, and the release package its image comes from.

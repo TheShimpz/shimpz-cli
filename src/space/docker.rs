@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::command::{Tool, one_line};
-use super::graph;
+use super::graph::{self, KIND_LABEL};
 use super::host::HostProfile;
 use super::paths::Paths;
 #[cfg(unix)]
@@ -29,8 +29,8 @@ use exec::{
     BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC,
     execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, wait_failure,
 };
-use helper::{KIND_LABEL, helper_failure, helper_labels, python_helper_arguments};
 pub(crate) use helper::{PendingStatus, ProjectionFailure};
+use helper::{helper_failure, helper_labels, python_helper_arguments};
 
 /// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
 /// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in

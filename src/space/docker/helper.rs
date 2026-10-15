@@ -11,15 +11,11 @@ use std::time::Instant;
 use super::exec::{docker_timed_out, output, quiet_status, silent_status, wait_failure};
 use super::{DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
-use crate::space::graph;
+use crate::space::graph::{self, KIND_LABEL, MANAGED_LABEL};
 use crate::space::release::ADMIN;
 
 /// Distinguishes the one-shot helper containers this process names.
 static HELPER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-/// The label every Space-managed one-shot container carries.
-const MANAGED_LABEL: &str = "com.shimpz.local.managed=1";
-/// The label key naming a Space-managed one-shot container's kind.
-pub(super) const KIND_LABEL: &str = "com.shimpz.local.kind";
 /// The kind label, and name stem, of the helper that projects the Local release status.
 pub(super) const RELEASE_STATUS_HELPER: &str = "release-status";
 /// The kind label, and name stem, of the helpers that project or clear the reset capability.
