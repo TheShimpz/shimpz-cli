@@ -11,17 +11,17 @@ use crate::fake_tool;
 
 /// Records each `invoke` call's first input line as `invoke-<n>.json` and leaves the call count in `$count`; the
 /// input stays open for provider-call replies (ADR-0106).
-pub const RECORD_INVOCATION: &str = r#"count=$(ls "$ROOT" | grep -c '^invoke-')
+pub(crate) const RECORD_INVOCATION: &str = r#"count=$(ls "$ROOT" | grep -c '^invoke-')
         IFS= read -r line; printf '%s' "$line" > "$ROOT/invoke-$count.json""#;
 
-pub struct Workspace {
-    pub root: PathBuf,
+pub(crate) struct Workspace {
+    pub(crate) root: PathBuf,
 }
 
 impl Workspace {
     /// A fake `uv` that answers `--version` and `pip compile`, and dispatches `run` to the suite's `cases` arms
     /// (`contract`, `render`, `invoke`), each of which must end with `;;`.
-    pub fn new(suite: &str, name: &str, cases: &str) -> Self {
+    pub(crate) fn new(suite: &str, name: &str, cases: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("shimpz-{suite}-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -47,7 +47,7 @@ exit 1
     }
 
     /// Runs the fixture Action `greet` with `answer` on stdin and the suite's extra environment.
-    pub fn run(&self, answer: &str, env: &[(&str, &str)]) -> Output {
+    pub(crate) fn run(&self, answer: &str, env: &[(&str, &str)]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_shimpz"))
             .args(["assistant", "run", "greet", "--project"])
             .arg(concat!(
@@ -72,7 +72,7 @@ exit 1
         child.wait_with_output().unwrap()
     }
 
-    pub fn json(&self, name: &str) -> Value {
+    pub(crate) fn json(&self, name: &str) -> Value {
         serde_json::from_slice(&fs::read(self.root.join(name)).unwrap()).unwrap()
     }
 }
