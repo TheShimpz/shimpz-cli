@@ -1425,11 +1425,11 @@ mod tests {
                 "{export}"
             );
             let pid = fs::read_to_string(directory.path().join("export.pid")).unwrap();
-            let pid = nix::unistd::Pid::from_raw(pid.trim().parse().unwrap());
+            let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
             // Neither running nor a zombie: the exporting process was killed and reaped.
             assert_eq!(
-                nix::sys::signal::kill(pid, None),
-                Err(nix::errno::Errno::ESRCH),
+                rustix::process::test_kill_process(pid),
+                Err(rustix::io::Errno::SRCH),
                 "{export}"
             );
         }
