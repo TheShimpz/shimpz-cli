@@ -318,6 +318,22 @@ enum ApplyOutcome {
     Deferred,
 }
 
+/// Why an apply failed. `compensated` is set once the failed start of a fresh install was rolled back, which already
+/// removed the partial release, so the apply never compensates that failure again.
+struct ApplyFailure {
+    error: String,
+    compensated: bool,
+}
+
+impl From<String> for ApplyFailure {
+    fn from(error: String) -> Self {
+        Self {
+            error,
+            compensated: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FailedReleaseDecision {
     UseSelected,
@@ -643,8 +659,11 @@ impl Context {
         ) {
             Ok(outcome) => outcome,
             // An apply that emptied the runtime state says so on every failure: rollback never restores it.
-            Err(error) if self.recreated.get() => return Err(self.with_recreation(error)),
-            Err(error) if fresh => match self.compensate_fresh_failure(&space_id) {
+            Err(failure) if self.recreated.get() => return Err(self.with_recreation(failure.error)),
+            Err(ApplyFailure {
+                error,
+                compensated: false,
+            }) if fresh => match self.compensate_fresh_failure(&space_id) {
                 Ok(()) => return Err(error),
                 Err(cleanup) => {
                     return Err(format!(
@@ -652,7 +671,7 @@ impl Context {
                     ));
                 }
             },
-            Err(error) => return Err(error),
+            Err(failure) => return Err(failure.error),
         };
         let port = match outcome {
             ApplyOutcome::Ready { port } => port,
@@ -677,7 +696,7 @@ impl Context {
         scheduled: bool,
         space_id: &str,
         preserve_failed_release: bool,
-    ) -> Result<ApplyOutcome, String> {
+    ) -> Result<ApplyOutcome, ApplyFailure> {
         match self.ensure_storage(space_id, installed.is_none(), scheduled)? {
             linux::Admission::Locked => {
                 return Ok(ApplyOutcome::Locked);
@@ -701,7 +720,12 @@ impl Context {
             docker_gid,
             docker_socket: &docker_socket,
         };
-        let previous = self.start_or_roll_back(&candidate, previous)?;
+        let previous = self
+            .start_or_roll_back(&candidate, previous)
+            .map_err(|error| ApplyFailure {
+                error,
+                compensated: installed.is_none(),
+            })?;
         remove_backup(previous)?;
         finish_failed_release_memory(&self.paths, preserve_failed_release)?;
         Ok(ApplyOutcome::Ready { port })
@@ -1343,6 +1367,52 @@ mod tests {
             ),
         );
         docker
+    }
+
+    /// A fresh install whose start fails is compensated exactly once: the rollback removes the partial release, and
+    /// the apply never compensates the same failure again.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_fresh_start_is_compensated_once() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let log = home.path().join("docker.log");
+        let docker = home.path().join("docker");
+        crate::fake_tool::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  image) printf '[\"%s\"]|linux/amd64\\n' \"$5\" ;;\n  run) echo 0 ;;\n  ps|volume|network) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+                log = log.display()
+            ),
+        );
+        let mut fresh = release(1, 'a');
+        fresh.metadata.cli_macos_arm64_sha256 =
+            Some(hash_file(&std::env::current_exe().unwrap()).unwrap());
+        let context = Context {
+            paths,
+            profile: HostProfile::MacOs,
+            engine: Engine::with_docker(docker),
+            scheduled: false,
+            recreated: Cell::new(false),
+        };
+
+        let error = context.apply(&fresh, None, false, false).unwrap_err();
+
+        assert_eq!(
+            error,
+            "the partial fresh Local release was removed, so installation can be retried"
+        );
+        // One compensation inspects the inventory twice: before its removal and to prove nothing remains.
+        let inspections = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("ps --all --quiet --filter label=com.docker.compose.project=")
+            })
+            .count();
+        assert_eq!(inspections, 2);
+        assert!(!context.paths.marker.exists());
     }
 
     #[cfg(unix)]
