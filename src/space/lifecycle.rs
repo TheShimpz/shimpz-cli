@@ -1054,7 +1054,6 @@ impl Context {
         }
 
         output::progress("Removing the Shimpz Space owned state...");
-        let space_id = inventory.space_id.clone();
         stopped
             .remove(&self.engine)
             .map_err(|error| hard_reset_incomplete(&error))?;
@@ -1066,7 +1065,7 @@ impl Context {
             ));
         }
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
-            linux::reset(&self.paths, space_id.as_deref())
+            linux::reset(&self.paths, inventory.space_id.as_deref())
                 .map_err(|error| hard_reset_incomplete(&error))?;
         }
         let scheduler = scheduler::remove(self.profile, &self.paths)

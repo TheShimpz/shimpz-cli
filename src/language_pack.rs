@@ -68,8 +68,7 @@ impl Catalog {
         };
         let messages = object.remove("messages").ok_or_else(invalid)?;
         let canonical = serde_json::to_vec(&messages).map_err(|_| invalid())?;
-        let entries: Vec<Message> =
-            serde_json::from_value(messages.clone()).map_err(|_| invalid())?;
+        let entries: Vec<Message> = serde_json::from_value(messages).map_err(|_| invalid())?;
         if canonical.len() > MAX_CATALOG_BYTES
             || !(1..=MAX_MESSAGES).contains(&entries.len())
             || !entries.iter().all(Message::valid)
