@@ -29,8 +29,8 @@ use exec::{
     BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC,
     execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, wait_failure,
 };
+use helper::{KIND_LABEL, helper_failure, helper_labels, python_helper_arguments};
 pub(crate) use helper::{PendingStatus, ProjectionFailure};
-use helper::{helper_failure, python_helper_arguments};
 
 /// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
 /// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in
@@ -72,6 +72,8 @@ pub(crate) const COMPOSE_UP: [&str; 9] = [
 ];
 const RUNTIME_STATE_RESET_CONTAINER: &str = "shimpz-runtime-state-reset";
 const RUNTIME_STATE_RESET_KIND: &str = "runtime-state-reset";
+/// The kind label, and name stem, of the Admin authentication probe.
+const ADMIN_AUTHENTICATION_PROBE: &str = "admin-authentication-probe";
 /// Team and Brain, the only writers of the runtime state volumes, both run as this identity, so the reset runs as it
 /// too and needs no capability.
 const RUNTIME_STATE_OWNER: &str = "10001:10001";
@@ -219,7 +221,7 @@ impl Engine {
             "container",
             "inspect",
             "--format",
-            "{{index .Config.Labels \"com.shimpz.local.kind\"}}",
+            &format!("{{{{index .Config.Labels \"{KIND_LABEL}\"}}}}"),
             RUNTIME_STATE_RESET_CONTAINER,
         ]) {
             if kind.trim_end() != RUNTIME_STATE_RESET_KIND {
@@ -296,7 +298,7 @@ impl Engine {
         );
         for attempt in 0..ADMIN_AUTHENTICATION_ATTEMPTS {
             let container = format!(
-                "shimpz-admin-authentication-probe-{}-{}",
+                "shimpz-{ADMIN_AUTHENTICATION_PROBE}-{}-{}",
                 std::process::id(),
                 attempt + 1
             );
@@ -874,32 +876,25 @@ fn clear_volumes_arguments(
     container: &str,
     volumes: &[&str],
 ) -> Vec<OsString> {
-    let mut arguments: Vec<OsString> = [
-        "run",
-        "--rm",
-        "--name",
-        container,
-        "--label",
-        "com.shimpz.local.managed=1",
-        "--label",
-        "com.shimpz.local.kind=runtime-state-reset",
-    ]
-    .into_iter()
-    .chain(isolated_container(platform))
-    .chain([
-        "--user",
-        RUNTIME_STATE_OWNER,
-        "--cpuset-cpus",
-        cpuset,
-        "--memory",
-        "256m",
-        "--memory-swap",
-        "256m",
-        "--pids-limit",
-        "32",
-    ])
-    .map(OsString::from)
-    .collect();
+    let labels = helper_labels(RUNTIME_STATE_RESET_KIND);
+    let mut arguments: Vec<OsString> = ["run", "--rm", "--name", container]
+        .into_iter()
+        .chain(labels.iter().map(String::as_str))
+        .chain(isolated_container(platform))
+        .chain([
+            "--user",
+            RUNTIME_STATE_OWNER,
+            "--cpuset-cpus",
+            cpuset,
+            "--memory",
+            "256m",
+            "--memory-swap",
+            "256m",
+            "--pids-limit",
+            "32",
+        ])
+        .map(OsString::from)
+        .collect();
     for volume in volumes {
         arguments.push("--mount".into());
         arguments.push(
@@ -926,20 +921,17 @@ fn admin_authentication_probe_arguments(
     admin_image: &str,
     container: &str,
 ) -> Vec<OsString> {
+    let labels = helper_labels(ADMIN_AUTHENTICATION_PROBE);
+    let options: Vec<&str> = ["--name", container]
+        .into_iter()
+        .chain(labels.iter().map(String::as_str))
+        .chain(["--user", "1000:1000"])
+        .collect();
     python_helper_arguments(
         platform,
         cpuset,
         "256m",
-        &[
-            "--name",
-            container,
-            "--label",
-            "com.shimpz.local.managed=1",
-            "--label",
-            "com.shimpz.local.kind=admin-authentication-probe",
-            "--user",
-            "1000:1000",
-        ],
+        &options,
         mount,
         admin_image,
         &["-m", "authentication_state"],

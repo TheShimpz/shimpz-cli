@@ -16,6 +16,10 @@ use crate::space::release::ADMIN;
 
 /// Distinguishes the one-shot helper containers this process names.
 static HELPER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// The label every Space-managed one-shot container carries.
+const MANAGED_LABEL: &str = "com.shimpz.local.managed=1";
+/// The label key naming a Space-managed one-shot container's kind.
+pub(super) const KIND_LABEL: &str = "com.shimpz.local.kind";
 /// The kind label, and name stem, of the helper that projects the Local release status.
 pub(super) const RELEASE_STATUS_HELPER: &str = "release-status";
 /// The kind label, and name stem, of the helpers that project or clear the reset capability.
@@ -32,9 +36,9 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
                 "--all",
                 "--quiet",
                 "--filter",
-                "label=com.shimpz.local.managed=1",
+                &format!("label={MANAGED_LABEL}"),
                 "--filter",
-                &format!("label=com.shimpz.local.kind={kind}"),
+                &format!("label={KIND_LABEL}={kind}"),
             ],
         )
     };
@@ -53,9 +57,19 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "an earlier {kind} helper container could not be removed; run docker rm --force on the containers labelled com.shimpz.local.kind={kind}"
+            "an earlier {kind} helper container could not be removed; run docker rm --force on the containers labelled {KIND_LABEL}={kind}"
         ))
     }
+}
+
+/// The Docker label options of one Space-managed one-shot container of `kind`, by which `sweep_helpers` finds it.
+pub(super) fn helper_labels(kind: &str) -> [String; 4] {
+    [
+        "--label".to_owned(),
+        MANAGED_LABEL.to_owned(),
+        "--label".to_owned(),
+        format!("{KIND_LABEL}={kind}"),
+    ]
 }
 
 /// A container name owned by this process for one helper of `kind`, so a helper whose Docker client was stopped can
@@ -254,21 +268,16 @@ pub(super) fn status_projection_arguments(
     name: &str,
 ) -> Vec<OsString> {
     let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
+    let labels = helper_labels(RELEASE_STATUS_HELPER);
+    let options: Vec<&str> = ["--interactive", "--user", "1000:1000", "--name", name]
+        .into_iter()
+        .chain(labels.iter().map(String::as_str))
+        .collect();
     python_helper_arguments(
         platform,
         cpuset,
         "64m",
-        &[
-            "--interactive",
-            "--user",
-            "1000:1000",
-            "--name",
-            name,
-            "--label",
-            "com.shimpz.local.managed=1",
-            "--label",
-            "com.shimpz.local.kind=release-status",
-        ],
+        &options,
         mount,
         admin_image,
         &["-c", script],
@@ -292,21 +301,13 @@ pub(super) fn reset_capability_arguments(
     script: &str,
     name: &str,
 ) -> Vec<OsString> {
-    let labels = [
-        "--label",
-        "com.shimpz.local.managed=1",
-        "--label",
-        "com.shimpz.local.kind=reset-capability",
-    ];
-    let identity = ["--user", "1000:1000", "--name", name];
-    let options: Vec<&str> = if interactive {
-        std::iter::once("--interactive")
-            .chain(identity)
-            .chain(labels)
-            .collect()
-    } else {
-        identity.into_iter().chain(labels).collect()
-    };
+    let labels = helper_labels(RESET_CAPABILITY_HELPER);
+    let options: Vec<&str> = interactive
+        .then_some("--interactive")
+        .into_iter()
+        .chain(["--user", "1000:1000", "--name", name])
+        .chain(labels.iter().map(String::as_str))
+        .collect();
     python_helper_arguments(
         platform,
         cpuset,
