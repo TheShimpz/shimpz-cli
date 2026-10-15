@@ -214,7 +214,9 @@ struct CreatorConsent {
     source_digest: String,
     creator_handle: String,
     outcome: String,
-    consented_at: u64,
+    /// Required by the closed response shape; publication does not use it.
+    #[serde(rename = "consented_at")]
+    _consented_at: u64,
 }
 
 impl CreatorConsent {
@@ -232,7 +234,6 @@ impl CreatorConsent {
         {
             return Err("Developers returned an invalid Creator consent response".into());
         }
-        let _ = self.consented_at;
         Ok(())
     }
 }
@@ -622,7 +623,7 @@ mod tests {
             source_digest: DIGEST.into(),
             creator_handle: "@creator-one".into(),
             outcome: "consented".into(),
-            consented_at: 42,
+            _consented_at: 42,
         }
     }
 
