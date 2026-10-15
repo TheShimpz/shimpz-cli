@@ -437,8 +437,6 @@ services:
       http_proxy: http://shimpz-brain-egress:8888
       NO_PROXY: localhost,127.0.0.1,::1
       no_proxy: localhost,127.0.0.1,::1
-      SHIMPZ_BRAIN_RUNTIME_TOKEN_FILE: /run/shimpz-brain-runtime/token
-      SHIMPZ_BRAIN_RUNTIME_STATE: /var/lib/shimpz-brain-runtime/checkpoints.sqlite3
     volumes:
       - type: volume
         source: brain_runtime_token
