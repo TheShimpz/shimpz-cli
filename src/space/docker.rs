@@ -174,13 +174,9 @@ impl Engine {
         } else {
             format!("0-{}", selected - 1)
         };
-        let platform = match profile {
-            HostProfile::Linux | HostProfile::Wsl => "linux/amd64",
-            HostProfile::MacOs => "linux/arm64",
-        };
         Ok(Self {
             docker,
-            platform,
+            platform: profile.platform(),
             cpuset,
             memory,
             data_root,
@@ -391,7 +387,7 @@ impl Engine {
         profile: HostProfile,
         team_image: &str,
     ) -> Result<(PathBuf, u32), String> {
-        let path = controller_socket_path(profile);
+        let path = Path::new(profile.docker_socket());
         let mount = format!("type=bind,src={},dst=/var/run/docker.sock", path.display());
         let gid = match profile {
             HostProfile::MacOs => {
@@ -685,14 +681,6 @@ fn dedicated_socket_group(path: &Path, gid: u32) -> Result<u32, String> {
         ));
     }
     Ok(gid)
-}
-
-#[cfg(unix)]
-fn controller_socket_path(profile: HostProfile) -> &'static Path {
-    match profile {
-        HostProfile::MacOs => Path::new("/var/run/docker.sock.raw"),
-        HostProfile::Linux | HostProfile::Wsl => Path::new("/var/run/docker.sock"),
-    }
 }
 
 /// `records` holds the inspected initializer, then the Account egress, in `INIT_RECORD_FORMAT`; `configuration` is

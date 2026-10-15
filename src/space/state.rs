@@ -244,11 +244,7 @@ fn validate_environment(
     if values["SHIMPZ_PROJECT_NAME"] != graph::PROJECT {
         return Err("the installed Compose project is invalid".into());
     }
-    let expected_platform = match profile {
-        HostProfile::Linux | HostProfile::Wsl => "linux/amd64",
-        HostProfile::MacOs => "linux/arm64",
-    };
-    if values["SHIMPZ_SPACE_PLATFORM"] != expected_platform
+    if values["SHIMPZ_SPACE_PLATFORM"] != profile.platform()
         || values["SHIMPZ_STORAGE_PROFILE"] != expected_storage
     {
         return Err("the installed Local host profile is invalid".into());
@@ -278,12 +274,7 @@ fn validate_environment(
     {
         return Err("the installed Local resource or Docker identity is invalid".into());
     }
-    let socket = values["SHIMPZ_DOCKER_SOCKET"];
-    let valid_socket = match profile {
-        HostProfile::Linux | HostProfile::Wsl => socket == "/var/run/docker.sock",
-        HostProfile::MacOs => socket == "/var/run/docker.sock.raw",
-    };
-    if !valid_socket {
+    if values["SHIMPZ_DOCKER_SOCKET"] != profile.docker_socket() {
         return Err("the installed Local Docker socket is invalid".into());
     }
     if linux
@@ -310,10 +301,7 @@ pub(crate) fn write_environment(
     paths: &Paths,
     environment: &Environment<'_>,
 ) -> Result<(), String> {
-    let platform = match environment.profile {
-        HostProfile::Linux | HostProfile::Wsl => "linux/amd64",
-        HostProfile::MacOs => "linux/arm64",
-    };
+    let platform = environment.profile.platform();
     let profile = environment.profile.storage().name();
     let release = &environment.release;
     let mut document = format!(

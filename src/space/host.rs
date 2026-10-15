@@ -59,6 +59,22 @@ impl HostProfile {
         }
     }
 
+    /// The Docker platform every Local image runs as on this host.
+    pub(crate) const fn platform(self) -> &'static str {
+        match self {
+            Self::Linux | Self::Wsl => "linux/amd64",
+            Self::MacOs => "linux/arm64",
+        }
+    }
+
+    /// The Docker engine socket the Local controller mounts on this host.
+    pub(crate) const fn docker_socket(self) -> &'static str {
+        match self {
+            Self::Linux | Self::Wsl => "/var/run/docker.sock",
+            Self::MacOs => "/var/run/docker.sock.raw",
+        }
+    }
+
     pub(crate) const fn disk_encryption_recommendation(self, fresh: bool) -> Option<&'static str> {
         if !fresh {
             return None;
@@ -209,6 +225,18 @@ mod tests {
         assert_eq!(HostProfile::Linux.storage(), StorageProfile::LinuxLuks);
         assert_eq!(HostProfile::Wsl.storage(), StorageProfile::ManagedDisk);
         assert_eq!(HostProfile::MacOs.storage(), StorageProfile::ManagedDisk);
+        for (profile, platform, socket) in [
+            (HostProfile::Linux, "linux/amd64", "/var/run/docker.sock"),
+            (HostProfile::Wsl, "linux/amd64", "/var/run/docker.sock"),
+            (
+                HostProfile::MacOs,
+                "linux/arm64",
+                "/var/run/docker.sock.raw",
+            ),
+        ] {
+            assert_eq!(profile.platform(), platform);
+            assert_eq!(profile.docker_socket(), socket);
+        }
         assert_eq!(
             HostProfile::Linux.disk_encryption_recommendation(true),
             None
