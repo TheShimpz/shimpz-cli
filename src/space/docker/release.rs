@@ -1,10 +1,11 @@
 //! The signed Local release set: resolving and verifying it, pulling its exact images, and copying the release-bound
 //! CLI out of it.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::process::ExitStatus;
 
 use super::{DOCKER_PULL, Engine, ResolvedRelease};
 use crate::digest;
@@ -70,6 +71,13 @@ pub(super) fn image_present(
         && digests.iter().any(|value| value == reference)
 }
 
+/// The outcomes of copying one release member out through a temporary container: the copy and the container's
+/// removal, each run whatever the other's outcome.
+struct MemberCopy {
+    copied: Result<ExitStatus, String>,
+    removed: Result<ExitStatus, String>,
+}
+
 impl Engine {
     pub(crate) fn resolve_release(
         &self,
@@ -97,23 +105,12 @@ impl Engine {
             return Err("Docker resolved an invalid Local release digest".into());
         }
         let metadata_path = temporary.join("release.env.tmp");
-        let container = self.create(&reference, ["/release.env"])?;
-        let copied = self.run_quiet_status(
+        let MemberCopy { copied, removed } = self.copy_member(
+            &reference,
+            "/release.env",
+            &metadata_path,
             "Docker release metadata copy",
-            [
-                OsString::from("cp"),
-                OsString::from(format!("{container}:/release.env")),
-                metadata_path.as_os_str().to_owned(),
-            ],
-        );
-        let removed = self.run_quiet_status(
-            "Docker temporary container cleanup",
-            [
-                OsString::from("rm"),
-                OsString::from("--volumes"),
-                OsString::from(&container),
-            ],
-        );
+        )?;
         // The temporary metadata is read, if it was copied, and removed whatever else failed, so no exit leaves it.
         let copied = copied.map(|status| status.success());
         let document = match copied {
@@ -185,23 +182,8 @@ impl Engine {
             HostProfile::Linux | HostProfile::Wsl => "/cli/x86_64-unknown-linux-musl/shimpz",
             HostProfile::MacOs => "/cli/aarch64-apple-darwin/shimpz",
         };
-        let container = self.create(release_ref, [member])?;
-        let copied = self.run_quiet_status(
-            "Docker CLI copy",
-            [
-                OsString::from("cp"),
-                OsString::from(format!("{container}:{member}")),
-                target.as_os_str().to_owned(),
-            ],
-        );
-        let removed = self.run_quiet_status(
-            "Docker temporary container cleanup",
-            [
-                OsString::from("rm"),
-                OsString::from("--volumes"),
-                OsString::from(&container),
-            ],
-        );
+        let MemberCopy { copied, removed } =
+            self.copy_member(release_ref, member, target, "Docker CLI copy")?;
         if !copied?.success() || !removed?.success() {
             return Err("the release-bound CLI could not be extracted cleanly".into());
         }
@@ -279,22 +261,40 @@ impl Engine {
         }
     }
 
-    fn create<I, S>(&self, reference: &str, command: I) -> Result<String, String>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
+    /// Copy the file at `member` out of `reference` to `target` through a temporary container created to run only
+    /// that path, and remove the container whether or not the copy succeeded. Returns the copy's and the removal's
+    /// outcomes for the caller to judge; only a failed create is an error here.
+    fn copy_member(
+        &self,
+        reference: &str,
+        member: &str,
+        target: &Path,
+        operation: &str,
+    ) -> Result<MemberCopy, String> {
         // The image was resolved or admitted just before; a create must never fetch it.
-        let mut arguments = vec![
-            OsString::from("create"),
-            OsString::from("--pull"),
-            OsString::from("never"),
-            OsString::from("--platform"),
-            OsString::from(self.platform),
-            OsString::from(reference),
-        ];
-        arguments.extend(command.into_iter().map(|value| value.as_ref().to_owned()));
-        one_line(&self.run_output(arguments)?, "temporary Docker container").map(str::to_owned)
+        let created = self.run_output([
+            "create",
+            "--pull",
+            "never",
+            "--platform",
+            self.platform,
+            reference,
+            member,
+        ])?;
+        let container = one_line(&created, "temporary Docker container")?;
+        let copied = self.run_quiet_status(
+            operation,
+            [
+                OsString::from("cp"),
+                OsString::from(format!("{container}:{member}")),
+                target.as_os_str().to_owned(),
+            ],
+        );
+        let removed = self.run_quiet_status(
+            "Docker temporary container cleanup",
+            ["rm", "--volumes", container],
+        );
+        Ok(MemberCopy { copied, removed })
     }
 
     fn unique_repo_digest(&self, image: &str, repository: &str) -> Result<String, String> {
