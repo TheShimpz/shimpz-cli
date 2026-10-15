@@ -1702,9 +1702,7 @@ fn validate_regular_if_present(path: &Path) -> Result<bool, String> {
 }
 
 fn io_error(error: std::io::Error) -> String {
-    let message = format!("Local lifecycle operation failed: {error}");
-    drop(error);
-    message
+    crate::space::io_failure("Local lifecycle operation failed")(error)
 }
 
 #[cfg(test)]

@@ -541,9 +541,7 @@ fn valid_cpuset(value: &str) -> bool {
 }
 
 fn io_error(error: std::io::Error) -> String {
-    let message = format!("could not write Local lifecycle state: {error}");
-    drop(error);
-    message
+    crate::space::io_failure("could not write Local lifecycle state")(error)
 }
 
 #[cfg(test)]

@@ -738,9 +738,7 @@ fn require_tool<const N: usize>(
 }
 
 fn io_error(error: std::io::Error) -> String {
-    let message = format!("scheduler operation failed: {error}");
-    drop(error);
-    message
+    crate::space::io_failure("scheduler operation failed")(error)
 }
 
 #[cfg(test)]

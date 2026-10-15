@@ -66,3 +66,9 @@ pub(crate) mod state;
 #[cfg(unix)]
 mod status;
 pub(crate) mod storage;
+
+/// Returns the renderer of one I/O failure met during `operation`; the error is consumed once rendered.
+#[cfg(unix)]
+pub(crate) fn io_failure(operation: &'static str) -> impl Fn(std::io::Error) -> String {
+    move |error| format!("{operation}: {error}")
+}

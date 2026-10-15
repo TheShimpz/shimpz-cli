@@ -1269,9 +1269,7 @@ fn remove_if_empty(path: &Path) -> Result<(), String> {
 }
 
 fn io_error(error: std::io::Error) -> String {
-    let message = format!("Local storage operation failed: {error}");
-    drop(error);
-    message
+    crate::space::io_failure("Local storage operation failed")(error)
 }
 
 fn cleanup_error(error: std::io::Error) -> String {
