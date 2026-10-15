@@ -1,13 +1,11 @@
 //! Local Docker Engine and atomic release boundary.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,12 +16,22 @@ use super::paths::Paths;
 #[cfg(unix)]
 use super::poll::{self, TeamActivity};
 use super::release::{
-    self, ADMIN, DEVELOPER_RELEASE_REPOSITORY, EGRESS, Package, RELEASE_REPOSITORY, Release,
+    ADMIN, EGRESS, Release, STATE_EPOCH_LABEL, TEAM, parse_state_epoch, valid_release_ref,
 };
-use crate::capture::{self, Drained};
+use crate::capture;
 use crate::digest;
 
-const RELEASE_CHANNEL: &str = "stable";
+mod exec;
+mod helper;
+mod release;
+
+use exec::{
+    BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC,
+    execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, wait_failure,
+};
+pub(crate) use helper::{PendingStatus, ProjectionFailure};
+use helper::{helper_failure, python_helper_arguments};
+
 /// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
 /// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in
 /// about a second; two minutes leaves a loaded or waking daemon ample room while a wedged one can no longer hold the
@@ -39,117 +47,10 @@ const DOCKER_STOP: Duration = Duration::from_mins(5);
 const DOCKER_COMPOSE: Duration = Duration::from_mins(10);
 /// How long emptying the runtime-state volumes may run.
 const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
-/// How long a reader may take to deliver a stream after Docker exited, before its output is treated as unavailable.
-const STREAM_GRACE: Duration = Duration::from_secs(5);
-/// Distinguishes the one-shot helper containers this process names.
-static HELPER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-/// The kind label, and name stem, of the helper that projects the Local release status.
-const RELEASE_STATUS_HELPER: &str = "release-status";
-/// The kind label, and name stem, of the helpers that project or clear the reset capability.
-const RESET_CAPABILITY_HELPER: &str = "reset-capability";
-
-/// Remove every Space-managed helper container of `kind` an earlier run left, and prove none remains: a helper whose
-/// removal could not be proved may still write what a new one would, so no new one starts until it is gone.
-fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
-    let list = || {
-        output(
-            docker,
-            [
-                "ps",
-                "--all",
-                "--quiet",
-                "--filter",
-                "label=com.shimpz.local.managed=1",
-                "--filter",
-                &format!("label=com.shimpz.local.kind={kind}"),
-            ],
-        )
-    };
-    let left = list()?;
-    if left.trim().is_empty() {
-        return Ok(());
-    }
-    let mut arguments = vec!["rm", "--force"];
-    arguments.extend(left.split_whitespace());
-    let _ = quiet_status(
-        Command::new(docker).args(&arguments),
-        "Docker helper container removal",
-        DOCKER_QUICK,
-    );
-    if list()?.trim().is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "an earlier {kind} helper container could not be removed; run docker rm --force on the containers labelled com.shimpz.local.kind={kind}"
-        ))
-    }
-}
-
-/// A container name owned by this process for one helper of `kind`, so a helper whose Docker client was stopped can
-/// still be removed: stopping the client never stops its container.
-fn helper_name(kind: &str) -> String {
-    format!(
-        "shimpz-{kind}-{}-{}",
-        std::process::id(),
-        HELPER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-/// Run one quick Docker call with every stream closed, within its deadline.
-fn silent_status<const N: usize>(
-    docker: &Path,
-    arguments: [&str; N],
-) -> Result<ExitStatus, String> {
-    let mut child = capture::spawn(
-        Command::new(docker)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    )
-    .map_err(|error| format!("could not execute Docker: {error}"))?;
-    capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
-        .map_err(|failure| wait_failure(DOCKER_QUICK, failure))
-}
-
-/// Remove a helper container by its exact name and prove it absent: Docker answers successfully that no container,
-/// running or stopped, has that name.
-fn remove_helper(docker: &Path, name: &str) -> Result<(), String> {
-    let _ = silent_status(docker, ["rm", "--force", name]);
-    match output(
-        docker,
-        [
-            "ps",
-            "--all",
-            "--quiet",
-            "--filter",
-            &format!("name=^/{name}$"),
-        ],
-    ) {
-        Ok(listed) if listed.trim().is_empty() => Ok(()),
-        _ => Err(format!(
-            "the helper container {name} could not be proved removed and may still be running; run docker rm --force {name}"
-        )),
-    }
-}
-
-/// The failure of a helper whose Docker client stopped or failed, which does not prove its container ended: the
-/// container is removed and proved gone, and a failed removal joins `cause`.
-fn helper_failure(docker: &Path, name: &str, cause: String) -> String {
-    match remove_helper(docker, name) {
-        Ok(()) => cause,
-        Err(cleanup) => format!("{cause}; {cleanup}"),
-    }
-}
-const MAX_DOCKER_DIAGNOSTIC_BYTES: usize = 32 * 1024;
-/// The most output one captured Docker command may return on either stream before it is stopped.
-const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-const TRUNCATED_DIAGNOSTIC: &str = "\n[Docker diagnostic truncated]";
 const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space-data";
 const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
-const RESET_CAPABILITY_VOLUME: &str = "shimpz-space-reset-capability";
 /// The CPU quota of every one-shot helper container, inside the Space cpuset. One CPU bounds a helper as firmly as
 /// a fraction would, while a quarter-CPU quota stretched each helper's Python start several-fold (the Admin
 /// authentication probe from about 2 s to 7 s).
@@ -185,44 +86,6 @@ fn runtime_state_reset_script(owner: u32, root: &str) -> String {
     )
 }
 
-/// The key a published release set must be signed with: the published pin, or the key the test build generates.
-#[cfg(not(test))]
-fn release_key() -> &'static str {
-    release::PUBLISHED_SIGNING_KEY
-}
-
-#[cfg(test)]
-fn release_key() -> &'static str {
-    release::test_signing::public_key()
-}
-
-/// The largest release metadata document a set may carry.
-const MAX_RELEASE_METADATA_BYTES: u64 = 2_048;
-
-/// Whether `path` is itself a regular file, not a link, directory, FIFO, or device.
-fn regular_file(path: &Path) -> bool {
-    path.symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_file())
-}
-
-/// Read copied release metadata only when it is a regular file of bounded size.
-fn read_metadata(path: &Path) -> Result<String, String> {
-    if !regular_file(path) {
-        return Err("the Local release metadata is not a regular file".into());
-    }
-    let mut document = String::new();
-    fs::File::open(path)
-        .and_then(|file| {
-            file.take(MAX_RELEASE_METADATA_BYTES + 1)
-                .read_to_string(&mut document)
-        })
-        .map_err(|error| format!("could not read Local release metadata: {error}"))?;
-    if document.len() as u64 > MAX_RELEASE_METADATA_BYTES {
-        return Err("the Local release metadata is malformed".into());
-    }
-    Ok(document)
-}
-
 pub(crate) struct Engine {
     docker: PathBuf,
     pub(crate) platform: &'static str,
@@ -232,110 +95,6 @@ pub(crate) struct Engine {
     /// Docker's data root, only where it positively holds the images on this host's own filesystem: a native Linux
     /// engine with a classic storage driver.
     pub(crate) data_root: Option<PathBuf>,
-}
-
-/// A started release status helper waiting for its document. It writes nothing unless committed: an abandoned
-/// helper reads an empty input, which its script refuses before opening any file.
-pub(crate) struct PendingStatus {
-    child: Option<Child>,
-    docker: PathBuf,
-    name: String,
-}
-
-/// Why a status projection did not complete: the helper refused or failed the write and was reaped, or it could not
-/// be reaped and may remain.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum ProjectionFailure {
-    NotProjected(String),
-    Unreaped(String),
-}
-
-impl PendingStatus {
-    /// Send the status document and wait for the helper to write it. A helper that could not be reaped is reported
-    /// apart from one that refused or failed the write, so its cause is never lost.
-    pub(crate) fn commit(mut self, document: &[u8]) -> Result<(), ProjectionFailure> {
-        let mut child = self.child.take().ok_or_else(|| {
-            ProjectionFailure::NotProjected("the Local release status helper is unavailable".into())
-        })?;
-        let sent = if document.len() > 1_024 {
-            Err("the Local release status projection is invalid".to_owned())
-        } else {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| "Docker status input is unavailable".to_owned())
-                .and_then(|mut input| {
-                    input.write_all(document).map_err(|_| {
-                        "the Local release status could not be sent to Docker".to_owned()
-                    })
-                })
-        };
-        // The input is closed by now, so the helper ends and is reaped, even when nothing was sent; one that outlives
-        // its deadline is stopped.
-        drop(child.stdin.take());
-        let outcome = match (
-            capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
-            sent,
-        ) {
-            (Ok(status), Ok(())) if status.success() => return Ok(()),
-            (Err(capture::Failure::TimedOut { stopped: true }), _) => {
-                ProjectionFailure::NotProjected(docker_timed_out(DOCKER_QUICK, true))
-            }
-            (Err(failure), sent) => {
-                let unreaped = format!(
-                    "the Local release status helper could not be reaped: {}",
-                    wait_failure(DOCKER_QUICK, failure)
-                );
-                ProjectionFailure::Unreaped(match sent {
-                    Ok(()) => unreaped,
-                    Err(cause) => format!("{cause}; {unreaped}"),
-                })
-            }
-            (Ok(_), Err(cause)) => ProjectionFailure::NotProjected(cause),
-            (Ok(_), Ok(())) => ProjectionFailure::NotProjected(
-                "the Local release status could not be projected to Admin".into(),
-            ),
-        };
-        // An unsuccessful client does not prove its container ended, and that container could still write the
-        // document later: it is removed and proved gone, or the failure says it may remain.
-        Err(match (outcome, remove_helper(&self.docker, &self.name)) {
-            (outcome, Ok(())) => outcome,
-            (
-                ProjectionFailure::NotProjected(cause) | ProjectionFailure::Unreaped(cause),
-                Err(cleanup),
-            ) => ProjectionFailure::Unreaped(format!("{cause}; {cleanup}")),
-        })
-    }
-
-    /// End the helper without a document and reap it; an unreaped helper is reported, never ignored.
-    pub(crate) fn abandon(mut self) -> Result<(), String> {
-        let Some(mut child) = self.child.take() else {
-            return Ok(());
-        };
-        drop(child.stdin.take());
-        match capture::wait(&mut child, Instant::now() + DOCKER_QUICK) {
-            Ok(_) => Ok(()),
-            Err(capture::Failure::TimedOut { stopped: true }) => {
-                remove_helper(&self.docker, &self.name)
-            }
-            Err(failure) => Err(format!(
-                "the unused Local release status helper could not be reaped: {}",
-                wait_failure(DOCKER_QUICK, failure)
-            )),
-        }
-    }
-}
-
-impl Drop for PendingStatus {
-    /// The fallback for an exit that neither committed nor abandoned: end the helper without a document.
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            drop(child.stdin.take());
-            if capture::wait(&mut child, Instant::now() + DOCKER_QUICK).is_err() {
-                let _ = remove_helper(&self.docker, &self.name);
-            }
-        }
-    }
 }
 
 pub(crate) struct ResolvedRelease {
@@ -428,210 +187,26 @@ impl Engine {
         })
     }
 
-    pub(crate) fn resolve_release(
-        &self,
-        exact: Option<&str>,
-        temporary: &Path,
-    ) -> Result<ResolvedRelease, String> {
-        let selector = match exact {
-            Some(reference) if release::valid_release_ref(reference) => reference.to_owned(),
-            Some(_) => return Err("the internal Local release reference is invalid".into()),
-            None => format!("{RELEASE_REPOSITORY}:{RELEASE_CHANNEL}"),
-        };
-        // A developer release set exists only in this host's image store and is never pulled; an exact published
-        // set already present by that digest is content-addressed and needs no download.
-        if release::valid_developer_release_ref(&selector) {
-            self.require_present(&selector, DEVELOPER_RELEASE_REPOSITORY)?;
-        } else if exact.is_none() || !self.present(&selector, RELEASE_REPOSITORY) {
-            self.pull(&selector)?;
-        }
-        let reference = if exact.is_some() {
-            selector
-        } else {
-            self.unique_repo_digest(&selector, RELEASE_REPOSITORY)?
-        };
-        if !release::valid_release_ref(&reference) {
-            return Err("Docker resolved an invalid Local release digest".into());
-        }
-        let metadata_path = temporary.join("release.env.tmp");
-        let container = self.create(&reference, ["/release.env"])?;
-        let copied = self.run_quiet_status(
-            "Docker release metadata copy",
-            [
-                OsString::from("cp"),
-                OsString::from(format!("{container}:/release.env")),
-                metadata_path.as_os_str().to_owned(),
-            ],
-        );
-        let removed = self.run_quiet_status(
-            "Docker temporary container cleanup",
-            [
-                OsString::from("rm"),
-                OsString::from("--volumes"),
-                OsString::from(&container),
-            ],
-        );
-        // The temporary metadata is read, if it was copied, and removed whatever else failed, so no exit leaves it.
-        let copied = copied.map(|status| status.success());
-        let document = match copied {
-            Ok(true) => Some(read_metadata(&metadata_path)),
-            _ => None,
-        };
-        let cleaned = match fs::remove_file(&metadata_path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
-                "could not remove temporary release metadata: {error}"
-            )),
-            _ => Ok(()),
-        };
-        let failure = match (copied, removed) {
-            (Ok(true), Ok(removed)) if removed.success() => None,
-            (Err(error), _) | (_, Err(error)) => Some(error),
-            _ => Some("the Local release metadata could not be extracted cleanly".to_owned()),
-        };
-        if let Some(failure) = failure {
-            return Err(match cleaned {
-                Ok(()) => failure,
-                Err(cleanup) => format!("{failure}; {cleanup}"),
-            });
-        }
-        let document = match (
-            document.unwrap_or_else(|| Err("Local release metadata was not copied".into())),
-            cleaned,
-        ) {
-            (Ok(document), Ok(())) => document,
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
-            (Err(error), Err(cleanup)) => return Err(format!("{error}; {cleanup}")),
-        };
-        let labels = self.run_output([
-            "image",
-            "inspect",
-            "--format",
-            &format!(
-                "{{{{index .Config.Labels \"{}\"}}}}|{{{{index .Config.Labels \"{}\"}}}}",
-                release::STATE_EPOCH_LABEL,
-                release::SIGNATURE_LABEL
-            ),
-            &reference,
-        ])?;
-        let (state_epoch, signature) = labels
-            .trim_end_matches('\n')
-            .split_once('|')
-            .ok_or_else(|| "Docker returned invalid Local release labels".to_owned())?;
-        let metadata =
-            release::parse(&reference, &document, state_epoch, signature, release_key())?;
-        Ok(ResolvedRelease {
-            reference,
-            metadata,
-        })
-    }
-
-    pub(crate) fn extract_cli(
-        &self,
-        release_ref: &str,
-        profile: HostProfile,
-        target: &Path,
-    ) -> Result<(), String> {
-        // A developer release carries only the amd64 Linux CLI and applies only to an amd64 Linux Space.
-        let developer = release::valid_developer_release_ref(release_ref);
-        if !(release::valid_published_release_ref(release_ref)
-            || developer && profile != HostProfile::MacOs)
-        {
-            return Err("the Local release reference is invalid".into());
-        }
-        let member = match profile {
-            HostProfile::Linux | HostProfile::Wsl => "/cli/x86_64-unknown-linux-musl/shimpz",
-            HostProfile::MacOs => "/cli/aarch64-apple-darwin/shimpz",
-        };
-        let container = self.create(release_ref, [member])?;
-        let copied = self.run_quiet_status(
-            "Docker CLI copy",
-            [
-                OsString::from("cp"),
-                OsString::from(format!("{container}:{member}")),
-                target.as_os_str().to_owned(),
-            ],
-        );
-        let removed = self.run_quiet_status(
-            "Docker temporary container cleanup",
-            [
-                OsString::from("rm"),
-                OsString::from("--volumes"),
-                OsString::from(&container),
-            ],
-        );
-        if !copied?.success() || !removed?.success() {
-            return Err("the release-bound CLI could not be extracted cleanly".into());
-        }
-        // An unsigned image wrapping signed metadata chooses the member's file type: only a regular file is kept, so
-        // nothing later changes the mode of, hashes, or runs what a link names.
-        if regular_file(target) {
-            Ok(())
-        } else {
-            fs::remove_file(target).map_err(|error| {
-                format!("could not remove the invalid release-bound CLI copy: {error}")
-            })?;
-            Err("the release-bound CLI is not a regular file".into())
-        }
-    }
-
-    /// Make one release member available by its exact digest: a developer member must already be in this host's
-    /// image store and is never pulled; a published member is pulled unless the store already holds exactly that
-    /// digest for this Space's platform, since the digest names the content.
-    pub(crate) fn pull_exact(&self, reference: &str, package: Package) -> Result<(), String> {
-        let repository = reference.split_once('@').map_or("", |(name, _)| name);
-        if package.developer(reference) {
-            return self.require_present(reference, repository);
-        }
-        if !package.published(reference) {
-            return Err("a release component image reference is invalid".into());
-        }
-        if self.present(reference, repository) {
-            return Ok(());
-        }
-        self.pull(reference)?;
-        let actual = self.unique_repo_digest(reference, repository)?;
-        if actual == reference {
-            Ok(())
-        } else {
-            Err("Docker did not preserve the pinned component digest".into())
-        }
-    }
-
-    /// Admit a `localhost/` image only when this daemon's store already holds exactly that manifest digest for
-    /// this Space's platform. Absence fails closed; nothing is pulled.
-    fn require_present(&self, reference: &str, repository: &str) -> Result<(), String> {
-        if self.present(reference, repository) {
-            Ok(())
-        } else {
-            Err(format!(
-                "the developer release image {reference} is not in the local Docker image store; assemble it again with .scripts/local-release/deploy, or install the published release with shimpz install"
-            ))
-        }
-    }
-
     /// The state epoch an admitted release set declares in its image label.
     pub(crate) fn release_state_epoch(&self, release_ref: &str) -> Result<u32, String> {
-        if !release::valid_release_ref(release_ref) {
+        if !valid_release_ref(release_ref) {
             return Err("the Local release reference is invalid".into());
         }
         let label = self.run_output([
             "image",
             "inspect",
             "--format",
-            &format!(
-                "{{{{index .Config.Labels \"{}\"}}}}",
-                release::STATE_EPOCH_LABEL
-            ),
+            &format!("{{{{index .Config.Labels \"{STATE_EPOCH_LABEL}\"}}}}"),
             release_ref,
         ])?;
-        release::parse_state_epoch(label.trim_end_matches('\n'))
+        parse_state_epoch(label.trim_end_matches('\n'))
     }
 
     /// Empty exactly the named volumes of this Space, keeping each volume root with its ownership and mode, through
     /// one network-less, read-only container of an image the Space already admitted. Only the container's root may
     /// bypass file permissions, and it can do nothing but delete below the mounted roots.
     pub(crate) fn clear_volumes(&self, image: &str, volumes: &[&str]) -> Result<(), String> {
-        if !release::TEAM.admits(image) {
+        if !TEAM.admits(image) {
             return Err("the selected Team image reference is invalid".into());
         }
         for volume in volumes {
@@ -694,18 +269,6 @@ impl Engine {
             RUNTIME_STATE_RESET_CONTAINER,
             cause,
         ))
-    }
-
-    /// Whether this daemon's store holds exactly `reference` as a repository digest for this Space's platform.
-    fn present(&self, reference: &str, repository: &str) -> bool {
-        self.run_output([
-            "image",
-            "inspect",
-            "--format",
-            "{{json .RepoDigests}}|{{.Os}}/{{.Architecture}}",
-            reference,
-        ])
-        .is_ok_and(|document| image_present(&document, reference, repository, self.platform))
     }
 
     #[cfg(unix)]
@@ -1025,177 +588,6 @@ impl Engine {
         quiet_status(&mut command, "Docker Compose", DOCKER_COMPOSE)
     }
 
-    pub(crate) fn project_release_status(
-        &self,
-        admin_image: &str,
-        document: &[u8],
-    ) -> Result<(), ProjectionFailure> {
-        self.begin_release_status(admin_image)
-            .map_err(ProjectionFailure::NotProjected)?
-            .ok_or_else(|| {
-                ProjectionFailure::NotProjected(
-                    "the Local release status volume does not exist".into(),
-                )
-            })?
-            .commit(document)
-    }
-
-    /// Start the hardened helper that projects the Local release status into this Space's owned volume, before the
-    /// status is known: it waits on its input, so an apply can commit the status as soon as the candidate is healthy.
-    /// `None` when the volume provably does not exist yet; Compose creates it, and the status is projected after.
-    pub(crate) fn begin_release_status(
-        &self,
-        admin_image: &str,
-    ) -> Result<Option<PendingStatus>, String> {
-        if !ADMIN.admits(admin_image) {
-            return Err("the Local release status projection is invalid".into());
-        }
-        let volume = "shimpz-space-release-status";
-        let identity = match self.run_output([
-            "volume",
-            "inspect",
-            "--format",
-            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-            volume,
-        ]) {
-            Ok(identity) => identity,
-            // A failed inspection is absence only when the daemon lists no volume of exactly that name.
-            Err(error) => {
-                let listed = self.run_output([
-                    "volume",
-                    "ls",
-                    "--quiet",
-                    "--filter",
-                    &format!("name=^{volume}$"),
-                ])?;
-                return if listed.lines().any(|name| name == volume) {
-                    Err(error)
-                } else {
-                    Ok(None)
-                };
-            }
-        };
-        if identity.trim() != "shimpz-space-release-status|shimpz-space|release_status" {
-            return Err("the Local release status volume is not owned by this Space".into());
-        }
-        // A status helper an earlier projection could not prove removed may still write; no other may start first.
-        sweep_helpers(&self.docker, RELEASE_STATUS_HELPER)?;
-        let mount = format!("type=volume,src={volume},dst=/run/shimpz-local-release,volume-nocopy");
-        let name = helper_name(RELEASE_STATUS_HELPER);
-        let arguments =
-            status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image, &name);
-        let child = capture::spawn(
-            Command::new(&self.docker)
-                .args(arguments)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-        Ok(Some(PendingStatus {
-            child: Some(child),
-            docker: self.docker.clone(),
-            name,
-        }))
-    }
-
-    pub(crate) fn project_reset_capability(
-        &self,
-        admin_image: &str,
-        document: &[u8],
-    ) -> Result<(), String> {
-        if !ADMIN.admits(admin_image) || document.is_empty() || document.len() > 1_024 {
-            return Err("the Local reset capability projection is invalid".into());
-        }
-        let (name, arguments) = self.reset_capability_helper(admin_image, true)?;
-        let mut child = capture::spawn(
-            Command::new(&self.docker)
-                .args(arguments)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-        let sent = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Docker reset capability input is unavailable".to_owned())
-            .and_then(|mut input| {
-                input.write_all(document).map_err(|_| {
-                    "the Local reset capability could not be sent to Docker".to_owned()
-                })
-            });
-        // The input is closed by now, so the helper ends; one that outlives its deadline is stopped.
-        let cause = match (
-            capture::wait(&mut child, Instant::now() + DOCKER_QUICK),
-            sent,
-        ) {
-            (Ok(status), Ok(())) if status.success() => return Ok(()),
-            (Err(failure), _) => wait_failure(DOCKER_QUICK, failure),
-            (Ok(_), Err(cause)) => cause,
-            (Ok(_), Ok(())) => "the Local reset capability could not be projected to Admin".into(),
-        };
-        Err(helper_failure(&self.docker, &name, cause))
-    }
-
-    pub(crate) fn clear_reset_capability(&self, admin_image: &str) -> Result<(), String> {
-        if !ADMIN.admits(admin_image) {
-            return Err("the Local reset capability cleanup is invalid".into());
-        }
-        let (name, arguments) = self.reset_capability_helper(admin_image, false)?;
-        let cause = match self.run_quiet_status("Docker reset capability cleanup", arguments) {
-            Ok(status) if status.success() => return Ok(()),
-            Ok(_) => "the Local reset capability could not be removed".to_owned(),
-            Err(cause) => cause,
-        };
-        Err(helper_failure(&self.docker, &name, cause))
-    }
-
-    /// The name and complete Docker arguments of one reset-capability helper, once the capability volume is proved
-    /// and stale helpers are swept. A `write` helper reads the capability on its input and writes it; any other
-    /// clears it.
-    fn reset_capability_helper(
-        &self,
-        admin_image: &str,
-        write: bool,
-    ) -> Result<(String, Vec<OsString>), String> {
-        self.validate_reset_capability_volume()?;
-        sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
-        let mount = format!(
-            "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
-        );
-        let name = helper_name(RESET_CAPABILITY_HELPER);
-        let script = if write {
-            reset_capability_write_script()
-        } else {
-            reset_capability_clear_script()
-        };
-        let arguments = reset_capability_arguments(
-            self.platform,
-            &self.cpuset,
-            &mount,
-            admin_image,
-            write,
-            script,
-            &name,
-        );
-        Ok((name, arguments))
-    }
-
-    fn validate_reset_capability_volume(&self) -> Result<(), String> {
-        let identity = self.run_output([
-            "volume",
-            "inspect",
-            "--format",
-            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-            RESET_CAPABILITY_VOLUME,
-        ])?;
-        if identity.trim() == "shimpz-space-reset-capability|shimpz-space|reset_capability" {
-            Ok(())
-        } else {
-            Err("the Local reset capability volume is not owned by this Space".into())
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn with_docker(docker: PathBuf) -> Self {
         Self {
@@ -1273,61 +665,6 @@ impl Engine {
         } else {
             Err("could not remove every replaced Local container".into())
         }
-    }
-
-    fn pull(&self, reference: &str) -> Result<(), String> {
-        let result = self.run_quiet_status_within(
-            "Docker image download",
-            DOCKER_PULL,
-            ["pull", "--quiet", "--platform", self.platform, reference],
-        )?;
-        if result.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Docker could not pull the pinned image: {reference}"
-            ))
-        }
-    }
-
-    fn create<I, S>(&self, reference: &str, command: I) -> Result<String, String>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        // The image was resolved or admitted just before; a create must never fetch it.
-        let mut arguments = vec![
-            OsString::from("create"),
-            OsString::from("--pull"),
-            OsString::from("never"),
-            OsString::from("--platform"),
-            OsString::from(self.platform),
-            OsString::from(reference),
-        ];
-        arguments.extend(command.into_iter().map(|value| value.as_ref().to_owned()));
-        one_line(&self.run_output(arguments)?, "temporary Docker container").map(str::to_owned)
-    }
-
-    fn unique_repo_digest(&self, image: &str, repository: &str) -> Result<String, String> {
-        let document = self.run_output([
-            "image",
-            "inspect",
-            "--format",
-            "{{json .RepoDigests}}",
-            image,
-        ])?;
-        let digests: Vec<String> = serde_json::from_str(document.trim())
-            .map_err(|_| "Docker returned malformed image digests".to_owned())?;
-        let mut matching = digests
-            .into_iter()
-            .filter(|value| digest::is_pinned(value, repository));
-        let first = matching
-            .next()
-            .ok_or_else(|| "Docker returned no repository digest".to_owned())?;
-        if matching.next().is_some() {
-            return Err("Docker returned ambiguous repository digests".into());
-        }
-        Ok(first)
     }
 }
 
@@ -1420,57 +757,6 @@ fn socket_probe_arguments(
         team_image,
         &["-c", script],
     )
-}
-
-/// One-shot Python helper container: removed on exit, never pulled, offline, with a read-only root, no capabilities,
-/// and no privilege gain, inside the Space cpuset with one CPU, `memory` without swap, 32 processes, a
-/// non-executable `/tmp`, and exactly one `mount`. `options` holds only the helper's own name, labels, stdin, and
-/// identity.
-fn python_helper_arguments(
-    platform: &str,
-    cpuset: &str,
-    memory: &str,
-    options: &[&str],
-    mount: &str,
-    image: &str,
-    command: &[&str],
-) -> Vec<OsString> {
-    ["run", "--rm"]
-        .into_iter()
-        .chain(options.iter().copied())
-        .chain([
-            "--platform",
-            platform,
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--cpuset-cpus",
-            cpuset,
-            "--cpus",
-            HELPER_CPUS,
-            "--memory",
-            memory,
-            "--memory-swap",
-            memory,
-            "--pids-limit",
-            "32",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=8m",
-            "--mount",
-            mount,
-            "--entrypoint",
-            "/opt/venv/bin/python",
-            image,
-        ])
-        .chain(command.iter().copied())
-        .map(OsString::from)
-        .collect()
 }
 
 /// The longest Compose progress line kept; anything beyond it on the same line is dropped.
@@ -1662,78 +948,6 @@ fn admin_authentication_probe_arguments(
     )
 }
 
-fn status_projection_arguments(
-    platform: &str,
-    cpuset: &str,
-    mount: &str,
-    admin_image: &str,
-    name: &str,
-) -> Vec<OsString> {
-    let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
-    python_helper_arguments(
-        platform,
-        cpuset,
-        "64m",
-        &[
-            "--interactive",
-            "--user",
-            "1000:1000",
-            "--name",
-            name,
-            "--label",
-            "com.shimpz.local.managed=1",
-            "--label",
-            "com.shimpz.local.kind=release-status",
-        ],
-        mount,
-        admin_image,
-        &["-c", script],
-    )
-}
-
-fn reset_capability_write_script() -> &'static str {
-    "import json,os,stat,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert 0<len(raw)<=1024 and set(document)=={'version','purpose','space_id','created_at','expires_at','capability_sha256'}; target='/run/shimpz-local-reset/capability.json'; temporary=target+'.tmp'; flags=os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0); descriptor=os.open(temporary,flags,0o600); record=os.fstat(descriptor); assert stat.S_ISREG(record.st_mode) and record.st_nlink==1 and record.st_uid==1000 and record.st_gid==1000; assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.fsync(descriptor); os.close(descriptor); os.replace(temporary,target)"
-}
-
-fn reset_capability_clear_script() -> &'static str {
-    "import os; root='/run/shimpz-local-reset'; [(os.unlink(path) if os.path.lexists(path) else None) for path in (root+'/capability.json',root+'/capability.json.tmp')]"
-}
-
-fn reset_capability_arguments(
-    platform: &str,
-    cpuset: &str,
-    mount: &str,
-    admin_image: &str,
-    interactive: bool,
-    script: &str,
-    name: &str,
-) -> Vec<OsString> {
-    let labels = [
-        "--label",
-        "com.shimpz.local.managed=1",
-        "--label",
-        "com.shimpz.local.kind=reset-capability",
-    ];
-    let identity = ["--user", "1000:1000", "--name", name];
-    let options: Vec<&str> = if interactive {
-        std::iter::once("--interactive")
-            .chain(identity)
-            .chain(labels)
-            .collect()
-    } else {
-        identity.into_iter().chain(labels).collect()
-    };
-    python_helper_arguments(
-        platform,
-        cpuset,
-        "64m",
-        &options,
-        mount,
-        admin_image,
-        &["-c", script],
-    )
-}
-
 pub(crate) fn validate_endpoint(
     docker: &Path,
     profile: HostProfile,
@@ -1832,175 +1046,6 @@ fn require_engine_versions(daemon: &str, compose: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn quiet_status(
-    command: &mut Command,
-    operation: &str,
-    budget: Duration,
-) -> Result<ExitStatus, String> {
-    let (status, diagnostic) =
-        execute_quiet(command, budget).map_err(|error| format!("{operation} failed: {error}"))?;
-    if !status.success() {
-        let detail = if diagnostic.is_empty() {
-            String::new()
-        } else {
-            format!(": {diagnostic}")
-        };
-        crate::output::warning(&format!(
-            "{operation} failed; Docker returned {status}{detail}"
-        ));
-    }
-    Ok(status)
-}
-
-fn execute_quiet(command: &mut Command, budget: Duration) -> Result<(ExitStatus, String), String> {
-    let deadline = Instant::now() + budget;
-    let mut child = capture::spawn(
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-    )
-    .map_err(|error| format!("could not execute Docker: {error}"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
-    let reader = capture::Reader::start(&child, stderr, drain_diagnostic);
-    let status =
-        capture::wait(&mut child, deadline).map_err(|failure| wait_failure(budget, failure))?;
-    let captured = reader.finish(
-        deadline.max(Instant::now() + STREAM_GRACE),
-        "Docker diagnostic output could not be read",
-    )?;
-    let diagnostic = render_diagnostic(&captured);
-    Ok((status, diagnostic))
-}
-
-/// The diagnostic of a Docker call that outlived its deadline.
-fn docker_timed_out(budget: Duration, stopped: bool) -> String {
-    let outcome = if stopped {
-        "it was stopped"
-    } else {
-        "it could not be stopped and may still be running"
-    };
-    format!(
-        "Docker did not finish within {} s; {outcome}",
-        budget.as_secs()
-    )
-}
-
-/// The diagnostic of a Docker call whose bounded wait failed.
-fn wait_failure(budget: Duration, failure: capture::Failure) -> String {
-    match failure {
-        capture::Failure::TimedOut { stopped } => docker_timed_out(budget, stopped),
-        capture::Failure::Unavailable(error) => format!("could not execute Docker: {error}"),
-        capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
-    }
-}
-
-enum BoundedOutput {
-    Completed {
-        status: ExitStatus,
-        bytes: Vec<u8>,
-        truncated: bool,
-    },
-    TimedOut,
-}
-
-fn execute_bounded_stdout(
-    command: &mut Command,
-    timeout: Duration,
-) -> Result<BoundedOutput, String> {
-    let deadline = Instant::now() + timeout;
-    let mut child = capture::spawn(command.stdout(Stdio::piped()))
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
-    let reader = capture::Reader::start(&child, stdout, drain_bounded_stdout);
-    let status = match capture::wait(&mut child, deadline) {
-        Ok(status) => status,
-        Err(capture::Failure::TimedOut { stopped: true }) => return Ok(BoundedOutput::TimedOut),
-        Err(failure) => return Err(wait_failure(timeout, failure)),
-    };
-    let captured = reader.finish(
-        Instant::now() + STREAM_GRACE,
-        "Docker authentication-state output could not be read",
-    )?;
-    Ok(BoundedOutput::Completed {
-        status,
-        bytes: captured.bytes,
-        truncated: captured.truncated,
-    })
-}
-
-fn drain_bounded_stdout(stdout: ChildStdout) -> Result<Drained, String> {
-    capture::drain(stdout, ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1)
-        .map_err(|_| "Docker authentication-state output could not be read".to_owned())
-}
-
-fn drain_diagnostic(reader: impl Read) -> Result<Drained, String> {
-    capture::drain(reader, MAX_DOCKER_DIAGNOSTIC_BYTES)
-        .map_err(|_| "Docker diagnostic output could not be read".to_owned())
-}
-
-fn render_diagnostic(captured: &Drained) -> String {
-    let decoded = String::from_utf8_lossy(&captured.bytes);
-    let sanitized = crate::output::sanitize(decoded.trim());
-    let content_limit = MAX_DOCKER_DIAGNOSTIC_BYTES - TRUNCATED_DIAGNOSTIC.len();
-    let mut rendered = String::with_capacity(sanitized.len().min(content_limit));
-    let mut truncated = captured.truncated;
-    for character in sanitized.chars() {
-        if rendered.len() + character.len_utf8() > content_limit {
-            truncated = true;
-            break;
-        }
-        rendered.push(character);
-    }
-    if truncated {
-        rendered.push_str(TRUNCATED_DIAGNOSTIC);
-    }
-    rendered
-}
-
-fn output<I, S>(program: &Path, arguments: I) -> Result<String, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let result = capture::bounded_within(
-        Command::new(program).args(arguments),
-        MAX_DOCKER_OUTPUT_BYTES,
-        MAX_DOCKER_OUTPUT_BYTES,
-        DOCKER_QUICK,
-    )
-    .map_err(|failure| match failure {
-        capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
-        failure => wait_failure(DOCKER_QUICK, failure),
-    })?;
-    if !result.status.success() {
-        return Err(format!(
-            "Docker operation failed; Docker returned {}",
-            result.status
-        ));
-    }
-    String::from_utf8(result.stdout).map_err(|_| "Docker returned non-UTF-8 output".into())
-}
-
-/// The inspected image holds exactly `reference` among its repository digests and runs on `platform`.
-fn image_present(document: &str, reference: &str, repository: &str, platform: &str) -> bool {
-    let Some((digests, image_platform)) = document.trim_end().rsplit_once('|') else {
-        return false;
-    };
-    let Ok(digests) = serde_json::from_str::<Vec<String>>(digests) else {
-        return false;
-    };
-    digest::is_pinned(reference, repository)
-        && image_platform == platform
-        && digests.iter().any(|value| value == reference)
-}
-
 fn version_at_least(value: &str, minimum: (u64, u64, u64)) -> bool {
     let core = value
         .trim_start_matches('v')
@@ -2024,6 +1069,15 @@ fn version_at_least(value: &str, minimum: (u64, u64, u64)) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use super::exec::{MAX_DOCKER_OUTPUT_BYTES, drain_diagnostic, execute_quiet};
+    use super::helper::{
+        RELEASE_STATUS_HELPER, RESET_CAPABILITY_VOLUME, helper_name, remove_helper,
+        reset_capability_arguments, reset_capability_clear_script, reset_capability_write_script,
+        status_projection_arguments, sweep_helpers,
+    };
+    use super::release::image_present;
     use super::*;
 
     #[test]
