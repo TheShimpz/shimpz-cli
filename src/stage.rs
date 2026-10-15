@@ -721,7 +721,7 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8])
         hasher.update(&value.len().to_be_bytes());
         hasher.update(value);
     }
-    format!("sha256:{}", hasher.finish_hex())
+    hasher.finish_digest()
 }
 
 fn require_docker_success<I, S>(docker: &Path, arguments: I, message: &str) -> Result<(), String>

@@ -41,6 +41,16 @@ impl Sha256Hasher {
     pub(crate) fn finish_hex(self) -> String {
         lower_hex(self.0.finish().as_ref())
     }
+
+    /// The prefixed digest (`sha256:<hex>`) of everything hashed.
+    pub(crate) fn finish_digest(self) -> String {
+        format!("{SHA256_PREFIX}{}", self.finish_hex())
+    }
+}
+
+/// The bare value of a `sha256:` digest; any other value is returned unchanged.
+pub(crate) fn bare_sha256(digest: &str) -> &str {
+    digest.strip_prefix(SHA256_PREFIX).unwrap_or(digest)
 }
 
 /// Exactly `length` lowercase hexadecimal characters, the canonical encoding of digests and random identifiers.

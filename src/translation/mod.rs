@@ -94,7 +94,7 @@ pub(crate) fn pack(catalog: &Catalog, verify: Verify) -> Result<(Pack, Language)
     let memory = Memory::new(
         toolchain::cache_directory()?
             .join("translations")
-            .join(policy.trim_start_matches("sha256:")),
+            .join(crate::digest::bare_sha256(&policy)),
     );
     translate(
         catalog,
