@@ -447,7 +447,7 @@ impl Engine {
         admin_image: &str,
         write: bool,
     ) -> Result<(String, Vec<OsString>), String> {
-        self.validate_reset_capability_volume()?;
+        self.require_owned_volume(RESET_CAPABILITY_VOLUME, "the Local reset capability volume")?;
         sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
         let mount = format!(
             "type=volume,src={},dst=/run/shimpz-local-reset,volume-nocopy",
@@ -469,13 +469,5 @@ impl Engine {
             &name,
         );
         Ok((name, arguments))
-    }
-
-    fn validate_reset_capability_volume(&self) -> Result<(), String> {
-        if self.owns_volume(RESET_CAPABILITY_VOLUME)? {
-            Ok(())
-        } else {
-            Err("the Local reset capability volume is not owned by this Space".into())
-        }
     }
 }

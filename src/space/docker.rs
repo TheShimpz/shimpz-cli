@@ -208,11 +208,7 @@ impl Engine {
             return Err("the selected Team image reference is invalid".into());
         }
         for volume in volumes {
-            if !self.owns_volume(volume)? {
-                return Err(format!(
-                    "the Local volume {volume} is not owned by this Space"
-                ));
-            }
+            self.require_owned_volume(volume, &format!("the Local volume {volume}"))?;
         }
         // One fixed name: a helper an interrupted run left behind is removed before another starts, so no earlier
         // deletion can still run while the Space starts again.
@@ -291,7 +287,7 @@ impl Engine {
         if !ADMIN.admits(admin_image) {
             return Err("the selected Admin image reference is invalid".into());
         }
-        self.validate_admin_authentication_volume()?;
+        self.require_owned_volume(ADMIN_AUTHENTICATION_VOLUME, "the Admin data volume")?;
         let mount = format!(
             "type=volume,src={},dst=/data,volume-nocopy,readonly",
             graph::resource_name(ADMIN_AUTHENTICATION_VOLUME)
@@ -354,11 +350,12 @@ impl Engine {
         unreachable!("the bounded authentication attempts always return")
     }
 
-    fn validate_admin_authentication_volume(&self) -> Result<(), String> {
-        if self.owns_volume(ADMIN_AUTHENTICATION_VOLUME)? {
+    /// Refuse unless the volume of the graph's `key` is this Space's, naming it as `what` in the refusal.
+    pub(super) fn require_owned_volume(&self, key: &str, what: &str) -> Result<(), String> {
+        if self.owns_volume(key)? {
             Ok(())
         } else {
-            Err("the Admin data volume is not owned by this Space".into())
+            Err(format!("{what} is not owned by this Space"))
         }
     }
 
