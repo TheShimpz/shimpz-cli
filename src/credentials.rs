@@ -245,7 +245,8 @@ fn configure_atomic_secure_open(options: &mut AtomicOpenOptions) {
     options.mode(0o600);
 }
 
-fn valid_token(value: &str) -> bool {
+/// A 256-bit Developers credential in unpadded base64url: exactly 43 URL-safe characters.
+pub(crate) fn valid_token(value: &str) -> bool {
     value.len() == 43
         && value
             .bytes()

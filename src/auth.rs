@@ -338,7 +338,7 @@ impl DeviceAuthorization {
             || !valid_user_code(&self.user_code)
             || self.verification_url != expected_url
             || self.expires_in != 600
-            || !valid_token(self.device_code.expose())
+            || !credentials::valid_token(self.device_code.expose())
         {
             return Err("Developers returned an invalid authorization response".into());
         }
@@ -431,10 +431,6 @@ impl AuthSession {
 
 fn valid_handle(value: &str) -> bool {
     value.len() == 22 && base64url(value)
-}
-
-fn valid_token(value: &str) -> bool {
-    value.len() == 43 && base64url(value)
 }
 
 fn base64url(value: &str) -> bool {
