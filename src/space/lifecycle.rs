@@ -575,20 +575,16 @@ impl Context {
             release::require_current(&release.metadata, poll::now())?;
         }
         let selected_failed = state::failed_release_matches(&self.paths, &release.reference)?;
-        let decision = update_decision(&installed, &release, stopped, selected_failed);
-        if let Some(outcome) = run_update_effect(decision, || {
-            if self.handoff_if_needed(&release, Some(&installed), false)? {
-                return Ok("The release-bound CLI completed the update.".into());
-            }
-            self.apply(&release, Some(&installed), false, false)
-        })? {
-            return Ok(outcome);
-        }
-        match decision {
+        match update_decision(&installed, &release, stopped, selected_failed) {
             UpdateDecision::Current => Ok(current_release_outcome(&installed, stopped)),
             UpdateDecision::Failed => Ok(failed_update_outcome(stopped)),
             UpdateDecision::Available => Ok(available_release_outcome(&installed, &release)),
-            UpdateDecision::Apply => Err("the Local update effect returned no outcome".into()),
+            UpdateDecision::Apply => {
+                if self.handoff_if_needed(&release, Some(&installed), false)? {
+                    return Ok("The release-bound CLI completed the update.".into());
+                }
+                self.apply(&release, Some(&installed), false, false)
+            }
         }
     }
 
@@ -1200,16 +1196,6 @@ fn update_decision(
         UpdateDecision::Available
     } else {
         UpdateDecision::Apply
-    }
-}
-
-fn run_update_effect(
-    decision: UpdateDecision,
-    apply: impl FnOnce() -> Result<String, String>,
-) -> Result<Option<String>, String> {
-    match decision {
-        UpdateDecision::Apply => apply().map(Some),
-        UpdateDecision::Current | UpdateDecision::Failed | UpdateDecision::Available => Ok(None),
     }
 }
 
@@ -2738,47 +2724,6 @@ mod tests {
             update_decision(&installed, &forward, false, false),
             UpdateDecision::Apply
         );
-    }
-
-    #[test]
-    fn explicit_update_invokes_effects_only_for_a_running_forward_release() {
-        let current = release(2, 'b');
-        let forward = release(3, 'c');
-        let installed = Installed {
-            space_id: "space-0123456789abcdef01234567".into(),
-            release_ref: current.reference.clone(),
-            admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
-            ordinal: 2,
-            port: 7777,
-        };
-        let passive = [
-            update_decision(&installed, &current, false, false),
-            update_decision(&installed, &forward, true, false),
-            update_decision(&installed, &forward, false, true),
-            update_decision(&installed, &forward, true, true),
-        ];
-        for decision in passive {
-            let mut calls = 0;
-            let outcome = run_update_effect(decision, || {
-                calls += 1;
-                Ok("applied".into())
-            })
-            .unwrap();
-
-            assert_eq!(outcome, None);
-            assert_eq!(calls, 0);
-        }
-
-        let mut calls = 0;
-        let decision = update_decision(&installed, &forward, false, false);
-        let outcome = run_update_effect(decision, || {
-            calls += 1;
-            Ok("applied".into())
-        })
-        .unwrap();
-
-        assert_eq!(outcome.as_deref(), Some("applied"));
-        assert_eq!(calls, 1);
     }
 
     #[test]
