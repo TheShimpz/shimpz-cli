@@ -117,7 +117,7 @@ pub(crate) struct Validity {
 }
 
 impl Release {
-    fn members(&self) -> [(&'static str, Package, &str); 4] {
+    pub(crate) fn members(&self) -> [(&'static str, Package, &str); 4] {
         [
             ("admin", ADMIN, &self.admin),
             ("team", TEAM, &self.team),

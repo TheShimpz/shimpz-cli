@@ -1,8 +1,9 @@
 //! Concise, bounded Local Space status projection.
 
+use super::graph::{self, ACCOUNT_EGRESS_INIT};
 use super::state::Installed;
 
-const SERVICE_COUNT: usize = 7;
+const SERVICE_COUNT: usize = graph::MEMBERS.len();
 const MAX_RECORD_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,52 +20,53 @@ pub(crate) struct Component {
     expectation: Expectation,
 }
 
+/// Every container of the graph, in the order status reports them.
 pub(crate) const COMPONENTS: [Component; 8] = [
     Component {
-        docker_name: "shimpz-admin",
-        service: "admin",
+        docker_name: graph::ADMIN.container,
+        service: graph::ADMIN.service,
         label: "Admin",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-team",
-        service: "team",
+        docker_name: graph::TEAM.container,
+        service: graph::TEAM.service,
         label: "Team",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-brain",
-        service: "brain",
+        docker_name: graph::BRAIN.container,
+        service: graph::BRAIN.service,
         label: "Brain",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-brain-egress",
-        service: "shimpz-brain-egress",
+        docker_name: graph::BRAIN_EGRESS.container,
+        service: graph::BRAIN_EGRESS.service,
         label: "Brain network boundary",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-assistant-egress",
-        service: "shimpz-assistant-egress",
+        docker_name: graph::ASSISTANT_EGRESS.container,
+        service: graph::ASSISTANT_EGRESS.service,
         label: "Assistant network boundary",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-assistant-release",
-        service: "shimpz-assistant-release",
+        docker_name: graph::ASSISTANT_RELEASE.container,
+        service: graph::ASSISTANT_RELEASE.service,
         label: "Assistant release boundary",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-account-egress",
-        service: "shimpz-account-egress",
+        docker_name: graph::ACCOUNT_EGRESS.container,
+        service: graph::ACCOUNT_EGRESS.service,
         label: "Account network boundary",
         expectation: Expectation::Service,
     },
     Component {
-        docker_name: "shimpz-account-egress-init",
-        service: "shimpz-account-egress-init",
+        docker_name: ACCOUNT_EGRESS_INIT,
+        service: ACCOUNT_EGRESS_INIT,
         label: "Account setup",
         expectation: Expectation::Init,
     },
@@ -582,7 +584,7 @@ mod tests {
             .map(Component::docker_name)
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
-        let resource_names = super::super::resources::RESERVED
+        let resource_names = graph::CONTAINERS
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
 

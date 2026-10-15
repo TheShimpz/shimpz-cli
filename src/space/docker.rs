@@ -146,7 +146,7 @@ const RESET_CAPABILITY_VOLUME: &str = "shimpz-space-reset-capability";
 /// a fraction would, while a quarter-CPU quota stretched each helper's Python start several-fold (the Admin
 /// authentication probe from about 2 s to 7 s).
 const HELPER_CPUS: &str = "1";
-const ACCOUNT_EGRESS: &str = "shimpz-account-egress";
+const ACCOUNT_EGRESS: &str = graph::ACCOUNT_EGRESS.container;
 const ACCOUNT_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// State, exit code, Compose project, service and configuration hash, image, and the capability mount's source.
 const INIT_RECORD_FORMAT: &str = "{{.State.Status}}|{{.State.ExitCode}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{index .Config.Labels \"com.docker.compose.config-hash\"}}|{{.Config.Image}}|{{range .Mounts}}{{if eq .Destination \"/run/shimpz-account-egress\"}}{{.Type}}:{{.Name}}{{end}}{{end}}";

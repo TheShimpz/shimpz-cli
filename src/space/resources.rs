@@ -7,21 +7,11 @@ use super::docker::Engine;
 use super::graph::{self, NETWORK_NAMES, StorageProfile, VOLUME_NAMES};
 use super::id;
 use super::paths::Paths;
-use super::release::{ADMIN, BRAIN, EGRESS, Package, TEAM};
+use super::release::Package;
 use crate::{identifier, team_id};
 
 const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
-pub(crate) const RESERVED: [&str; 8] = [
-    "shimpz-admin",
-    "shimpz-team",
-    "shimpz-brain",
-    "shimpz-brain-egress",
-    "shimpz-assistant-egress",
-    "shimpz-assistant-release",
-    "shimpz-account-egress",
-    "shimpz-account-egress-init",
-];
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Inventory {
@@ -50,7 +40,7 @@ impl Inventory {
             &profile,
         ];
         let (reserved, controller, lists) = thread::scope(|scope| {
-            let reserved: Vec<_> = RESERVED
+            let reserved: Vec<_> = graph::CONTAINERS
                 .iter()
                 .map(|name| scope.spawn(move || reserved_occupant(engine, name)))
                 .collect();
@@ -190,7 +180,7 @@ impl Inventory {
             .project_containers
             .iter()
             .zip(names)
-            .find(|(_, name)| name == "/shimpz-team")
+            .find(|(_, name)| name.strip_prefix('/') == Some(graph::TEAM.container))
             .map(|(identifier, _)| identifier.clone()))
     }
 
@@ -259,7 +249,7 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
         "--type=container",
         "--format",
         "{{index .Config.Labels \"com.docker.compose.project\"}}",
-        "shimpz-team",
+        graph::TEAM.container,
     ]);
     match project {
         Err(_) => Ok(None),
@@ -272,7 +262,7 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
                 "--type=container",
                 "--format",
                 "{{range .Config.Env}}{{println .}}{{end}}",
-                "shimpz-team",
+                graph::TEAM.container,
             ])?;
             let values: Vec<_> = environment
                 .lines()
@@ -525,17 +515,14 @@ fn validate_dynamic_networks(
 }
 
 fn static_service(name: &str, service: &str) -> Option<Package> {
-    match (name, service) {
-        ("/shimpz-admin", "admin") => Some(ADMIN),
-        ("/shimpz-team", "team") => Some(TEAM),
-        ("/shimpz-brain", "brain") => Some(BRAIN),
-        ("/shimpz-brain-egress", "shimpz-brain-egress")
-        | ("/shimpz-assistant-egress", "shimpz-assistant-egress")
-        | ("/shimpz-assistant-release", "shimpz-assistant-release")
-        | ("/shimpz-account-egress", "shimpz-account-egress")
-        | ("/shimpz-account-egress-init", "shimpz-account-egress-init") => Some(EGRESS),
-        _ => None,
+    let name = name.strip_prefix('/')?;
+    if name == graph::ACCOUNT_EGRESS_INIT && service == graph::ACCOUNT_EGRESS_INIT {
+        return Some(graph::ACCOUNT_EGRESS.package);
     }
+    graph::MEMBERS
+        .iter()
+        .find(|member| member.container == name && member.service == service)
+        .map(|member| member.package)
 }
 
 fn ids(document: &str) -> Vec<String> {
@@ -638,18 +625,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn concurrent_observations_refuse_with_the_first_failure_in_sequential_order() {
-        // Shimpz Admin answers last but precedes Shimpz Brain in the reserved order, so its refusal is reported.
+        // Shimpz Brain answers last but precedes Shimpz Admin in the graph's container order, so its refusal is
+        // reported.
         let temporary = tempfile::tempdir().unwrap();
         let paths = Paths::under(temporary.path()).unwrap();
         let command = temporary.path().join("docker");
         crate::fake_tool::write(
             &command,
-            "#!/bin/sh\ncase \"$*\" in\n  *' shimpz-admin') sleep 0.3; echo other ;;\n  *' shimpz-brain') echo other ;;\n  inspect*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *' shimpz-brain') sleep 0.3; echo other ;;\n  *' shimpz-admin') echo other ;;\n  inspect*) exit 1 ;;\nesac\n",
         );
         let engine = Engine::with_docker(command);
         assert_eq!(
             Inventory::inspect(&engine, &paths, StorageProfile::ManagedDisk).unwrap_err(),
-            "another Docker container is already named shimpz-admin"
+            "another Docker container is already named shimpz-brain"
         );
         // With every name free, an empty project and no managed resources are a complete, empty inventory.
         let command = temporary.path().join("docker");
@@ -726,7 +714,10 @@ mod tests {
 
     #[test]
     fn static_services_bind_exact_names_to_responsibility_images() {
-        assert_eq!(static_service("/shimpz-team", "team"), Some(TEAM));
+        assert_eq!(
+            static_service("/shimpz-team", "team"),
+            Some(graph::TEAM.package)
+        );
         let digest = "a".repeat(64);
         let team = static_service("/shimpz-team", "team").unwrap();
         assert!(team.admits(&format!(

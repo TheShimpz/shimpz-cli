@@ -2555,20 +2555,21 @@ fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, S
 }
 
 /// How many long-running Space containers `release` replaces, from the `previous` Admin, Team, Brain, and egress
-/// images: one each for the first three and four for the shared egress image.
+/// images: every graph member whose package's image changes.
 fn replaced_container_count(previous: &[String; 4], release: &ResolvedRelease) -> usize {
-    let metadata = &release.metadata;
-    [
-        (&metadata.admin, 1),
-        (&metadata.team, 1),
-        (&metadata.brain, 1),
-        (&metadata.egress, 4),
-    ]
-    .into_iter()
-    .zip(previous)
-    .filter(|((candidate, _), installed)| *candidate != *installed)
-    .map(|((_, containers), _)| containers)
-    .sum()
+    release
+        .metadata
+        .members()
+        .into_iter()
+        .zip(previous)
+        .filter(|((_, _, candidate), installed)| candidate != installed)
+        .map(|((_, package, _), _)| {
+            graph::MEMBERS
+                .iter()
+                .filter(|member| member.package == package)
+                .count()
+        })
+        .sum()
 }
 
 /// The long-running Space containers, among `identifiers` and their `name|image` records, whose image `release`
@@ -2583,20 +2584,24 @@ fn replaced_containers(
     if identifiers.len() != records.len() {
         return Err(malformed());
     }
+    let members = release.metadata.members();
     let mut replaced = Vec::new();
     for (identifier, record) in identifiers.iter().zip(records) {
         let (name, image) = record.split_once('|').ok_or_else(malformed)?;
-        let candidate = match name {
-            "/shimpz-admin" => &release.metadata.admin,
-            "/shimpz-team" => &release.metadata.team,
-            "/shimpz-brain" => &release.metadata.brain,
-            "/shimpz-brain-egress"
-            | "/shimpz-assistant-egress"
-            | "/shimpz-assistant-release"
-            | "/shimpz-account-egress" => &release.metadata.egress,
-            "/shimpz-account-egress-init" => continue,
-            _ => return Err(malformed()),
-        };
+        let name = name.strip_prefix('/').ok_or_else(malformed)?;
+        if name == graph::ACCOUNT_EGRESS_INIT {
+            continue;
+        }
+        let candidate = graph::MEMBERS
+            .iter()
+            .find(|member| member.container == name)
+            .and_then(|member| {
+                members
+                    .iter()
+                    .find(|(_, package, _)| *package == member.package)
+            })
+            .map(|(_, _, candidate)| *candidate)
+            .ok_or_else(malformed)?;
         if image.is_empty() {
             return Err(malformed());
         }
@@ -4607,7 +4612,7 @@ mod tests {
             assert!(!stage.contains("sha256:"));
             assert!(!stage.contains("space-"));
             assert!(!stage.bytes().any(|byte| byte.is_ascii_digit()));
-            for name in crate::space::resources::RESERVED {
+            for name in crate::space::graph::CONTAINERS {
                 assert!(!stage.contains(name), "{stage}");
             }
         }
