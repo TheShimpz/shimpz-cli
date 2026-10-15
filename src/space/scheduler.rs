@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::output;
+use crate::{output, private_file};
 
 use super::command::{self, Tool};
 use super::host::HostProfile;
@@ -626,7 +626,7 @@ fn write_atomic(path: &Path, value: &str) -> Result<(), String> {
         return Err(io_error(error));
     }
     fs::rename(&temporary, path).map_err(io_error)?;
-    sync_parent(path)
+    private_file::sync_parent(path).map_err(io_error)
 }
 
 fn remove_safe_temporary(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -693,15 +693,6 @@ fn remove_exact_entry(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error(error)),
     }
-}
-
-fn sync_parent(path: &Path) -> Result<(), String> {
-    File::open(
-        path.parent()
-            .ok_or_else(|| "the scheduler directory is invalid".to_owned())?,
-    )
-    .and_then(|directory| directory.sync_all())
-    .map_err(io_error)
 }
 
 fn display_paths(paths: &[PathBuf]) -> Vec<String> {
