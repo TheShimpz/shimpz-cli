@@ -834,7 +834,7 @@ impl Context {
         members::converge(&self.engine, &self.paths, candidate.port).map_err(Some)?;
         self.validate_started_storage(candidate.space_id)
             .map_err(Some)?;
-        output::progress("Verifying Supervisor authentication compatibility...");
+        output::progress("Verifying the Supervisor authentication record...");
         let authentication_error = match admin_authentication_state(candidate.port) {
             Ok(AdminAuthenticationState::RecoveryRequired) if candidate.installed.is_some() => Some(
                 "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install"
