@@ -268,14 +268,9 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
                 "{{range .Config.Env}}{{println .}}{{end}}",
                 graph::TEAM.container,
             ])?;
-            let values: Vec<_> = environment
-                .lines()
-                .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="))
-                .collect();
-            if values.len() != 1 || !id::valid(values[0]) {
-                return Err("the controller has an ambiguous Space identity".into());
-            }
-            Ok(Some(values[0].into()))
+            single_space_id(&environment)
+                .map(Some)
+                .ok_or_else(|| "the controller has an ambiguous Space identity".into())
         }
     }
 }
@@ -284,14 +279,20 @@ fn read_space_id(paths: &Paths) -> Result<Option<String>, String> {
     let Some(document) = paths.environment_record()? else {
         return Ok(None);
     };
-    let values: Vec<_> = document
+    single_space_id(&document)
+        .map(Some)
+        .ok_or_else(|| "the Local Space identity is invalid".into())
+}
+
+/// The one valid Space id that exactly one `SHIMPZ_SPACE_ID=` line of `environment` declares.
+fn single_space_id(environment: &str) -> Option<String> {
+    let mut values = environment
         .lines()
-        .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="))
-        .collect();
-    if values.len() != 1 || !id::valid(values[0]) {
-        return Err("the Local Space identity is invalid".into());
+        .filter_map(|line| line.strip_prefix("SHIMPZ_SPACE_ID="));
+    match (values.next(), values.next()) {
+        (Some(value), None) if id::valid(value) => Some(value.to_owned()),
+        _ => None,
     }
-    Ok(Some(values[0].into()))
 }
 
 /// Docker inspects many objects per call; a bounded chunk keeps each command line small.
