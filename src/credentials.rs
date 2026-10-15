@@ -2,7 +2,7 @@
 
 use std::{
     fmt::{self, Debug, Formatter},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -112,11 +112,7 @@ pub(crate) fn lock() -> Result<CredentialLock, String> {
         .map_err(|_| "CLI configuration directory cannot be created".to_owned())?;
     secure_directory(&directory)?;
     let path = directory.join(CREDENTIALS_LOCK_FILE);
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
-    private_file::private_open(&mut options);
-    let file = options
-        .open(path)
+    let file = private_file::open_lock(&path)
         .map_err(|_| "CLI credential lock cannot be opened".to_owned())?;
     secure_open_file(&file)?;
     file.lock()

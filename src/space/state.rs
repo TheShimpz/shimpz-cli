@@ -2,8 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{self, File};
 use std::path::Path;
 
 use super::docker::ResolvedRelease;
@@ -43,14 +42,7 @@ impl Lock {
     }
 
     pub(crate) fn try_acquire(paths: &Paths) -> Result<Option<Self>, String> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&paths.lock)
+        let file = private_file::open_lock(&paths.lock)
             .map_err(|error| format!("could not open the Local lifecycle lock: {error}"))?;
         let metadata = file
             .metadata()

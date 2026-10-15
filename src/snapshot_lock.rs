@@ -1,6 +1,6 @@
 //! Serialize staging and unstaging of one Assistant's Local snapshots on this workstation.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -27,11 +27,7 @@ fn acquire_in(configuration: &Path, assistant_id: &str) -> Result<SnapshotLock, 
     #[cfg(unix)]
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|_| "Local snapshot lock directory cannot be secured".to_owned())?;
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    private_file::private_open(&mut options);
-    let file = options
-        .open(directory.join(format!("{assistant_id}.lock")))
+    let file = private_file::open_lock(&directory.join(format!("{assistant_id}.lock")))
         .map_err(|_| "Local snapshot lock cannot be opened".to_owned())?;
     #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))

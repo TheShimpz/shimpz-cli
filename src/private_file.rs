@@ -21,6 +21,15 @@ pub(crate) fn private_open(options: &mut OpenOptions) {
     let _ = options;
 }
 
+/// Open, creating it through [`private_open`] when absent, the lock file at `path` for reading and writing without
+/// truncating it. The caller admits the file through the returned handle before locking it.
+pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    private_open(&mut options);
+    options.open(path)
+}
+
 /// Open `path` only to read it, never following a final symbolic link, blocking on a FIFO before its type is checked,
 /// or leaking the descriptor to a child. The caller admits the file through the returned handle.
 pub(crate) fn open_read(path: &Path) -> io::Result<File> {
@@ -57,7 +66,7 @@ pub(crate) fn admit(metadata: &Metadata) -> Result<(), Refusal> {
 
 /// Admit an opened Local lifecycle record or lock: a regular file with a single link, like [`admit`], but owned by
 /// the real user and with exactly mode 0600. This CLI creates every such file itself with exactly that mode (through
-/// [`replace`] or [`private_open`]) for the user who runs the lifecycle, so any other mode or owner is state it did
+/// [`replace`] or [`open_lock`]) for the user who runs the lifecycle, so any other mode or owner is state it did
 /// not leave and is refused rather than trusted.
 pub(crate) fn admit_record(metadata: &Metadata) -> Result<(), Refusal> {
     regular(metadata)?;
