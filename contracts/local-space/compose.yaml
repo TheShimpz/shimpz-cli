@@ -52,8 +52,6 @@ services:
       - "10022"
     environment:
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
-      SHIMPZ_BRAIN_RUNTIME_URL: http://brain:8080
-      SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
     volumes:
       - type: bind
         source: ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}
@@ -373,11 +371,6 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    environment:
-      SHIMPZ_EGRESS_AUDIT_LOG: /var/log/brain-egress/audit.jsonl
-      SHIMPZ_EGRESS_MAX_CONCURRENCY: "64"
-      SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
-      SHIMPZ_EGRESS_LISTEN_BACKLOG: "16"
     labels:
       com.shimpz.local.managed: "1"
       com.shimpz.local.profile: local-v1
@@ -493,8 +486,6 @@ services:
     ports:
       - "127.0.0.1:${SHIMPZ_PORT:-7777}:4600"
     environment:
-      SHIMPZ_TEAM_URL: http://team:7077
-      SHIMPZ_TEAM_TOKEN_FILE: /run/shimpz-local/token
       SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must pin Space identity}
     volumes:
