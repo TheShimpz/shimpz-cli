@@ -3,7 +3,7 @@
 use std::{
     process::Command,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -273,13 +273,6 @@ fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String
     developers_client::error_message(response, MAX_RESPONSE_BYTES, fallback)
 }
 
-fn now_unix() -> Result<u64, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| unavailable())
-}
-
 fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "windows")]
     let mut command = Command::new("cmd");
@@ -387,13 +380,9 @@ impl TokenResponse {
         {
             return Err("Developers returned an invalid token response".into());
         }
-        let now = now_unix()?;
         Credentials::new(
             self.access_token.into_string(),
             self.refresh_token.into_string(),
-            now.checked_add(self.expires_in).ok_or_else(unavailable)?,
-            now.checked_add(self.refresh_expires_in)
-                .ok_or_else(unavailable)?,
             self.scopes,
         )
         .map_err(|_| "Developers returned an invalid token response".into())

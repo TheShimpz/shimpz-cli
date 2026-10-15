@@ -29,8 +29,6 @@ pub(crate) struct Credentials {
     version: u8,
     access_token: String,
     refresh_token: String,
-    access_expires_at: u64,
-    refresh_expires_at: u64,
     scopes: Vec<String>,
 }
 
@@ -38,16 +36,12 @@ impl Credentials {
     pub(crate) fn new(
         access_token: String,
         refresh_token: String,
-        access_expires_at: u64,
-        refresh_expires_at: u64,
         scopes: Vec<String>,
     ) -> Result<Self, String> {
         let credentials = Self {
             version: FORMAT_VERSION,
             access_token,
             refresh_token,
-            access_expires_at,
-            refresh_expires_at,
             scopes,
         };
         credentials.validate()?;
@@ -70,8 +64,6 @@ impl Credentials {
         if self.version != FORMAT_VERSION
             || !valid_token(&self.access_token)
             || !valid_token(&self.refresh_token)
-            || self.access_expires_at == 0
-            || self.refresh_expires_at == 0
             || !valid_scopes(&self.scopes)
         {
             return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
@@ -87,8 +79,6 @@ impl Debug for Credentials {
             .field("version", &self.version)
             .field("access_token", &"<redacted>")
             .field("refresh_token", &"<redacted>")
-            .field("access_expires_at", &self.access_expires_at)
-            .field("refresh_expires_at", &self.refresh_expires_at)
             .field("scopes", &self.scopes)
             .finish()
     }
@@ -268,8 +258,6 @@ mod tests {
         Credentials::new(
             "a".repeat(43),
             "b".repeat(43),
-            1_000,
-            2_000,
             vec!["identity:read".into(), "assistant:publish".into()],
         )
         .unwrap()
@@ -355,14 +343,8 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("credentials.json");
         let first = credentials();
-        let second = Credentials::new(
-            "c".repeat(43),
-            "d".repeat(43),
-            3_000,
-            4_000,
-            vec!["identity:read".into()],
-        )
-        .unwrap();
+        let second =
+            Credentials::new("c".repeat(43), "d".repeat(43), vec!["identity:read".into()]).unwrap();
         store_at(&path, &first).unwrap();
         let mut old_file = File::open(&path).unwrap();
 
