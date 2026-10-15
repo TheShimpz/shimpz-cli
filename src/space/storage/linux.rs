@@ -300,27 +300,11 @@ impl<'a> Pool<'a> {
         command::authorize()?;
         if !self.mapping_path().exists() {
             let mut passphrase = LockedPassphrase::prompt("Encrypted storage passphrase: ")?;
-            passphrase.run_cryptsetup(
-                "open",
-                [
-                    OsString::from("--type"),
-                    OsString::from("luks2"),
-                    self.paths.pool_image.as_os_str().to_owned(),
-                    OsString::from(self.mapping_name()),
-                ],
-            )?;
+            self.open_mapping(&mut passphrase)?;
         }
         self.validate_mapping()?;
         if !self.is_mounted()? {
-            Self::root(
-                Tool::Mount,
-                [
-                    OsString::from("-o"),
-                    OsString::from("nodev,nosuid"),
-                    self.mapping_path().as_os_str().to_owned(),
-                    self.paths.pool_mount.as_os_str().to_owned(),
-                ],
-            )?;
+            self.mount_pool()?;
             self.own_mount_root()?;
         }
         self.create_missing_volumes()?;
@@ -403,15 +387,7 @@ impl<'a> Pool<'a> {
         let uuid = one_line(&uuid, "encrypted Local storage UUID")?;
         write_private(&self.paths.pool_uuid, &format!("{uuid}\n"))?;
         live_trace!("recorded LUKS2 identity");
-        passphrase.run_cryptsetup(
-            "open",
-            [
-                OsString::from("--type"),
-                OsString::from("luks2"),
-                self.paths.pool_image.as_os_str().to_owned(),
-                OsString::from(self.mapping_name()),
-            ],
-        )?;
+        self.open_mapping(&mut passphrase)?;
         live_trace!("opened device-mapper mapping");
         self.validate_mapping()?;
         live_trace!("validated device-mapper mapping");
@@ -429,6 +405,29 @@ impl<'a> Pool<'a> {
             ],
         )?;
         live_trace!("formatted ext4 filesystem");
+        self.mount_pool()?;
+        live_trace!("mounted ext4 filesystem");
+        self.own_mount_root()?;
+        self.create_volume_layout()?;
+        live_trace!("created encrypted volume layout");
+        self.mounted_valid()
+    }
+
+    /// Opens the pool's LUKS2 container as this Space's device-mapper mapping.
+    fn open_mapping(&self, passphrase: &mut LockedPassphrase) -> Result<(), String> {
+        passphrase.run_cryptsetup(
+            "open",
+            [
+                OsString::from("--type"),
+                OsString::from("luks2"),
+                self.paths.pool_image.as_os_str().to_owned(),
+                OsString::from(self.mapping_name()),
+            ],
+        )
+    }
+
+    /// Mounts the opened mapping on the pool mount point without device files or set-user-ID programs.
+    fn mount_pool(&self) -> Result<(), String> {
         Self::root(
             Tool::Mount,
             [
@@ -437,12 +436,7 @@ impl<'a> Pool<'a> {
                 self.mapping_path().as_os_str().to_owned(),
                 self.paths.pool_mount.as_os_str().to_owned(),
             ],
-        )?;
-        live_trace!("mounted ext4 filesystem");
-        self.own_mount_root()?;
-        self.create_volume_layout()?;
-        live_trace!("created encrypted volume layout");
-        self.mounted_valid()
+        )
     }
 
     fn validate_mapping(&self) -> Result<(), String> {
