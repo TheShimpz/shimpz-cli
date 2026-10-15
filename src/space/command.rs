@@ -182,19 +182,6 @@ fn inspect_executable(path: &Path, tool: Tool) -> Candidate {
     Candidate::Trusted(canonical)
 }
 
-#[cfg(test)]
-fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
-    match inspect_executable(path, tool) {
-        Candidate::Trusted(path) => Some(path),
-        Candidate::Absent | Candidate::Refused(_) => None,
-    }
-}
-
-#[cfg(test)]
-fn trusted_metadata(tool: Tool, host: HostOs, file_uid: u32, process_uid: u32, mode: u32) -> bool {
-    metadata_refusal(tool, host, file_uid, process_uid, mode).is_none()
-}
-
 fn metadata_refusal(
     tool: Tool,
     host: HostOs,
@@ -469,6 +456,23 @@ fn effective_root() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn trusted_executable(path: &Path, tool: Tool) -> Option<PathBuf> {
+        match inspect_executable(path, tool) {
+            Candidate::Trusted(path) => Some(path),
+            Candidate::Absent | Candidate::Refused(_) => None,
+        }
+    }
+
+    fn trusted_metadata(
+        tool: Tool,
+        host: HostOs,
+        file_uid: u32,
+        process_uid: u32,
+        mode: u32,
+    ) -> bool {
+        metadata_refusal(tool, host, file_uid, process_uid, mode).is_none()
+    }
 
     /// Host tool output was once read without any bound; each stream now stops the tool one byte past its bound.
     #[cfg(unix)]
