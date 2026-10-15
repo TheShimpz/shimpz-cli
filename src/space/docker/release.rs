@@ -8,10 +8,10 @@ use std::path::Path;
 use std::process::ExitStatus;
 
 use super::{DOCKER_PULL, Engine, ResolvedRelease};
-use crate::digest;
 use crate::space::command::one_line;
 use crate::space::host::HostProfile;
 use crate::space::release::{self, DEVELOPER_RELEASE_REPOSITORY, Package, RELEASE_REPOSITORY};
+use crate::{digest, private_file};
 
 const RELEASE_CHANNEL: &str = "stable";
 
@@ -35,17 +35,21 @@ fn regular_file(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-/// Read copied release metadata only when it is a regular file of bounded size.
+/// Read copied release metadata only when it is a regular file of bounded size, admitted through the open handle.
 fn read_metadata(path: &Path) -> Result<String, String> {
-    if !regular_file(path) {
-        return Err("the Local release metadata is not a regular file".into());
+    let not_regular = || "the Local release metadata is not a regular file".to_owned();
+    let file = match private_file::open_read(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(not_regular()),
+        Err(error) => return Err(format!("could not read Local release metadata: {error}")),
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Err(not_regular());
     }
     let mut document = String::new();
-    fs::File::open(path)
-        .and_then(|file| {
-            file.take(MAX_RELEASE_METADATA_BYTES + 1)
-                .read_to_string(&mut document)
-        })
+    file.take(MAX_RELEASE_METADATA_BYTES + 1)
+        .read_to_string(&mut document)
         .map_err(|error| format!("could not read Local release metadata: {error}"))?;
     if document.len() as u64 > MAX_RELEASE_METADATA_BYTES {
         return Err("the Local release metadata is malformed".into());
