@@ -92,32 +92,66 @@ fn single_link_of(metadata: &Metadata, owner: u32) -> bool {
     metadata.uid() == owner && metadata.nlink() == 1
 }
 
-/// Read a lifecycle record only when [`admit_record`] admits it and it holds at most `limit` bytes, or return
-/// `Ok(None)` when it is absent. It is opened through [`open_read`] and admitted through the open handle, so the checked
-/// file is the one read and no link is ever followed.
-pub(crate) fn read_record(path: &Path, limit: u64, name: &str) -> Result<Option<String>, String> {
-    let refused = || format!("{name} is not a private record");
+/// Why [`read_admitted`] read no document.
+pub(crate) enum ReadFailure {
+    /// The final path component is a symbolic link.
+    Link,
+    /// The opened file is not one the caller admits.
+    NotAdmitted,
+    /// The file holds more than the limit.
+    Oversized,
+    /// The file could not be opened, absence included.
+    Open(io::Error),
+    /// The opened file could not be inspected.
+    Inspect(io::Error),
+    /// The opened file could not be read.
+    Read(io::Error),
+}
+
+/// Read the file at `path` only when `admits` admits it and it holds at most `limit` bytes. It is opened through
+/// [`open_read`] and admitted through the open handle, so the checked file is the one read and no link is ever
+/// followed.
+pub(crate) fn read_admitted(
+    path: &Path,
+    limit: u64,
+    admits: fn(&Metadata) -> bool,
+) -> Result<String, ReadFailure> {
     let file = match open_read(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),
-        Err(error) => return Err(format!("{name} could not be opened: {error}")),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(ReadFailure::Link),
+        Err(error) => return Err(ReadFailure::Open(error)),
     };
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("{name} could not be inspected: {error}"))?;
-    if admit_record(&metadata).is_err() || metadata.len() > limit {
-        return Err(refused());
+    let metadata = file.metadata().map_err(ReadFailure::Inspect)?;
+    if !admits(&metadata) {
+        return Err(ReadFailure::NotAdmitted);
+    }
+    if metadata.len() > limit {
+        return Err(ReadFailure::Oversized);
     }
     let mut document = String::new();
     file.take(limit + 1)
         .read_to_string(&mut document)
-        .map_err(|error| format!("{name} could not be read: {error}"))?;
+        .map_err(ReadFailure::Read)?;
     if document.len() as u64 > limit {
-        return Err(refused());
+        return Err(ReadFailure::Oversized);
     }
-    Ok(Some(document))
+    Ok(document)
+}
+
+/// Read a lifecycle record only when [`admit_record`] admits it and it holds at most `limit` bytes, through
+/// [`read_admitted`], or return `Ok(None)` when it is absent.
+pub(crate) fn read_record(path: &Path, limit: u64, name: &str) -> Result<Option<String>, String> {
+    match read_admitted(path, limit, |metadata| admit_record(metadata).is_ok()) {
+        Ok(document) => Ok(Some(document)),
+        Err(ReadFailure::Open(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(ReadFailure::Link | ReadFailure::NotAdmitted | ReadFailure::Oversized) => {
+            Err(format!("{name} is not a private record"))
+        }
+        Err(ReadFailure::Open(error)) => Err(format!("{name} could not be opened: {error}")),
+        Err(ReadFailure::Inspect(error)) => Err(format!("{name} could not be inspected: {error}")),
+        Err(ReadFailure::Read(error)) => Err(format!("{name} could not be read: {error}")),
+    }
 }
 
 /// Replace `path` with `contents` through `<path>.tmp`, created exclusively with mode 0600 and synced before the rename.
