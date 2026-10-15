@@ -53,7 +53,6 @@ services:
     environment:
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       SHIMPZ_BRAIN_RUNTIME_URL: http://brain:8080
-      SHIMPZ_OAUTH_BROKER_PROXY_HOST: shimpz-account-egress
       SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
     volumes:
       - type: bind
