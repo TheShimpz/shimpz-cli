@@ -272,9 +272,10 @@ fn status_error(response: &mut Response<Body>, fallback: &'static str) -> String
         Err(message) => return message,
     };
     let message = developers_client::error_message(response, MAX_RESPONSE_BYTES, fallback);
-    retry_after.map_or(message.clone(), |seconds| {
-        format!("{message}; retry after {seconds} seconds")
-    })
+    match retry_after {
+        Some(seconds) => format!("{message}; retry after {seconds} seconds"),
+        None => message,
+    }
 }
 
 fn validate_retry_after(status: u16, value: Option<&str>) -> Result<Option<u64>, String> {
