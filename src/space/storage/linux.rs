@@ -641,20 +641,7 @@ impl<'a> Pool<'a> {
                 .copied()
                 .find(|spec| spec.0 == name)
                 .ok_or_else(|| "encrypted Local volume specification is inconsistent".to_owned())?;
-            let path = self.paths.pool_mount.join(name);
-            Self::root(
-                Tool::Install,
-                [
-                    OsString::from("-d"),
-                    OsString::from("-o"),
-                    OsString::from(uid.to_string()),
-                    OsString::from("-g"),
-                    OsString::from(gid.to_string()),
-                    OsString::from("-m"),
-                    OsString::from(format!("{mode:o}")),
-                    path.into_os_string(),
-                ],
-            )?;
+            Self::create_volume(&self.paths.pool_mount.join(name), uid, gid, mode)?;
         }
         Ok(())
     }
@@ -662,21 +649,26 @@ impl<'a> Pool<'a> {
     fn create_volume_layout(&self) -> Result<(), String> {
         self.validate_mount()?;
         for (name, uid, gid, mode) in VOLUME_SPECS {
-            Self::root(
-                Tool::Install,
-                [
-                    OsString::from("-d"),
-                    OsString::from("-o"),
-                    OsString::from(uid.to_string()),
-                    OsString::from("-g"),
-                    OsString::from(gid.to_string()),
-                    OsString::from("-m"),
-                    OsString::from(format!("{mode:o}")),
-                    self.paths.pool_mount.join(name).as_os_str().to_owned(),
-                ],
-            )?;
+            Self::create_volume(&self.paths.pool_mount.join(name), uid, gid, mode)?;
         }
         Ok(())
+    }
+
+    /// Creates one volume directory with its exact owner and mode, as root.
+    fn create_volume(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), String> {
+        Self::root(
+            Tool::Install,
+            [
+                OsString::from("-d"),
+                OsString::from("-o"),
+                OsString::from(uid.to_string()),
+                OsString::from("-g"),
+                OsString::from(gid.to_string()),
+                OsString::from("-m"),
+                OsString::from(format!("{mode:o}")),
+                path.as_os_str().to_owned(),
+            ],
+        )
     }
 
     fn own_mount_root(&self) -> Result<(), String> {
@@ -900,22 +892,14 @@ fn preflight_incomplete_reset(paths: &Paths, marker: Option<&Path>) -> Result<()
         }
         return Ok(());
     }
-    if paths.pool_image.exists() {
-        exact_regular_file(&paths.pool_image)?;
-        refuse_open_partial_pool(paths)?;
-    }
-    if paths.pool_mount.exists() {
-        let metadata = paths.pool_mount.symlink_metadata().map_err(io_error)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err("encrypted Local storage mountpoint is invalid".into());
-        }
-        if fs::read_dir(&paths.pool_mount)
+    validate_partial_pool(paths)?;
+    if paths.pool_mount.exists()
+        && fs::read_dir(&paths.pool_mount)
             .map_err(io_error)?
             .next()
             .is_some()
-        {
-            return Err("the incomplete Local storage mountpoint is not empty".into());
-        }
+    {
+        return Err("the incomplete Local storage mountpoint is not empty".into());
     }
     let uuid_temporary = paths.pool_uuid.with_extension("tmp");
     if uuid_temporary.exists() {
@@ -933,16 +917,7 @@ fn reset_incomplete(paths: &Paths) -> Result<(), String> {
     {
         return Err("encrypted Local storage marker is invalid".into());
     }
-    if paths.pool_image.exists() {
-        exact_regular_file(&paths.pool_image)?;
-        refuse_open_partial_pool(paths)?;
-    }
-    if paths.pool_mount.exists() {
-        let metadata = paths.pool_mount.symlink_metadata().map_err(io_error)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err("encrypted Local storage mountpoint is invalid".into());
-        }
-    }
+    validate_partial_pool(paths)?;
     remove_if_regular(&paths.pool_uuid.with_extension("tmp"))?;
     remove_if_empty(&paths.pool_mount)?;
     remove_if_regular(&paths.pool_image)?;
@@ -950,10 +925,36 @@ fn reset_incomplete(paths: &Paths) -> Result<(), String> {
     remove_if_empty(&paths.security)
 }
 
-fn refuse_open_partial_pool(paths: &Paths) -> Result<(), String> {
-    let pool = paths.pool_image.canonicalize().map_err(io_error)?;
+/// Proves a partial pool is safe to remove: its image, when present, is an exact regular file no loop device holds
+/// open, and its mountpoint, when present, is a real directory.
+fn validate_partial_pool(paths: &Paths) -> Result<(), String> {
+    if paths.pool_image.exists() {
+        exact_regular_file(&paths.pool_image)?;
+        let pool = paths.pool_image.canonicalize().map_err(io_error)?;
+        if !pool_loop_devices(
+            &pool,
+            "the partial encrypted storage has a deleted open backing file",
+        )?
+        .is_empty()
+        {
+            return Err("the partial encrypted storage still has an open loop device".into());
+        }
+    }
+    if paths.pool_mount.exists() {
+        let metadata = paths.pool_mount.symlink_metadata().map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("encrypted Local storage mountpoint is invalid".into());
+        }
+    }
+    Ok(())
+}
+
+/// The `/sys/class/block` entries of every loop device backed by the canonical `pool` image. A loop device still
+/// backed by the deleted pool image is refused with `deleted`.
+fn pool_loop_devices(pool: &Path, deleted: &str) -> Result<Vec<PathBuf>, String> {
     let blocks = fs::read_dir("/sys/class/block")
         .map_err(|_| "the host block-device inventory is unavailable".to_owned())?;
+    let mut devices = Vec::new();
     for entry in blocks {
         let entry = entry.map_err(io_error)?;
         let name = entry.file_name();
@@ -968,17 +969,17 @@ fn refuse_open_partial_pool(paths: &Paths) -> Result<(), String> {
         let Some(backing) = read_loop_backing(&entry.path().join("loop/backing_file"))? else {
             continue;
         };
-        if deleted_backing_is_pool(&backing, &pool) {
-            return Err("the partial encrypted storage has a deleted open backing file".into());
+        if deleted_backing_is_pool(&backing, pool) {
+            return Err(deleted.to_owned());
         }
         if PathBuf::from(&backing)
             .canonicalize()
             .is_ok_and(|backing| backing == pool)
         {
-            return Err("the partial encrypted storage still has an open loop device".into());
+            devices.push(entry.path());
         }
     }
-    Ok(())
+    Ok(devices)
 }
 
 fn reconcile_storage_marker(paths: &Paths) -> Result<(), String> {
@@ -1001,33 +1002,11 @@ fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
     let recorded_uuid = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
     let recorded_uuid = one_line(&recorded_uuid, "pool UUID")?.replace('-', "");
     let mut identities = Vec::new();
-    let blocks = fs::read_dir("/sys/class/block")
-        .map_err(|_| "the host block-device inventory is unavailable".to_owned())?;
-    for entry in blocks {
-        let entry = entry.map_err(io_error)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.strip_prefix("loop").is_some_and(|suffix| {
-            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        }) {
-            continue;
-        }
-        let backing = entry.path().join("loop/backing_file");
-        let Some(backing) = read_loop_backing(&backing)? else {
-            continue;
-        };
-        if deleted_backing_is_pool(&backing, &pool) {
-            return Err("the encrypted Local storage has a deleted open backing file".into());
-        }
-        let Ok(backing) = PathBuf::from(&backing).canonicalize() else {
-            continue;
-        };
-        if backing != pool {
-            continue;
-        }
-        let mut holders = fs::read_dir(entry.path().join("holders")).map_err(|_| {
+    for device in pool_loop_devices(
+        &pool,
+        "the encrypted Local storage has a deleted open backing file",
+    )? {
+        let mut holders = fs::read_dir(device.join("holders")).map_err(|_| {
             "the encrypted Local storage holder inventory is unavailable".to_owned()
         })?;
         let mut found_holder = false;
