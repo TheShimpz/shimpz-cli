@@ -1,9 +1,12 @@
 //! Integrity checks for the pinned source-package v1 authority.
 
-use std::fmt::Write as _;
+#[path = "support/digest.rs"]
+mod digest;
+
 use std::fs;
 use std::path::PathBuf;
 
+use digest::sha256_hex;
 use serde_json::Value;
 
 const FILES: [(&str, &str); 4] = [
@@ -67,14 +70,4 @@ fn vendored_source_package_contract_matches_the_pinned_developers_tree() {
         "f602133860482241f8030e25a11e3a0f0dfe259d"
     );
     assert_eq!(upstream["tree"], "614d308e27d248ce5961327beb9789ae4b969ec6");
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    ring::digest::digest(&ring::digest::SHA256, bytes)
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
 }

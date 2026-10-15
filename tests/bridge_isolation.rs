@@ -2,13 +2,16 @@
 
 #![cfg(unix)]
 
+#[path = "support/digest.rs"]
+mod digest;
 #[path = "../src/fake_tool.rs"]
 mod fake_tool;
 
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use digest::sha256_hex;
 
 const SUMMARY: &str = "Verify local file-backed Action execution.";
 
@@ -119,14 +122,4 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
         stderr.contains("invalid language pack acknowledgement"),
         "{stderr}"
     );
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    ring::digest::digest(&ring::digest::SHA256, bytes)
-        .as_ref()
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
 }
