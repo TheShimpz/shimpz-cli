@@ -495,7 +495,6 @@ services:
     environment:
       SHIMPZ_TEAM_URL: http://team:7077
       SHIMPZ_TEAM_TOKEN_FILE: /run/shimpz-local/token
-      SHIMPZ_TEAM_CREDENTIALS_ENABLED: "0"
       SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must pin Space identity}
     volumes:
