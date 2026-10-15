@@ -36,7 +36,7 @@ const ADMIN_RESET_TIMEOUT: Duration = Duration::from_secs(210);
 
 const ADMIN_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) const HOST_RESET_CAPABILITY_SECONDS: u64 = 120;
+const HOST_RESET_CAPABILITY_SECONDS: u64 = 120;
 
 const RESET_INCOMPLETE: &str = "the Space reset did not complete; re-run shimpz reset";
 
@@ -55,12 +55,12 @@ pub(super) enum AdminAuthenticationState {
     RecoveryRequired,
 }
 
-pub(super) struct HostResetCapability {
-    pub(super) secret: Zeroizing<String>,
-    pub(super) document: Vec<u8>,
+struct HostResetCapability {
+    secret: Zeroizing<String>,
+    document: Vec<u8>,
 }
 
-pub(super) fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
+fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
     if record.len() > 4_096 || record.contains('\r') {
         return Err("the owned Admin listener attestation is malformed".into());
     }
@@ -121,7 +121,7 @@ pub(super) fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, 
     }
 }
 
-pub(super) fn admin_authentication_state_response(
+fn admin_authentication_state_response(
     status: u16,
     body: &serde_json::Value,
 ) -> Result<AdminAuthenticationState, String> {
@@ -225,12 +225,12 @@ pub(super) fn admin_available(port: u16) -> bool {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum AdminResetDecision {
+enum AdminResetDecision {
     Complete,
     PasswordRequired,
 }
 
-pub(super) fn admin_reset_decision(
+fn admin_reset_decision(
     status: u16,
     body: &serde_json::Value,
     retry_after: Option<&str>,
@@ -331,9 +331,7 @@ fn retry_after_seconds(value: Option<&str>) -> Option<u16> {
         .filter(|seconds| (1..=3_600).contains(seconds))
 }
 
-pub(super) fn generate_host_reset_capability(
-    space_id: &str,
-) -> Result<HostResetCapability, String> {
+fn generate_host_reset_capability(space_id: &str) -> Result<HostResetCapability, String> {
     let mut source = fs::File::open("/dev/urandom")
         .map_err(|_| "the system random source is unavailable".to_owned())?;
     let mut secret_bytes = [0_u8; 32];
@@ -405,5 +403,269 @@ pub(super) fn admin_reset(engine: &Engine, installed: &Installed) -> Result<(), 
         Ok(())
     } else {
         Err(RESET_INCOMPLETE.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::super::outcome::candidate_admission_error;
+    use super::{
+        AdminAttestation, AdminAuthenticationState, AdminResetDecision,
+        HOST_RESET_CAPABILITY_SECONDS, admin_authentication_state_probe_response,
+        admin_authentication_state_response, admin_reset_decision, generate_host_reset_capability,
+        parse_admin_attestation,
+    };
+
+    #[test]
+    fn host_reset_prompts_only_for_the_exact_password_required_decision() {
+        assert_eq!(
+            admin_reset_decision(200, &serde_json::json!({"reset": true}), None, false),
+            Ok(AdminResetDecision::Complete)
+        );
+        assert_eq!(
+            admin_reset_decision(
+                409,
+                &serde_json::json!({
+                    "code": "supervisor-password-required",
+                    "detail": "Supervisor password is required"
+                }),
+                None,
+                false,
+            ),
+            Ok(AdminResetDecision::PasswordRequired)
+        );
+        for (status, body) in [
+            (200, serde_json::json!({"reset": true, "extra": true})),
+            (409, serde_json::json!({"detail": "password required"})),
+            (
+                503,
+                serde_json::json!({"code": "supervisor-password-required"}),
+            ),
+        ] {
+            assert!(
+                admin_reset_decision(status, &body, None, false)
+                    .unwrap_err()
+                    .contains("re-run shimpz reset")
+            );
+        }
+    }
+
+    #[test]
+    fn generated_host_reset_capability_is_space_bound_bounded_and_secret_free() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let capability = generate_host_reset_capability("space-0123456789abcdef01234567").unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&capability.document).unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert_eq!(capability.secret.len(), 64);
+        assert!(
+            capability
+                .secret
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_eq!(document["version"], 1);
+        assert_eq!(document["purpose"], "space-reset");
+        assert_eq!(document["space_id"], "space-0123456789abcdef01234567");
+        assert!(document["created_at"].as_u64().unwrap() >= before);
+        assert!(document["created_at"].as_u64().unwrap() <= after);
+        assert_eq!(
+            document["expires_at"].as_u64().unwrap() - document["created_at"].as_u64().unwrap(),
+            HOST_RESET_CAPABILITY_SECONDS
+        );
+        let secret = hex_bytes(capability.secret.as_str());
+        assert_eq!(
+            document["capability_sha256"],
+            crate::digest::sha256_hex(&secret)
+        );
+        assert!(
+            !String::from_utf8(capability.document)
+                .unwrap()
+                .contains(capability.secret.as_str())
+        );
+    }
+
+    fn hex_bytes(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn local_session(authentication_state: &str, initialized: bool) -> serde_json::Value {
+        serde_json::json!({
+            "profile": "local",
+            "authenticated": false,
+            "initialized": initialized,
+            "authentication_state": authentication_state,
+            "features": {"teamCredentials": true}
+        })
+    }
+
+    #[test]
+    fn release_gate_accepts_only_exact_consistent_local_authentication_states() {
+        for (name, initialized, expected) in [
+            (
+                "uninitialized",
+                false,
+                AdminAuthenticationState::Uninitialized,
+            ),
+            (
+                "enrollment-required",
+                true,
+                AdminAuthenticationState::EnrollmentRequired,
+            ),
+            ("configured", true, AdminAuthenticationState::Configured),
+            (
+                "recovery-required",
+                true,
+                AdminAuthenticationState::RecoveryRequired,
+            ),
+        ] {
+            assert_eq!(
+                admin_authentication_state_response(200, &local_session(name, initialized)),
+                Ok(expected)
+            );
+        }
+
+        for (status, body) in [
+            (503, local_session("configured", true)),
+            (200, local_session("configured", false)),
+            (200, local_session("unknown", true)),
+            (
+                200,
+                serde_json::json!({
+                    "profile": "unknown",
+                    "authenticated": false,
+                    "initialized": true,
+                    "authentication_state": "configured",
+                    "features": {"teamCredentials": true}
+                }),
+            ),
+            (
+                200,
+                serde_json::json!({
+                    "profile": "local",
+                    "authenticated": false,
+                    "initialized": true,
+                    "authentication_state": "configured",
+                    "features": {"teamCredentials": true},
+                    "extra": true
+                }),
+            ),
+        ] {
+            assert!(admin_authentication_state_response(status, &body).is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_authentication_probe_accepts_only_exact_bounded_states() {
+        for (value, expected) in [
+            ("uninitialized", AdminAuthenticationState::Uninitialized),
+            (
+                "enrollment-required",
+                AdminAuthenticationState::EnrollmentRequired,
+            ),
+            ("configured", AdminAuthenticationState::Configured),
+            (
+                "recovery-required",
+                AdminAuthenticationState::RecoveryRequired,
+            ),
+        ] {
+            assert_eq!(
+                admin_authentication_state_probe_response(value),
+                Ok(expected)
+            );
+        }
+        for invalid in ["", "configured\n", "recovery_required", "future-state"] {
+            assert!(admin_authentication_state_probe_response(invalid).is_err());
+        }
+        assert_eq!(
+            candidate_admission_error("the candidate check failed"),
+            "the candidate check failed; the installed release is unchanged"
+        );
+    }
+
+    #[test]
+    fn host_reset_distinguishes_throttling_from_password_rejection() {
+        assert!(
+            admin_reset_decision(
+                429,
+                &serde_json::json!({"detail": "hidden"}),
+                Some("1"),
+                true
+            )
+            .unwrap_err()
+            .contains("wait 1 second")
+        );
+        assert!(
+            admin_reset_decision(
+                429,
+                &serde_json::json!({"detail": "hidden"}),
+                Some("60"),
+                true
+            )
+            .unwrap_err()
+            .contains("wait 60 seconds")
+        );
+        for invalid in [None, Some("0"), Some("3601"), Some("untrusted\nvalue")] {
+            let error =
+                admin_reset_decision(429, &serde_json::json!({"detail": "hidden"}), invalid, true)
+                    .unwrap_err();
+            assert!(error.contains("wait one minute"));
+            assert!(!error.contains("untrusted"));
+        }
+        assert!(
+            admin_reset_decision(401, &serde_json::json!({"detail": "hidden"}), None, true)
+                .unwrap_err()
+                .contains("password was rejected")
+        );
+    }
+
+    #[test]
+    fn accepts_only_an_attested_loopback_admin_listener() {
+        assert_eq!(
+            parse_admin_attestation(
+                "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Running { port: 7777 })
+        );
+        assert_eq!(
+            parse_admin_attestation(
+                "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"},{\"HostIp\":\"::1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Running { port: 7777 })
+        );
+        assert_eq!(
+            parse_admin_attestation(
+                "false|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}\n"
+            ),
+            Ok(AdminAttestation::Stopped)
+        );
+        for invalid in [
+            "true|foreign|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|team|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"::1\",\"HostPort\":\"7777\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"80\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"},{\"HostIp\":\"::1\",\"HostPort\":\"8888\"}]}",
+            "true|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}],\"80/tcp\":[]}",
+            "true|shimpz-space|admin|null",
+            "true|shimpz-space|admin|{}",
+            "maybe|shimpz-space|admin|{\"4600/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}]}",
+        ] {
+            assert!(parse_admin_attestation(invalid).is_err(), "{invalid}");
+        }
     }
 }

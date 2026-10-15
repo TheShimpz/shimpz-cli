@@ -336,7 +336,7 @@ impl Context {
 
 /// A fresh installation may follow corrupt recovery only once owned scheduler entries are gone: later failures would
 /// otherwise skip scheduler reconciliation and leave owned residue. Unrecognized entries stay preserved with a warning.
-pub(super) fn corrupt_recovery_scheduler(
+fn corrupt_recovery_scheduler(
     removal: Result<scheduler::RemovalOutcome, String>,
 ) -> Result<(), String> {
     match removal {
@@ -539,7 +539,7 @@ fn hard_reset_prompt(
     hard_reset_confirmation(&mut tty)
 }
 
-pub(super) fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, String> {
+fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, String> {
     write!(
         terminal,
         "Permanently hard reset this exact owned Local Space? [Yes/No] "
@@ -561,5 +561,96 @@ pub(super) fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Res
         "Yes" => Ok(true),
         "No" | "" => Ok(false),
         _ => Err("the hard reset answer is invalid; nothing changed".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read, Write};
+
+    use crate::space::scheduler;
+
+    use super::{corrupt_recovery_scheduler, hard_reset_confirmation};
+
+    #[test]
+    fn corrupt_recovery_refuses_a_fresh_install_while_owned_scheduler_entries_remain() {
+        assert_eq!(
+            corrupt_recovery_scheduler(Ok(scheduler::RemovalOutcome::default())),
+            Ok(())
+        );
+        let foreign = scheduler::RemovalOutcome {
+            preserved: vec!["/home/ada/.config/systemd/user/shimpz-update.timer".to_owned()],
+            execution_unverified: true,
+        };
+        assert_eq!(corrupt_recovery_scheduler(Ok(foreign)), Ok(()));
+
+        let error = corrupt_recovery_scheduler(Err(
+            "the automatic Local update timer could not be proven stopped and disabled; the scheduler files were kept"
+                .to_owned(),
+        ))
+        .unwrap_err();
+        assert!(
+            error.starts_with("the corrupt Local Space was removed, but its owned scheduler cleanup did not complete, so no fresh installation was started: the automatic Local update timer could not be proven stopped and disabled"),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("run shimpz reset to finish the cleanup, then run shimpz install"),
+            "{error}"
+        );
+    }
+
+    struct MemoryTerminal {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl MemoryTerminal {
+        fn new(input: &[u8]) -> Self {
+            Self {
+                input: Cursor::new(input.to_vec()),
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for MemoryTerminal {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for MemoryTerminal {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.output.write(buffer)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hard_reset_confirmation_accepts_only_exact_yes() {
+        for (input, expected) in [
+            (b"Yes\n".as_slice(), true),
+            (b"No\n", false),
+            (b"\n", false),
+        ] {
+            let mut terminal = MemoryTerminal::new(input);
+            assert_eq!(hard_reset_confirmation(&mut terminal), Ok(expected));
+            assert!(
+                String::from_utf8(terminal.output)
+                    .unwrap()
+                    .contains("[Yes/No]")
+            );
+        }
+        for input in [b"yes\n".as_slice(), b"Yes\r\n", b"123456789\n"] {
+            let mut terminal = MemoryTerminal::new(input);
+            assert!(
+                hard_reset_confirmation(&mut terminal)
+                    .unwrap_err()
+                    .contains("nothing changed")
+            );
+        }
     }
 }

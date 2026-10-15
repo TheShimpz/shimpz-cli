@@ -143,3 +143,68 @@ pub(super) fn hard_reset_preflight(error: &str) -> String {
 pub(super) fn candidate_admission_error(error: &str) -> String {
     format!("{error}; the installed release is unchanged")
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::space::scheduler;
+
+    use super::{hard_reset_outcome, hard_reset_preflight, reset_outcome, scheduler_outcome};
+
+    #[test]
+    fn reset_outcomes_are_positive_and_report_preserved_content() {
+        let already_clean = reset_outcome(true, &[], false);
+        let changed = reset_outcome(false, &["/home/ada/.shimpz/notes".to_owned()], false);
+        let scheduler = reset_outcome(
+            true,
+            &["/home/ada/Library/LaunchAgents/com.shimpz.update.plist".to_owned()],
+            true,
+        );
+        assert_eq!(
+            already_clean,
+            "Shimpz Space was reset successfully. No change was needed. No managed Space data remains; the shimpz command and lifecycle lock are retained."
+        );
+        assert_eq!(
+            changed,
+            "Shimpz Space was reset successfully. Preserved unrecognized content: /home/ada/.shimpz/notes"
+        );
+        assert!(scheduler.contains("Scheduler execution state is unverified"));
+        assert!(scheduler.contains("run shimpz install from an interactive terminal"));
+        for outcome in [already_clean, changed, scheduler] {
+            assert!(outcome.contains("Shimpz Space was reset successfully"));
+        }
+    }
+
+    #[test]
+    fn hard_reset_outcome_names_retained_and_preserved_state() {
+        let clean = hard_reset_outcome(&[], false);
+        assert!(clean.contains("hard reset completed"));
+        assert!(clean.contains("No managed Space data remains"));
+        assert!(clean.contains("Creator credentials"));
+        assert!(clean.contains("pulled images"));
+        assert!(clean.ends_with("Next: shimpz install"));
+
+        let preserved = hard_reset_outcome(&["/home/ada/.shimpz/notes".into()], true);
+        assert!(preserved.contains("/home/ada/.shimpz/notes"));
+        assert!(preserved.contains("Scheduler execution state is unverified"));
+        let preflight = hard_reset_preflight("the Local Space identity is invalid");
+        assert!(preflight.contains("nothing changed"));
+        assert!(preflight.contains("re-run shimpz reset --hard"));
+    }
+
+    #[test]
+    fn scheduler_conflicts_do_not_erase_a_healthy_space_outcome() {
+        let ready = "Shimpz Space is ready.".to_owned();
+        let preserved = scheduler_outcome(
+            ready.clone(),
+            Ok(scheduler::InstallOutcome::Preserved(vec![
+                "/home/ada/scheduler".into(),
+            ])),
+        )
+        .unwrap();
+        assert!(preserved.starts_with(&ready));
+        assert!(preserved.contains("execution state is unverified"));
+        let error = scheduler_outcome(ready.clone(), Err("write failed".into())).unwrap_err();
+        assert!(error.starts_with(&ready));
+        assert!(error.contains("Space is healthy"));
+    }
+}
