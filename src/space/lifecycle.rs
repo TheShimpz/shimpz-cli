@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
+use crate::private_file;
 
 use super::deploy;
 use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
@@ -199,13 +200,16 @@ pub(crate) fn status() -> Result<String, String> {
     )
 }
 
+/// The most bytes an installed Local graph record may hold: far above any rendered graph, so a stale graph of another
+/// release still reads as not current instead of refusing.
+const MAX_GRAPH_BYTES: u64 = 256 * 1024;
+
 fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<bool, String> {
     let expected = graph::render(profile.storage());
-    match fs::read_to_string(&paths.compose) {
-        Ok(actual) => Ok(actual == expected),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("could not read the installed Local graph: {error}")),
-    }
+    Ok(
+        private_file::read_record(&paths.compose, MAX_GRAPH_BYTES, "the installed Local graph")?
+            .is_some_and(|actual| actual == expected),
+    )
 }
 
 /// Observes the inventory-proven containers in bounded `docker inspect` batches. A static component the inventory
@@ -1891,7 +1895,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
-        fs::write(&paths.compose, "untrusted stale graph").unwrap();
+        fs::write(&paths.compose, graph::render(StorageProfile::ManagedDisk)).unwrap();
+        fs::set_permissions(
+            &paths.compose,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(installed_graph_is_current(&paths, HostProfile::MacOs).is_err());
+        state::write_private(&paths.compose, "untrusted stale graph").unwrap();
         fs::write(&paths.environment, "current environment").unwrap();
 
         assert!(!installed_graph_is_current(&paths, HostProfile::MacOs).unwrap());
