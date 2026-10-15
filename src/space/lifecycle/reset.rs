@@ -415,13 +415,16 @@ fn record_retained_bin_entries(paths: &Paths, preserved: &mut PathReport) -> Res
     Ok(())
 }
 
-fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Result<bool, String> {
-    let mut tty = confirm::terminal()
-        .map_err(|_| "recovery requires an interactive terminal; nothing changed".to_owned())?;
-    writeln!(tty, "The existing Local Space is corrupt: {reason}").map_err(io_error)?;
+/// The `heading` line counting the owned containers, volumes, and networks, then the named containers, if any.
+fn write_owned_scope(
+    tty: &mut impl Write,
+    heading: &str,
+    inventory: &Inventory,
+    names: &[String],
+) -> Result<(), String> {
     writeln!(
         tty,
-        "Owned scope: {} containers, {} volumes, {} networks",
+        "{heading}: {} containers, {} volumes, {} networks",
         inventory.project_containers.len() + inventory.dynamic_containers.len(),
         inventory.project_volumes.len(),
         inventory.project_networks.len() + inventory.dynamic_networks.len()
@@ -430,6 +433,14 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
     if !names.is_empty() {
         writeln!(tty, "Containers: {}", names.join(", ")).map_err(io_error)?;
     }
+    Ok(())
+}
+
+fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Result<bool, String> {
+    let mut tty = confirm::terminal()
+        .map_err(|_| "recovery requires an interactive terminal; nothing changed".to_owned())?;
+    writeln!(tty, "The existing Local Space is corrupt: {reason}").map_err(io_error)?;
+    write_owned_scope(&mut tty, "Owned scope", inventory, names)?;
     confirm::ask_exactly(
         &mut tty,
         "Permanently remove this exact owned state and install a fresh Space?",
@@ -450,17 +461,7 @@ fn hard_reset_prompt(
         "Hard reset bypasses Shimpz Supervisor authorization and permanently removes the current owned Local Space."
     )
     .map_err(io_error)?;
-    writeln!(
-        tty,
-        "Owned Docker scope: {} containers, {} volumes, {} networks",
-        inventory.project_containers.len() + inventory.dynamic_containers.len(),
-        inventory.project_volumes.len(),
-        inventory.project_networks.len() + inventory.dynamic_networks.len()
-    )
-    .map_err(io_error)?;
-    if !names.is_empty() {
-        writeln!(tty, "Containers: {}", names.join(", ")).map_err(io_error)?;
-    }
+    write_owned_scope(&mut tty, "Owned Docker scope", inventory, names)?;
     if !preserved.is_empty() {
         writeln!(
             tty,
