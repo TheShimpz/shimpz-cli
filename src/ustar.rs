@@ -54,7 +54,7 @@ fn validate(entries: &[InputEntry]) -> Result<(), Error> {
         if collisions.insert(key, entry.path.as_str()).is_some() {
             return reject("case_collision");
         }
-        validate_allowlist(&entry.path, &components)?;
+        validate_allowlist(&components)?;
     }
     validate_required(entries)?;
     if entries.len() > MAX_FILES {
@@ -101,13 +101,12 @@ fn validate_path(path: &str) -> Result<Vec<&str>, Error> {
     Ok(components)
 }
 
-fn validate_allowlist(path: &str, components: &[&str]) -> Result<(), Error> {
+fn validate_allowlist(components: &[&str]) -> Result<(), Error> {
     match components {
         ["actions", filename] if action_filename(filename) => Ok(()),
         ["actions", _] => reject("invalid_entry"),
         ["actions", ..] => reject("nested_action"),
         ["icon.png" | "shimpz.toml" | "pyproject.toml"] | ["lib" | "tests", _, ..] => Ok(()),
-        _ if matches!(path, "icon.png" | "shimpz.toml" | "pyproject.toml") => Ok(()),
         _ => reject("unknown_root"),
     }
 }
