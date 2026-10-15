@@ -4,9 +4,9 @@
 //! interrupted, or now too-long entry is simply translated again and replaced.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 
 use crate::language_pack::LOCALES;
 use crate::private_file;
@@ -25,14 +25,12 @@ impl Memory {
 
     /// The remembered texts of one message, or `None` when absent, unreadable, or not a regular file.
     pub(crate) fn get(&self, id: &str) -> Option<BTreeMap<String, String>> {
-        let file = open_regular(&self.directory.join(format!("{id}.json")))?;
-        let mut bytes = Vec::new();
-        file.take(MAX_ENTRY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES {
-            return None;
-        }
+        let bytes = private_file::read_admitted(
+            &self.directory.join(format!("{id}.json")),
+            MAX_ENTRY_BYTES,
+            private_file::regular,
+        )
+        .ok()?;
         let texts: BTreeMap<String, String> = serde_json::from_slice(&bytes).ok()?;
         texts
             .keys()
@@ -53,15 +51,6 @@ impl Memory {
             .and_then(|()| file.commit())
             .map_err(|_| failure())
     }
-}
-
-/// Open a regular file without following a final symbolic link or blocking on a FIFO.
-fn open_regular(path: &Path) -> Option<File> {
-    let file = private_file::open_read(path).ok()?;
-    file.metadata()
-        .ok()
-        .filter(|metadata| metadata.file_type().is_file())
-        .map(|_| file)
 }
 
 #[cfg(test)]

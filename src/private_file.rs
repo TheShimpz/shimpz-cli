@@ -10,6 +10,8 @@ use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+use zeroize::Zeroizing;
+
 /// Never follow a final symbolic link or leak the descriptor to a child, and create the file readable only by this
 /// user.
 pub(crate) fn private_open(options: &mut OpenOptions) {
@@ -48,7 +50,7 @@ pub(crate) fn open_read(path: &Path) -> io::Result<File> {
 }
 
 /// Why an opened file is not this user's private file.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Refusal {
     /// The path names a directory, device, FIFO, or other non-regular file.
     NotRegularFile,
@@ -86,7 +88,8 @@ pub(crate) fn admit_record(metadata: &Metadata) -> Result<(), Refusal> {
     Ok(())
 }
 
-fn regular(metadata: &Metadata) -> Result<(), Refusal> {
+/// Admit an opened file only as a regular file, whatever its owner or mode.
+pub(crate) fn regular(metadata: &Metadata) -> Result<(), Refusal> {
     if metadata.file_type().is_file() {
         Ok(())
     } else {
@@ -104,25 +107,25 @@ pub(crate) enum ReadFailure {
     /// The final path component is a symbolic link.
     Link,
     /// The opened file is not one the caller admits.
-    NotAdmitted,
+    NotAdmitted(Refusal),
     /// The file holds more than the limit.
     Oversized,
     /// The file could not be opened, absence included.
     Open(io::Error),
     /// The opened file could not be inspected.
     Inspect(io::Error),
-    /// The opened file could not be read.
+    /// The opened file could not be read, or a text is not UTF-8.
     Read(io::Error),
 }
 
 /// Read the file at `path` only when `admits` admits it and it holds at most `limit` bytes. It is opened through
 /// [`open_read`] and admitted through the open handle, so the checked file is the one read and no link is ever
-/// followed.
+/// followed. The bytes are erased when dropped, so a secret read here never outlives its use.
 pub(crate) fn read_admitted(
     path: &Path,
     limit: u64,
-    admits: fn(&Metadata) -> bool,
-) -> Result<String, ReadFailure> {
+    admits: fn(&Metadata) -> Result<(), Refusal>,
+) -> Result<Zeroizing<Vec<u8>>, ReadFailure> {
     let file = match open_read(path) {
         Ok(file) => file,
         #[cfg(unix)]
@@ -130,29 +133,44 @@ pub(crate) fn read_admitted(
         Err(error) => return Err(ReadFailure::Open(error)),
     };
     let metadata = file.metadata().map_err(ReadFailure::Inspect)?;
-    if !admits(&metadata) {
-        return Err(ReadFailure::NotAdmitted);
-    }
+    admits(&metadata).map_err(ReadFailure::NotAdmitted)?;
     if metadata.len() > limit {
         return Err(ReadFailure::Oversized);
     }
-    let mut document = String::new();
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len()).unwrap_or(0),
+    ));
     file.take(limit + 1)
-        .read_to_string(&mut document)
+        .read_to_end(&mut bytes)
         .map_err(ReadFailure::Read)?;
-    if document.len() as u64 > limit {
+    if bytes.len() as u64 > limit {
         return Err(ReadFailure::Oversized);
     }
-    Ok(document)
+    Ok(bytes)
+}
+
+/// [`read_admitted`] for a UTF-8 text.
+pub(crate) fn read_admitted_text(
+    path: &Path,
+    limit: u64,
+    admits: fn(&Metadata) -> Result<(), Refusal>,
+) -> Result<String, ReadFailure> {
+    let mut bytes = read_admitted(path, limit, admits)?;
+    String::from_utf8(std::mem::take(&mut *bytes)).map_err(|_| {
+        ReadFailure::Read(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ))
+    })
 }
 
 /// Read a lifecycle record only when [`admit_record`] admits it and it holds at most `limit` bytes, through
 /// [`read_admitted`], or return `Ok(None)` when it is absent.
 pub(crate) fn read_record(path: &Path, limit: u64, name: &str) -> Result<Option<String>, String> {
-    match read_admitted(path, limit, |metadata| admit_record(metadata).is_ok()) {
+    match read_admitted_text(path, limit, admit_record) {
         Ok(document) => Ok(Some(document)),
         Err(ReadFailure::Open(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(ReadFailure::Link | ReadFailure::NotAdmitted | ReadFailure::Oversized) => {
+        Err(ReadFailure::Link | ReadFailure::NotAdmitted(_) | ReadFailure::Oversized) => {
             Err(format!("{name} is not a private record"))
         }
         Err(ReadFailure::Open(error)) => Err(format!("{name} could not be opened: {error}")),

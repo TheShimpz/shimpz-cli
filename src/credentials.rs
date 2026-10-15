@@ -3,7 +3,7 @@
 use std::{
     fmt::{self, Debug, Formatter},
     fs::{self, File},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::config_dir;
-use crate::private_file::{self, Refusal};
+use crate::private_file::{self, ReadFailure, Refusal};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
@@ -129,25 +129,24 @@ fn credentials_path() -> Result<PathBuf, String> {
 }
 
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
-    let file = match private_file::open_read(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err("CLI credentials cannot be opened".into()),
+    let bytes = match private_file::read_admitted(path, MAX_CREDENTIALS_BYTES, private_file::admit)
+    {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::Open(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(ReadFailure::Link | ReadFailure::Open(_)) => {
+            return Err("CLI credentials cannot be opened".into());
+        }
+        Err(ReadFailure::Inspect(_)) => {
+            return Err("CLI credential metadata is unavailable".into());
+        }
+        Err(ReadFailure::NotAdmitted(refusal)) => return Err(secure_file_refusal(refusal)),
+        Err(ReadFailure::Oversized) => {
+            return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
+        }
+        Err(ReadFailure::Read(_)) => return Err("CLI credentials cannot be read".into()),
     };
-    let metadata = file
-        .metadata()
-        .map_err(|_| "CLI credential metadata is unavailable".to_owned())?;
-    require_secure_file(&metadata)?;
-    if metadata.len() > MAX_CREDENTIALS_BYTES {
-        return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.take(MAX_CREDENTIALS_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "CLI credentials cannot be read".to_owned())?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CREDENTIALS_BYTES {
-        return Err("stored CLI credentials are invalid; run `shimpz auth` again".into());
-    }
     let credentials: Credentials = serde_json::from_slice(&bytes)
         .map_err(|_| "stored CLI credentials are invalid; run `shimpz auth` again".to_owned())?;
     credentials.validate()?;
@@ -187,11 +186,15 @@ fn clear_at(path: &Path) -> Result<(), String> {
 }
 
 fn require_secure_file(metadata: &fs::Metadata) -> Result<(), String> {
-    private_file::admit(metadata).map_err(|refusal| match refusal {
+    private_file::admit(metadata).map_err(secure_file_refusal)
+}
+
+fn secure_file_refusal(refusal: Refusal) -> String {
+    match refusal {
         Refusal::NotRegularFile => "CLI credential path is not a regular file".into(),
         #[cfg(unix)]
         Refusal::NotPrivate => "CLI credential file ownership or permissions are unsafe".into(),
-    })
+    }
 }
 
 fn secure_directory(path: &Path) -> Result<(), String> {

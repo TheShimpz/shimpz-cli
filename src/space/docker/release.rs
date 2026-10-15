@@ -2,7 +2,7 @@
 //! CLI out of it.
 
 use std::ffi::OsString;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::path::Path;
 use std::process::ExitStatus;
 
@@ -37,17 +37,16 @@ fn regular_file(path: &Path) -> bool {
 
 /// Read copied release metadata only when it is a regular file of bounded size, admitted through the open handle.
 fn read_metadata(path: &Path) -> Result<String, String> {
-    private_file::read_admitted(path, MAX_RELEASE_METADATA_BYTES, Metadata::is_file).map_err(
-        |failure| match failure {
-            ReadFailure::Link | ReadFailure::NotAdmitted | ReadFailure::Inspect(_) => {
+    private_file::read_admitted_text(path, MAX_RELEASE_METADATA_BYTES, private_file::regular)
+        .map_err(|failure| match failure {
+            ReadFailure::Link | ReadFailure::NotAdmitted(_) | ReadFailure::Inspect(_) => {
                 "the Local release metadata is not a regular file".to_owned()
             }
             ReadFailure::Oversized => "the Local release metadata is malformed".to_owned(),
             ReadFailure::Open(error) | ReadFailure::Read(error) => {
                 format!("could not read Local release metadata: {error}")
             }
-        },
-    )
+        })
 }
 
 /// The inspected image holds exactly `reference` among its repository digests and runs on `platform`.

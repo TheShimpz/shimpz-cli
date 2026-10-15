@@ -3,17 +3,17 @@
 //! Only an absent file means "no key". Every other problem fails, so an unsafe, unreadable, or malformed key is never
 //! silently replaced by untranslated text. The key is never printed, put in the environment, or passed to Docker.
 
-use std::io::{ErrorKind, Read};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
 use crate::config_dir;
-use crate::private_file::{self, Refusal};
+use crate::private_file::{self, ReadFailure, Refusal};
 
 /// The key file's name inside the CLI's `shimpz` configuration directory.
 pub(crate) const FILE_NAME: &str = "openai-api-key";
-const MAX_KEY_BYTES: usize = 4096;
+const MAX_KEY_BYTES: u64 = 4096;
 
 /// The fixed key path: `~/.config/shimpz/openai-api-key` (or `$XDG_CONFIG_HOME`), `%APPDATA%\shimpz\...` on Windows.
 /// Without an OS configuration directory no key file can exist.
@@ -29,25 +29,25 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
             path.display()
         )
     };
-    let file = match private_file::open_read(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(unusable("cannot be opened as a regular file")),
-    };
-    let metadata = file
-        .metadata()
-        .map_err(|_| unusable("cannot be inspected"))?;
-    private_file::admit(&metadata).map_err(|refusal| match refusal {
-        Refusal::NotRegularFile => unusable("is not a regular file"),
+    let bytes = match private_file::read_admitted(path, MAX_KEY_BYTES, private_file::admit) {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::Open(error)) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(ReadFailure::Link | ReadFailure::Open(_)) => {
+            return Err(unusable("cannot be opened as a regular file"));
+        }
+        Err(ReadFailure::Inspect(_)) => return Err(unusable("cannot be inspected")),
+        Err(ReadFailure::NotAdmitted(Refusal::NotRegularFile)) => {
+            return Err(unusable("is not a regular file"));
+        }
         #[cfg(unix)]
-        Refusal::NotPrivate => unusable(
-            "must be owned by you, readable only by you (mode 0600), and have a single link",
-        ),
-    })?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_KEY_BYTES + 2));
-    file.take(u64::try_from(MAX_KEY_BYTES).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| unusable("cannot be read"))?;
+        Err(ReadFailure::NotAdmitted(Refusal::NotPrivate)) => {
+            return Err(unusable(
+                "must be owned by you, readable only by you (mode 0600), and have a single link",
+            ));
+        }
+        Err(ReadFailure::Oversized) => return Err(unusable("must hold exactly one API key")),
+        Err(ReadFailure::Read(_)) => return Err(unusable("cannot be read")),
+    };
     parse(&bytes)
         .map(Some)
         .ok_or_else(|| unusable("must hold exactly one API key"))
@@ -55,9 +55,6 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
 
 /// Admit one key of printable ASCII without whitespace, followed by at most one LF or CRLF.
 fn parse(bytes: &[u8]) -> Option<Zeroizing<String>> {
-    if bytes.len() > MAX_KEY_BYTES {
-        return None;
-    }
     let key = bytes
         .strip_suffix(b"\r\n")
         .or_else(|| bytes.strip_suffix(b"\n"))
@@ -107,7 +104,7 @@ mod tests {
             b"sk-test-123\n\n",
             b"sk-\ttest",
             "sk-tést".as_bytes(),
-            &[b'k'; MAX_KEY_BYTES + 1],
+            &vec![b'k'; usize::try_from(MAX_KEY_BYTES).unwrap() + 1],
         ] {
             let error = load(&write(directory.path(), bytes)).unwrap_err();
             assert!(error.contains("must hold exactly one API key"), "{error}");
