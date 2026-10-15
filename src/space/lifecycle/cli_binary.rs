@@ -292,3 +292,208 @@ pub(super) fn handoff_failure(status: std::io::Result<std::process::ExitStatus>)
         Err(error) => Some(format!("it could not start: {error}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn public_command_is_only_the_exact_managed_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        fs::write(&paths.managed_cli, "managed").unwrap();
+        ensure_public_cli(&paths).unwrap();
+        assert_eq!(fs::read_link(&paths.public_cli).unwrap(), paths.managed_cli);
+        assert!(ensure_public_cli(&paths).is_ok());
+        fs::remove_file(&paths.public_cli).unwrap();
+        fs::write(&paths.public_cli, "foreign").unwrap();
+        assert!(ensure_public_cli(&paths).is_err());
+    }
+
+    #[test]
+    fn candidate_activation_restores_the_previous_private_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        let previous = paths.managed_cli.with_extension("previous");
+        fs::write(&paths.managed_cli, "candidate").unwrap();
+        fs::write(&previous, "previous").unwrap();
+        restore_previous_cli(&paths.managed_cli, &previous).unwrap();
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "previous");
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn reconciles_only_a_previous_artifact_for_the_running_managed_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
+        let previous = paths.managed_cli.with_extension("previous");
+        fs::write(&paths.managed_cli, "current").unwrap();
+        fs::write(&previous, "previous").unwrap();
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
+        assert!(!previous.exists());
+
+        fs::remove_file(&paths.managed_cli).unwrap();
+        fs::write(&previous, "restored").unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "restored");
+
+        fs::write(&previous, "previous").unwrap();
+        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
+        let other = paths.managed_cli.parent().unwrap().join("other");
+        fs::write(&other, "other").unwrap();
+        assert!(reconcile_previous_cli(&paths.managed_cli, &other).is_err());
+        assert!(previous.exists());
+    }
+
+    /// A private Space home with a managed CLI directory, plus a verified release-bound CLI outside it.
+    fn activation_fixture(home: &Path) -> (Paths, PathBuf, String) {
+        let paths = Paths::under(home).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let source = home.join("bootstrap-shimpz");
+        fs::write(&source, "release-bound CLI").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected = hash_file(&source).unwrap();
+        (paths, source, expected)
+    }
+
+    fn private_file(path: &Path, content: &str, mode: u32) {
+        fs::write(path, content).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn activation_installs_the_verified_cli_and_clears_stale_handoff_artifacts() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir(bin).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+        private_file(
+            &paths.managed_cli.with_extension("previous"),
+            "stale",
+            0o700,
+        );
+        private_file(
+            &paths.managed_cli.with_extension("candidate"),
+            "stale",
+            0o700,
+        );
+
+        activate_cli(&paths, &source, &expected).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&paths.managed_cli).unwrap(),
+            "release-bound CLI"
+        );
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert_eq!(mode(bin), 0o700);
+        assert!(!paths.managed_cli.with_extension("previous").exists());
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+    }
+
+    #[test]
+    fn activation_creates_the_private_managed_directory_for_a_fresh_space() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+
+        activate_cli(&paths, &source, &expected).unwrap();
+
+        assert_eq!(mode(paths.managed_cli.parent().unwrap()), 0o700);
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert_eq!(hash_file(&paths.managed_cli).unwrap(), expected);
+    }
+
+    #[test]
+    fn activation_of_an_unbound_cli_leaves_the_managed_cli_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, _) = activation_fixture(home.path());
+        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+
+        let error = activate_cli(&paths, &source, HEX).unwrap_err();
+
+        assert_eq!(
+            error,
+            "the running CLI is not bound to the selected Local release"
+        );
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+    }
+
+    #[test]
+    fn activation_refuses_a_redirected_managed_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let outside = home.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let bin = paths.managed_cli.parent().unwrap();
+        symlink(&outside, bin).unwrap();
+        assert!(activate_cli(&paths, &source, &expected).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+        fs::remove_file(bin).unwrap();
+        symlink(home.path().join("missing"), bin).unwrap();
+        assert!(activate_cli(&paths, &source, &expected).is_err());
+        assert!(!home.path().join("missing").exists());
+    }
+
+    #[test]
+    fn activation_refuses_foreign_entries_before_changing_the_managed_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, source, expected) = activation_fixture(home.path());
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir(bin).unwrap();
+        fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
+        private_file(&paths.managed_cli, "old CLI", 0o700);
+        private_file(&bin.join("foreign"), "foreign", 0o600);
+
+        assert!(
+            activate_cli(&paths, &source, &expected)
+                .unwrap_err()
+                .starts_with("refusing to use unowned managed CLI entries")
+        );
+        assert_eq!(mode(bin), 0o755);
+        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
+    }
+
+    #[test]
+    fn activation_by_the_running_managed_cli_keeps_its_executable_image() {
+        let home = tempfile::tempdir().unwrap();
+        let (paths, _, expected) = activation_fixture(home.path());
+        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
+        private_file(&paths.managed_cli, "release-bound CLI", 0o600);
+        private_file(&paths.managed_cli.with_extension("previous"), "old", 0o700);
+        private_file(
+            &paths.managed_cli.with_extension("candidate"),
+            "stale",
+            0o700,
+        );
+        let inode = fs::metadata(&paths.managed_cli).unwrap().ino();
+
+        activate_cli(&paths, &paths.managed_cli, &expected).unwrap();
+
+        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
+        assert_eq!(mode(&paths.managed_cli), 0o700);
+        assert!(!paths.managed_cli.with_extension("previous").exists());
+        assert!(!paths.managed_cli.with_extension("candidate").exists());
+        assert!(activate_cli(&paths, &paths.managed_cli, HEX).is_err());
+        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
+    }
+}

@@ -17,7 +17,7 @@ use super::docker::{COMPOSE_UP, Engine, PendingStatus, ProjectionFailure, Resolv
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::members;
-use super::paths::{self, Paths};
+use super::paths::Paths;
 use super::poll;
 use super::release;
 use super::resources::{self, Inventory};
@@ -28,6 +28,7 @@ use super::storage::linux;
 
 mod admin;
 mod cli_binary;
+mod home;
 mod outcome;
 mod reset;
 
@@ -39,6 +40,10 @@ use cli_binary::{
     handoff_failure, hash_file, reconcile_previous_cli, restore_previous_cli, validate_managed_bin,
     validate_private_cli, verify_running_cli,
 };
+use home::{
+    PathReport, adopt_unmarked_home, remove_regular_if_present, unmarked_runtime_entries,
+    validate_existing_install_home, validate_install_home, validate_regular_if_present,
+};
 use outcome::{
     SCHEDULED_STOPPED, STORAGE_LOCKED, UPDATE_DEFERRED, available_release_outcome,
     candidate_admission_error, current_release_outcome, failed_update_outcome, ready_outcome,
@@ -46,7 +51,6 @@ use outcome::{
 };
 use reset::remove_runtime_files;
 
-const INVALID_MANAGED_FILE: &str = "refusing to remove invalid managed file";
 const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_PROGRESS: [&str; 3] = [
@@ -1402,121 +1406,6 @@ fn backup_current(paths: &Paths, profile: HostProfile) -> Result<Backup, String>
     })
 }
 
-const REPORTED_ENTRIES: usize = 8;
-
-#[derive(Default)]
-struct PathReport {
-    named: Vec<PathBuf>,
-    total: usize,
-}
-
-impl PathReport {
-    fn record(&mut self, path: PathBuf) {
-        self.total += 1;
-        let index = self
-            .named
-            .binary_search(&path)
-            .unwrap_or_else(|index| index);
-        self.named.insert(index, path);
-        self.named.truncate(REPORTED_ENTRIES);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.total == 0
-    }
-
-    fn render(&self) -> String {
-        let mut rendered = self
-            .named
-            .iter()
-            .map(|path| output::sanitize_inline(&path.to_string_lossy()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if self.total > self.named.len() {
-            use std::fmt::Write as _;
-            write!(
-                &mut rendered,
-                ", and {} more",
-                self.total - self.named.len()
-            )
-            .expect("String writes are infallible");
-        }
-        rendered
-    }
-
-    fn into_strings(self) -> Vec<String> {
-        let hidden = self.total.saturating_sub(self.named.len());
-        let mut rendered = self
-            .named
-            .into_iter()
-            .map(|path| output::sanitize_inline(&path.to_string_lossy()))
-            .collect::<Vec<_>>();
-        if hidden > 0 {
-            rendered.push(format!("and {hidden} more unrecognized entries"));
-        }
-        rendered
-    }
-}
-
-fn validate_install_home(paths: &Paths) -> Result<(), String> {
-    if paths.home.exists() {
-        validate_existing_install_home(paths)?;
-    } else {
-        fs::create_dir(&paths.home).map_err(io_error)?;
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-    }
-    Ok(())
-}
-
-fn validate_existing_install_home(paths: &Paths) -> Result<(), String> {
-    if !paths.home.exists() {
-        return Ok(());
-    }
-    let metadata = paths.home.symlink_metadata().map_err(io_error)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err("refusing to use an invalid Local Space directory".into());
-    }
-    Ok(())
-}
-
-fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
-    state::clear_stopped(paths)?;
-    for temporary in [
-        paths.home.join("release.env.tmp"),
-        paths.marker.with_extension("tmp"),
-    ] {
-        remove_regular_if_present(&temporary)?;
-    }
-    let unowned = unmarked_runtime_entries(paths)?;
-    if !unowned.is_empty() {
-        return Err(format!(
-            "refusing to use unowned Local Space entries under {}: {}; move or remove every unowned entry, then run shimpz install",
-            paths.home.display(),
-            unowned.render()
-        ));
-    }
-    validate_managed_bin(paths)
-}
-
-fn unmarked_runtime_entries(paths: &Paths) -> Result<PathReport, String> {
-    let mut entries = PathReport::default();
-    if !paths.home.exists() {
-        return Ok(entries);
-    }
-    let bin = paths.managed_bin();
-    for entry in fs::read_dir(&paths.home).map_err(io_error)? {
-        let path = entry.map_err(io_error)?.path();
-        if path != bin {
-            entries.record(path);
-        }
-    }
-    Ok(entries)
-}
-
 /// Admit only forward moves among published releases (ADR-0041). A developer release is an explicit selection on
 /// this host and installs freshly or applies over any installed release; the explicit return to the published
 /// channel replaces an installed developer release with any published release.
@@ -1677,14 +1566,6 @@ fn run_update_effect(
     }
 }
 
-fn remove_regular_if_present(path: &Path) -> Result<(), String> {
-    paths::remove_regular_if_present(path, INVALID_MANAGED_FILE, io_error)
-}
-
-fn validate_regular_if_present(path: &Path) -> Result<bool, String> {
-    paths::regular_file_present(path, INVALID_MANAGED_FILE, io_error)
-}
-
 fn io_error(error: std::io::Error) -> String {
     crate::space::io_failure("Local lifecycle operation failed")(error)
 }
@@ -1692,7 +1573,6 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::admin::AdminAttestation;
-    use super::reset::{preflight_remove_files, record_retained_bin_entries};
     use super::*;
     use crate::space::release::Release;
 
@@ -3372,355 +3252,6 @@ mod tests {
         assert!(!outcome.contains("sha256:"));
     }
 
-    #[test]
-    fn unmarked_home_accepts_only_private_managed_cli_artifacts() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
-        fs::write(paths.managed_cli.with_extension("candidate"), "candidate").unwrap();
-        fs::set_permissions(
-            paths.managed_cli.with_extension("candidate"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        validate_install_home(&paths).unwrap();
-        assert!(adopt_unmarked_home(&paths).is_ok());
-        let foreign = paths.managed_cli.parent().unwrap().join("foreign");
-        fs::write(&foreign, "foreign").unwrap();
-        let error = adopt_unmarked_home(&paths).unwrap_err();
-        assert!(error.contains(&foreign.display().to_string()));
-    }
-
-    #[test]
-    fn unmarked_home_reconciles_only_pre_marker_temporaries() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        let release_temporary = paths.home.join("release.env.tmp");
-        let marker_temporary = paths.marker.with_extension("tmp");
-        fs::write(&release_temporary, "metadata").unwrap();
-        fs::write(&marker_temporary, "marker").unwrap();
-        state::write_stopped(&paths).unwrap();
-        validate_install_home(&paths).unwrap();
-        assert_eq!(unmarked_runtime_entries(&paths).unwrap().total, 3);
-        adopt_unmarked_home(&paths).unwrap();
-        assert!(!release_temporary.exists());
-        assert!(!marker_temporary.exists());
-        assert!(!paths.stopped.exists());
-        assert!(unmarked_runtime_entries(&paths).unwrap().is_empty());
-    }
-
-    #[test]
-    fn absent_unmarked_home_has_no_runtime_residue() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-
-        assert!(unmarked_runtime_entries(&paths).unwrap().is_empty());
-    }
-
-    #[test]
-    fn unmarked_home_names_the_exact_unowned_entry() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        let unowned = paths.home.join("unexpected");
-        fs::write(&unowned, "not owned by the Local contract").unwrap();
-
-        validate_install_home(&paths).unwrap();
-        let error = adopt_unmarked_home(&paths).unwrap_err();
-
-        assert!(error.contains(&unowned.display().to_string()));
-        assert!(error.contains("move or remove every unowned entry"));
-    }
-
-    #[test]
-    fn private_home_validation_allows_reset_to_preserve_unowned_entries() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        let unowned = paths.home.join("preserved");
-        fs::write(&unowned, "not owned by the Local contract").unwrap();
-
-        validate_install_home(&paths).unwrap();
-
-        assert!(unowned.exists());
-        assert!(adopt_unmarked_home(&paths).is_err());
-    }
-
-    #[test]
-    fn reset_preserves_unrecognized_entries_beside_the_managed_cli() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        let bin = paths.managed_cli.parent().unwrap();
-        fs::create_dir_all(bin).unwrap();
-        fs::set_permissions(bin, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(&paths.managed_cli, "managed").unwrap();
-        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
-        let unrecognized = bin.join("notes");
-        fs::write(&unrecognized, "preserve").unwrap();
-
-        let mut preserved = PathReport::default();
-        record_retained_bin_entries(&paths, &mut preserved).unwrap();
-        let preflight = preflight_remove_files(&paths, false).unwrap();
-
-        assert!(unrecognized.exists());
-        assert_eq!(
-            preserved.into_strings(),
-            [unrecognized.display().to_string()]
-        );
-        assert_eq!(preflight, [unrecognized.display().to_string()]);
-    }
-
-    #[test]
-    fn unowned_entry_reporting_is_bounded_and_deterministic() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        for index in (0..10).rev() {
-            fs::write(paths.home.join(format!("unexpected-{index:02}")), "foreign").unwrap();
-        }
-
-        let error = adopt_unmarked_home(&paths).unwrap_err();
-
-        for index in 0..8 {
-            assert!(error.contains(&format!("unexpected-{index:02}")));
-        }
-        assert!(!error.contains("unexpected-08"));
-        assert!(!error.contains("unexpected-09"));
-        assert!(error.contains("and 2 more"));
-    }
-
-    #[test]
-    fn managed_cli_validation_names_invalid_artifacts() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
-        fs::write(&paths.managed_cli, "managed").unwrap();
-        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let admission_error = adopt_unmarked_home(&paths).unwrap_err();
-        let private_error = validate_private_cli(&paths.managed_cli).unwrap_err();
-
-        for error in [admission_error, private_error] {
-            assert!(error.contains(&paths.managed_cli.display().to_string()));
-        }
-    }
-
-    #[test]
-    fn reset_cleanup_removes_the_pre_marker_release_temporary() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        let temporary = paths.home.join("release.env.tmp");
-        fs::write(&temporary, "metadata").unwrap();
-        state::write_stopped(&paths).unwrap();
-
-        remove_runtime_files(&paths).unwrap();
-
-        assert!(!temporary.exists());
-        assert!(!paths.stopped.exists());
-    }
-
-    #[test]
-    fn public_command_is_only_the_exact_managed_symlink() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
-        fs::write(&paths.managed_cli, "managed").unwrap();
-        ensure_public_cli(&paths).unwrap();
-        assert_eq!(fs::read_link(&paths.public_cli).unwrap(), paths.managed_cli);
-        assert!(ensure_public_cli(&paths).is_ok());
-        fs::remove_file(&paths.public_cli).unwrap();
-        fs::write(&paths.public_cli, "foreign").unwrap();
-        assert!(ensure_public_cli(&paths).is_err());
-    }
-
-    #[test]
-    fn candidate_activation_restores_the_previous_private_cli() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
-        let previous = paths.managed_cli.with_extension("previous");
-        fs::write(&paths.managed_cli, "candidate").unwrap();
-        fs::write(&previous, "previous").unwrap();
-        restore_previous_cli(&paths.managed_cli, &previous).unwrap();
-        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "previous");
-        assert!(!previous.exists());
-    }
-
-    #[test]
-    fn reconciles_only_a_previous_artifact_for_the_running_managed_cli() {
-        let home = tempfile::tempdir().unwrap();
-        let paths = Paths::under(home.path()).unwrap();
-        fs::create_dir_all(paths.managed_cli.parent().unwrap()).unwrap();
-        let previous = paths.managed_cli.with_extension("previous");
-        fs::write(&paths.managed_cli, "current").unwrap();
-        fs::write(&previous, "previous").unwrap();
-        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
-        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
-        assert!(!previous.exists());
-
-        fs::remove_file(&paths.managed_cli).unwrap();
-        fs::write(&previous, "restored").unwrap();
-        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
-        reconcile_previous_cli(&paths.managed_cli, &paths.managed_cli).unwrap();
-        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "restored");
-
-        fs::write(&previous, "previous").unwrap();
-        fs::set_permissions(&previous, fs::Permissions::from_mode(0o700)).unwrap();
-        let other = paths.managed_cli.parent().unwrap().join("other");
-        fs::write(&other, "other").unwrap();
-        assert!(reconcile_previous_cli(&paths.managed_cli, &other).is_err());
-        assert!(previous.exists());
-    }
-
-    /// A private Space home with a managed CLI directory, plus a verified release-bound CLI outside it.
-    fn activation_fixture(home: &Path) -> (Paths, PathBuf, String) {
-        let paths = Paths::under(home).unwrap();
-        fs::create_dir(&paths.home).unwrap();
-        fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        let source = home.join("bootstrap-shimpz");
-        fs::write(&source, "release-bound CLI").unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
-        let expected = hash_file(&source).unwrap();
-        (paths, source, expected)
-    }
-
-    fn private_file(path: &Path, content: &str, mode: u32) {
-        fs::write(path, content).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    fn mode(path: &Path) -> u32 {
-        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    #[test]
-    fn activation_installs_the_verified_cli_and_clears_stale_handoff_artifacts() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, source, expected) = activation_fixture(home.path());
-        let bin = paths.managed_cli.parent().unwrap();
-        fs::create_dir(bin).unwrap();
-        private_file(&paths.managed_cli, "old CLI", 0o700);
-        private_file(
-            &paths.managed_cli.with_extension("previous"),
-            "stale",
-            0o700,
-        );
-        private_file(
-            &paths.managed_cli.with_extension("candidate"),
-            "stale",
-            0o700,
-        );
-
-        activate_cli(&paths, &source, &expected).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(&paths.managed_cli).unwrap(),
-            "release-bound CLI"
-        );
-        assert_eq!(mode(&paths.managed_cli), 0o700);
-        assert_eq!(mode(bin), 0o700);
-        assert!(!paths.managed_cli.with_extension("previous").exists());
-        assert!(!paths.managed_cli.with_extension("candidate").exists());
-    }
-
-    #[test]
-    fn activation_creates_the_private_managed_directory_for_a_fresh_space() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, source, expected) = activation_fixture(home.path());
-
-        activate_cli(&paths, &source, &expected).unwrap();
-
-        assert_eq!(mode(paths.managed_cli.parent().unwrap()), 0o700);
-        assert_eq!(mode(&paths.managed_cli), 0o700);
-        assert_eq!(hash_file(&paths.managed_cli).unwrap(), expected);
-    }
-
-    #[test]
-    fn activation_of_an_unbound_cli_leaves_the_managed_cli_untouched() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, source, _) = activation_fixture(home.path());
-        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
-        private_file(&paths.managed_cli, "old CLI", 0o700);
-
-        let error = activate_cli(&paths, &source, HEX).unwrap_err();
-
-        assert_eq!(
-            error,
-            "the running CLI is not bound to the selected Local release"
-        );
-        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
-        assert!(!paths.managed_cli.with_extension("candidate").exists());
-    }
-
-    #[test]
-    fn activation_refuses_a_redirected_managed_directory() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, source, expected) = activation_fixture(home.path());
-        let outside = home.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        let bin = paths.managed_cli.parent().unwrap();
-        symlink(&outside, bin).unwrap();
-        assert!(activate_cli(&paths, &source, &expected).is_err());
-        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
-
-        fs::remove_file(bin).unwrap();
-        symlink(home.path().join("missing"), bin).unwrap();
-        assert!(activate_cli(&paths, &source, &expected).is_err());
-        assert!(!home.path().join("missing").exists());
-    }
-
-    #[test]
-    fn activation_refuses_foreign_entries_before_changing_the_managed_directory() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, source, expected) = activation_fixture(home.path());
-        let bin = paths.managed_cli.parent().unwrap();
-        fs::create_dir(bin).unwrap();
-        fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).unwrap();
-        private_file(&paths.managed_cli, "old CLI", 0o700);
-        private_file(&bin.join("foreign"), "foreign", 0o600);
-
-        assert!(
-            activate_cli(&paths, &source, &expected)
-                .unwrap_err()
-                .starts_with("refusing to use unowned managed CLI entries")
-        );
-        assert_eq!(mode(bin), 0o755);
-        assert_eq!(fs::read_to_string(&paths.managed_cli).unwrap(), "old CLI");
-    }
-
-    #[test]
-    fn activation_by_the_running_managed_cli_keeps_its_executable_image() {
-        let home = tempfile::tempdir().unwrap();
-        let (paths, _, expected) = activation_fixture(home.path());
-        fs::create_dir(paths.managed_cli.parent().unwrap()).unwrap();
-        private_file(&paths.managed_cli, "release-bound CLI", 0o600);
-        private_file(&paths.managed_cli.with_extension("previous"), "old", 0o700);
-        private_file(
-            &paths.managed_cli.with_extension("candidate"),
-            "stale",
-            0o700,
-        );
-        let inode = fs::metadata(&paths.managed_cli).unwrap().ino();
-
-        activate_cli(&paths, &paths.managed_cli, &expected).unwrap();
-
-        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
-        assert_eq!(mode(&paths.managed_cli), 0o700);
-        assert!(!paths.managed_cli.with_extension("previous").exists());
-        assert!(!paths.managed_cli.with_extension("candidate").exists());
-        assert!(activate_cli(&paths, &paths.managed_cli, HEX).is_err());
-        assert_eq!(fs::metadata(&paths.managed_cli).unwrap().ino(), inode);
-    }
-
     /// A committed release-1 Space whose handoff to release 2 runs a fake release-bound child CLI. The child runs
     /// `child_body` after recording its arguments; the fake Docker extracts that child as the release CLI.
     #[cfg(unix)]
@@ -3770,7 +3301,12 @@ mod tests {
             ),
         );
         fs::create_dir_all(context.paths.managed_cli.parent().unwrap()).unwrap();
-        private_file(&context.paths.managed_cli, "previous CLI", 0o700);
+        fs::write(&context.paths.managed_cli, "previous CLI").unwrap();
+        fs::set_permissions(
+            &context.paths.managed_cli,
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         (context, target, root)
     }
 

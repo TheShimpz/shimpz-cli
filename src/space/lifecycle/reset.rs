@@ -387,10 +387,7 @@ fn managed_runtime_files(paths: &Paths) -> [PathBuf; 23] {
     ]
 }
 
-pub(super) fn preflight_remove_files(
-    paths: &Paths,
-    protected_storage: bool,
-) -> Result<Vec<String>, String> {
+fn preflight_remove_files(paths: &Paths, protected_storage: bool) -> Result<Vec<String>, String> {
     let managed = managed_runtime_files(paths);
     for path in &managed {
         validate_regular_if_present(path)?;
@@ -410,10 +407,7 @@ pub(super) fn preflight_remove_files(
     Ok(preserved.into_strings())
 }
 
-pub(super) fn record_retained_bin_entries(
-    paths: &Paths,
-    preserved: &mut PathReport,
-) -> Result<(), String> {
+fn record_retained_bin_entries(paths: &Paths, preserved: &mut PathReport) -> Result<(), String> {
     for path in scan_managed_bin(paths, false, preserved)? {
         validate_private_cli(&path)?;
     }
@@ -542,7 +536,13 @@ mod tests {
 
     use crate::space::scheduler;
 
-    use super::{corrupt_recovery_scheduler, hard_reset_confirmation};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{
+        PathReport, Paths, corrupt_recovery_scheduler, hard_reset_confirmation,
+        preflight_remove_files, record_retained_bin_entries, remove_runtime_files, state,
+    };
 
     #[test]
     fn corrupt_recovery_refuses_a_fresh_install_while_owned_scheduler_entries_remain() {
@@ -624,5 +624,44 @@ mod tests {
                     .contains("nothing changed")
             );
         }
+    }
+
+    #[test]
+    fn reset_preserves_unrecognized_entries_beside_the_managed_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        let bin = paths.managed_cli.parent().unwrap();
+        fs::create_dir_all(bin).unwrap();
+        fs::set_permissions(bin, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&paths.managed_cli, "managed").unwrap();
+        fs::set_permissions(&paths.managed_cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let unrecognized = bin.join("notes");
+        fs::write(&unrecognized, "preserve").unwrap();
+
+        let mut preserved = PathReport::default();
+        record_retained_bin_entries(&paths, &mut preserved).unwrap();
+        let preflight = preflight_remove_files(&paths, false).unwrap();
+
+        assert!(unrecognized.exists());
+        assert_eq!(
+            preserved.into_strings(),
+            [unrecognized.display().to_string()]
+        );
+        assert_eq!(preflight, [unrecognized.display().to_string()]);
+    }
+
+    #[test]
+    fn reset_cleanup_removes_the_pre_marker_release_temporary() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir(&paths.home).unwrap();
+        let temporary = paths.home.join("release.env.tmp");
+        fs::write(&temporary, "metadata").unwrap();
+        state::write_stopped(&paths).unwrap();
+
+        remove_runtime_files(&paths).unwrap();
+
+        assert!(!temporary.exists());
+        assert!(!paths.stopped.exists());
     }
 }
