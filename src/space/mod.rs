@@ -4,6 +4,8 @@
 mod attachment;
 pub(crate) mod command;
 #[cfg(unix)]
+mod confirm;
+#[cfg(unix)]
 pub(crate) mod deploy;
 pub(crate) mod docker;
 pub(crate) mod graph;

@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use crate::output;
+use crate::space::confirm::{self, Answer};
 use crate::space::docker::COMPOSE_UP;
 use crate::space::host::HostProfile;
 use crate::space::paths::Paths;
@@ -433,27 +434,16 @@ fn recovery_prompt(reason: &str, inventory: &Inventory, names: &[String]) -> Res
         writeln!(tty, "Containers: {}", names.join(", ")).map_err(io_error)?;
     }
     loop {
-        write!(
-            tty,
-            "Permanently remove this exact owned state and install a fresh Space? [Yes/No] "
+        match confirm::ask(
+            &mut tty,
+            "Permanently remove this exact owned state and install a fresh Space?",
         )
-        .map_err(io_error)?;
-        tty.flush().map_err(io_error)?;
-        let mut answer = String::new();
-        let mut byte = [0_u8; 1];
-        while tty.read(&mut byte).map_err(io_error)? == 1 {
-            if byte[0] == b'\n' {
-                break;
-            }
-            if answer.len() >= 8 || byte[0].is_ascii_control() {
-                return Err("the recovery answer is invalid; nothing changed".into());
-            }
-            answer.push(char::from(byte[0]));
-        }
-        match answer.as_str() {
-            "Yes" => return Ok(true),
-            "No" | "" => return Ok(false),
-            _ => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
+        .map_err(io_error)?
+        {
+            Answer::Yes => return Ok(true),
+            Answer::No => return Ok(false),
+            Answer::Invalid => return Err("the recovery answer is invalid; nothing changed".into()),
+            Answer::Other => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
         }
     }
 }
@@ -506,27 +496,17 @@ fn hard_reset_prompt(
 }
 
 fn hard_reset_confirmation(terminal: &mut (impl Read + Write)) -> Result<bool, String> {
-    write!(
+    match confirm::ask(
         terminal,
-        "Permanently hard reset this exact owned Local Space? [Yes/No] "
+        "Permanently hard reset this exact owned Local Space?",
     )
-    .map_err(io_error)?;
-    terminal.flush().map_err(io_error)?;
-    let mut answer = String::new();
-    let mut byte = [0_u8; 1];
-    while terminal.read(&mut byte).map_err(io_error)? == 1 {
-        if byte[0] == b'\n' {
-            break;
+    .map_err(io_error)?
+    {
+        Answer::Yes => Ok(true),
+        Answer::No => Ok(false),
+        Answer::Other | Answer::Invalid => {
+            Err("the hard reset answer is invalid; nothing changed".into())
         }
-        if answer.len() >= 8 || byte[0].is_ascii_control() {
-            return Err("the hard reset answer is invalid; nothing changed".into());
-        }
-        answer.push(char::from(byte[0]));
-    }
-    match answer.as_str() {
-        "Yes" => Ok(true),
-        "No" | "" => Ok(false),
-        _ => Err("the hard reset answer is invalid; nothing changed".into()),
     }
 }
 

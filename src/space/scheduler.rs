@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::{output, private_file};
 
 use super::command::{self, Tool};
+use super::confirm::{self, Answer};
 use super::host::HostProfile;
 use super::paths::Paths;
 
@@ -567,36 +568,17 @@ fn confirm_replace(paths: &[PathBuf]) -> Result<bool, String> {
     )
     .map_err(io_error)?;
     loop {
-        write!(
-            tty,
-            "Replace only these exact entries to enable automatic Local updates? [Yes/No] "
+        match confirm::ask(
+            &mut tty,
+            "Replace only these exact entries to enable automatic Local updates?",
         )
-        .map_err(io_error)?;
-        tty.flush().map_err(io_error)?;
-        let Some(answer) = read_answer(&mut tty)? else {
-            return Ok(false);
-        };
-        match answer.as_str() {
-            "Yes" => return Ok(true),
-            "No" | "" => return Ok(false),
-            _ => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
+        .map_err(io_error)?
+        {
+            Answer::Yes => return Ok(true),
+            Answer::No | Answer::Invalid => return Ok(false),
+            Answer::Other => writeln!(tty, "Please answer exactly Yes or No.").map_err(io_error)?,
         }
     }
-}
-
-fn read_answer(file: &mut File) -> Result<Option<String>, String> {
-    let mut answer = String::new();
-    let mut byte = [0_u8; 1];
-    while file.read(&mut byte).map_err(io_error)? == 1 {
-        if byte[0] == b'\n' {
-            return Ok(Some(answer));
-        }
-        if answer.len() >= 8 || byte[0].is_ascii_control() {
-            return Ok(None);
-        }
-        answer.push(char::from(byte[0]));
-    }
-    Ok(Some(answer))
 }
 
 fn write_atomic(path: &Path, value: &str) -> Result<(), String> {
