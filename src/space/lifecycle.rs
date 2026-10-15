@@ -17,7 +17,7 @@ use super::docker::{COMPOSE_UP, Engine, PendingStatus, ProjectionFailure, Resolv
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::members;
-use super::paths::Paths;
+use super::paths::{self, Paths};
 use super::poll;
 use super::release;
 use super::resources::{self, Inventory};
@@ -46,6 +46,7 @@ use outcome::{
 };
 use reset::remove_runtime_files;
 
+const INVALID_MANAGED_FILE: &str = "refusing to remove invalid managed file";
 const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_PROGRESS: [&str; 3] = [
@@ -1680,25 +1681,11 @@ fn run_update_effect(
 }
 
 fn remove_regular_if_present(path: &Path) -> Result<(), String> {
-    if !validate_regular_if_present(path)? {
-        return Ok(());
-    }
-    fs::remove_file(path).map_err(io_error)
+    paths::remove_regular_if_present(path, INVALID_MANAGED_FILE, io_error)
 }
 
 fn validate_regular_if_present(path: &Path) -> Result<bool, String> {
-    let metadata = match path.symlink_metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(io_error(error)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!(
-            "refusing to remove invalid managed file: {}",
-            path.display()
-        ));
-    }
-    Ok(true)
+    paths::regular_file_present(path, INVALID_MANAGED_FILE, io_error)
 }
 
 fn io_error(error: std::io::Error) -> String {

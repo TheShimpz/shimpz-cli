@@ -18,7 +18,7 @@ use super::evidence::{
 };
 use crate::space::command::{self, Tool, one_line};
 use crate::space::id;
-use crate::space::paths::{Paths, STORAGE_MARKER};
+use crate::space::paths::{self, Paths, STORAGE_MARKER};
 use crate::space::state::write_private;
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
@@ -1254,11 +1254,7 @@ fn exact_regular_file(path: &Path) -> Result<(), String> {
 }
 
 fn remove_if_regular(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    exact_regular_file(path)?;
-    fs::remove_file(path).map_err(cleanup_error)
+    paths::remove_regular_if_present(path, "invalid Local storage file", cleanup_error)
 }
 
 fn remove_if_empty(path: &Path) -> Result<(), String> {
