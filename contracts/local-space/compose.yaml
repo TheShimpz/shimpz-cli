@@ -212,12 +212,6 @@ services:
       com.shimpz.local.profile: local-v1
       com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       com.shimpz.local.kind: assistant-egress
-    environment:
-      SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /policy
-      SHIMPZ_ASSISTANT_EGRESS_AUDIT_LOG: /var/log/assistant-egress/audit.jsonl
-      SHIMPZ_ASSISTANT_EGRESS_MAX_CONCURRENCY: "64"
-      SHIMPZ_ASSISTANT_EGRESS_MAX_SOURCE_CONCURRENCY: "8"
-      SHIMPZ_ASSISTANT_EGRESS_LISTEN_BACKLOG: "16"
     volumes:
       - type: volume
         source: assistant_egress_policy
@@ -275,10 +269,6 @@ services:
       com.shimpz.local.kind: assistant-release
     environment:
       SHIMPZ_EGRESS_ALLOW: developers.shimpz.com,ghcr.io,tuf-repo-cdn.sigstore.dev,pkg-containers.githubusercontent.com
-      SHIMPZ_EGRESS_AUDIT_LOG: /var/log/assistant-release/audit.jsonl
-      SHIMPZ_EGRESS_MAX_CONCURRENCY: "16"
-      SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY: "4"
-      SHIMPZ_EGRESS_LISTEN_BACKLOG: "8"
     volumes:
       - type: volume
         source: assistant_release_audit
