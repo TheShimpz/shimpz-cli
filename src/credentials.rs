@@ -143,10 +143,7 @@ fn credentials_path() -> Result<PathBuf, String> {
 }
 
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    private_file::private_open(&mut options);
-    let file = match options.open(path) {
+    let file = match private_file::open_read(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("CLI credentials cannot be opened".into()),

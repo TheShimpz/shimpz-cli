@@ -1,12 +1,14 @@
 //! Owner-private files: the one admission rule, the safe open flags, and atomic replacement.
 
-use std::fs::{Metadata, OpenOptions};
 #[cfg(unix)]
-use std::io::{self, Write};
+use std::fs;
+use std::fs::{File, Metadata, OpenOptions};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
-use std::{fs, path::Path};
+use std::path::Path;
 
 /// Never follow a final symbolic link or leak the descriptor to a child, and create the file readable only by this
 /// user.
@@ -17,6 +19,16 @@ pub(crate) fn private_open(options: &mut OpenOptions) {
         .mode(0o600);
     #[cfg(not(unix))]
     let _ = options;
+}
+
+/// Open `path` only to read it, never following a final symbolic link, blocking on a FIFO before its type is checked,
+/// or leaking the descriptor to a child. The caller admits the file through the returned handle.
+pub(crate) fn open_read(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    options.open(path)
 }
 
 /// Why an opened file is not this user's private file.

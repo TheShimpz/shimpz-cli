@@ -119,11 +119,7 @@ pub(crate) fn read_private_record(
     name: &str,
 ) -> Result<Option<String>, String> {
     let refused = || format!("{name} is not a private record");
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-    {
+    let file = match private_file::open_read(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(refused()),

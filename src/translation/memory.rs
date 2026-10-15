@@ -4,14 +4,12 @@
 //! interrupted, or now too-long entry is simply translated again and replaced.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-
 use crate::language_pack::LOCALES;
+use crate::private_file;
 
 /// One entry holds seven bounded texts; anything larger is not an entry this CLI wrote.
 const MAX_ENTRY_BYTES: u64 = 64 * 1024;
@@ -59,11 +57,7 @@ impl Memory {
 
 /// Open a regular file without following a final symbolic link or blocking on a FIFO.
 fn open_regular(path: &Path) -> Option<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = options.open(path).ok()?;
+    let file = private_file::open_read(path).ok()?;
     file.metadata()
         .ok()
         .filter(|metadata| metadata.file_type().is_file())

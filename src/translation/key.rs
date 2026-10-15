@@ -3,12 +3,8 @@
 //! Only an absent file means "no key". Every other problem fails, so an unsafe, unreadable, or malformed key is never
 //! silently replaced by untranslated text. The key is never printed, put in the environment, or passed to Docker.
 
-use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use zeroize::Zeroizing;
 
@@ -33,7 +29,7 @@ pub(crate) fn load(path: &Path) -> Result<Option<Zeroizing<String>>, String> {
             path.display()
         )
     };
-    let file = match open(path) {
+    let file = match private_file::open_read(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(unusable("cannot be opened as a regular file")),
@@ -68,15 +64,6 @@ fn parse(bytes: &[u8]) -> Option<Zeroizing<String>> {
         .unwrap_or(bytes);
     (!key.is_empty() && key.iter().all(u8::is_ascii_graphic))
         .then(|| Zeroizing::new(key.iter().map(|byte| char::from(*byte)).collect()))
-}
-
-/// Open without following a final symbolic link and without blocking on a FIFO before the type is checked.
-fn open(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    options.open(path)
 }
 
 #[cfg(test)]

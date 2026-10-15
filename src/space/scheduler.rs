@@ -544,11 +544,7 @@ fn classify_entry(
 }
 
 fn read_bounded_regular(path: &Path) -> Result<Vec<u8>, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(io_error)?;
+    let file = private_file::open_read(path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() || metadata.len() > MAX_SCHEDULER_BYTES {
         return Ok(Vec::new());
