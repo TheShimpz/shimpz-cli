@@ -128,6 +128,24 @@ fn collects_only_publishable_roots_from_disk() {
 }
 
 #[test]
+fn refuses_a_project_without_a_required_file_with_the_protocol_code() {
+    for required in ["shimpz.toml", "pyproject.toml", "icon.png"] {
+        let temporary = TemporaryDirectory::new();
+        write_minimum(&temporary.path);
+        fs::remove_file(temporary.path.join(required)).expect("remove required file");
+
+        let error = source_package::build(&temporary.path)
+            .err()
+            .expect("a missing required file must fail");
+
+        assert_eq!(
+            error, "source package is invalid: missing_required_file",
+            "{required}"
+        );
+    }
+}
+
+#[test]
 fn collects_only_direct_python_files_from_actions() {
     let temporary = TemporaryDirectory::new();
     write_minimum(&temporary.path);

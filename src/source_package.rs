@@ -251,7 +251,7 @@ fn snapshot_required(entries: &mut [InputEntry], path: &str) -> Result<Vec<u8>, 
     let entry = entries
         .iter_mut()
         .find(|entry| entry.path == path)
-        .ok_or_else(|| Error::new("required_file_missing"))?;
+        .ok_or_else(|| Error::new("missing_required_file"))?;
     if entry.kind != EntryKind::RegularFile {
         return reject("invalid_entry");
     }
