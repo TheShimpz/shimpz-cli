@@ -3269,7 +3269,7 @@ mod tests {
         let forward = release(3, 'c');
         let installed = Installed {
             space_id: "space-0123456789abcdef01234567".into(),
-            release_ref: current.reference.clone(),
+            release_ref: current.reference,
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{HEX}"),
             ordinal: 2,
             port: 7777,

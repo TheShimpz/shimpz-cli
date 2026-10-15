@@ -1162,7 +1162,7 @@ mod tests {
     #[test]
     fn admits_a_body_on_any_admitted_method() {
         let broker = meta();
-        let hosts = broker.hosts.clone();
+        let hosts = broker.hosts;
         for method in METHODS {
             let frame = json!({"type": "fetch", "method": method, "url": "https://api.example.com/v1",
                 "headers": [], "body": STANDARD.encode(b"x=1")});

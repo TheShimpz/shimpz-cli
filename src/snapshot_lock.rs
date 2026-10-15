@@ -70,7 +70,7 @@ mod tests {
         drop(other);
 
         let (sender, receiver) = mpsc::channel();
-        let waiter_root = root.clone();
+        let waiter_root = root;
         let waiter = thread::spawn(move || {
             let _second = acquire_in(&waiter_root, "proof-assistant").expect("second lock");
             sender.send(()).expect("signal");

@@ -141,7 +141,7 @@ mod tests {
             "fallback"
         );
         assert_eq!(shown("application/json", &valid, 16), "fallback");
-        let mut extra = valid.clone();
+        let mut extra = valid;
         extra["hint"] = json!("x");
         assert_eq!(shown("application/json", &extra, 1024), "fallback");
         assert_eq!(

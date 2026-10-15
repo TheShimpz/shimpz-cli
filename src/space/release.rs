@@ -680,7 +680,7 @@ mod tests {
             (format!("0{ISSUED_AT}"), EXPIRES.to_string()),
             (format!("+{ISSUED_AT}"), EXPIRES.to_string()),
             (issued_at.clone(), "18446744073709551616".to_owned()),
-            (issued_at.clone(), "soon".to_owned()),
+            (issued_at, "soon".to_owned()),
         ] {
             assert_eq!(
                 window(&issued_at, &expires),
