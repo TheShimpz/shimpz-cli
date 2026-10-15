@@ -136,36 +136,75 @@ pub(crate) const NETWORK_NAMES: [&str; 11] = [
     "egress",
 ];
 
-pub(crate) const VOLUME_NAMES: [&str; 28] = [
-    "config",
-    "data",
-    "controller_token",
-    "controller_audit",
-    "controller_storage",
-    "controller_inference",
-    "controller_action_journal",
-    "controller_publications",
-    "controller_cosign_trust",
-    "controller_assistant_integration_state",
-    "controller_assistant_integration_key",
-    "controller_chat_continuation_state",
-    "controller_chat_continuation_key",
-    "controller_assistant_stored_input_state",
-    "controller_assistant_stored_input_key",
-    "controller_routine_state",
-    "controller_routine_key",
-    "supervisor_key",
-    "release_status",
-    "reset_capability",
-    "assistant_egress_policy",
-    "assistant_egress_audit",
-    "assistant_release_audit",
-    "account_egress_capability",
-    "account_egress_audit",
-    "brain_egress_audit",
-    "brain_runtime_token",
-    "brain_runtime_state",
+/// One Local volume: its logical name and the exact owner, group, and mode of its directory on encrypted Linux
+/// storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Volume {
+    pub(crate) name: &'static str,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) mode: u32,
+}
+
+const fn volume(name: &'static str, uid: u32, gid: u32, mode: u32) -> Volume {
+    Volume {
+        name,
+        uid,
+        gid,
+        mode,
+    }
+}
+
+pub(crate) const VOLUMES: [Volume; 28] = [
+    volume("config", 1000, 1000, 0o700),
+    volume("data", 1000, 1000, 0o700),
+    volume("controller_token", 10001, 10010, 0o2750),
+    volume("controller_audit", 10001, 10001, 0o700),
+    volume("controller_storage", 10001, 10001, 0o700),
+    volume("controller_inference", 10001, 10001, 0o700),
+    volume("controller_action_journal", 10001, 10001, 0o700),
+    volume("controller_publications", 10001, 10001, 0o700),
+    volume("controller_cosign_trust", 10001, 10001, 0o700),
+    volume(
+        "controller_assistant_integration_state",
+        10001,
+        10001,
+        0o700,
+    ),
+    volume("controller_assistant_integration_key", 10001, 10001, 0o700),
+    volume("controller_chat_continuation_state", 10001, 10001, 0o700),
+    volume("controller_chat_continuation_key", 10001, 10001, 0o700),
+    volume(
+        "controller_assistant_stored_input_state",
+        10001,
+        10001,
+        0o700,
+    ),
+    volume("controller_assistant_stored_input_key", 10001, 10001, 0o700),
+    volume("controller_routine_state", 10001, 10001, 0o700),
+    volume("controller_routine_key", 10001, 10001, 0o700),
+    volume("supervisor_key", 0, 10021, 0o2770),
+    volume("release_status", 1000, 1000, 0o700),
+    volume("reset_capability", 1000, 1000, 0o700),
+    volume("assistant_egress_policy", 10001, 10017, 0o750),
+    volume("assistant_egress_audit", 10005, 10005, 0o700),
+    volume("assistant_release_audit", 10004, 10004, 0o700),
+    volume("account_egress_capability", 10023, 10022, 0o750),
+    volume("account_egress_audit", 10006, 10006, 0o700),
+    volume("brain_egress_audit", 10001, 10001, 0o700),
+    volume("brain_runtime_token", 10001, 10016, 0o750),
+    volume("brain_runtime_state", 10001, 10001, 0o700),
 ];
+
+pub(crate) const VOLUME_NAMES: [&str; 28] = {
+    let mut names = [""; 28];
+    let mut index = 0;
+    while index < VOLUMES.len() {
+        names[index] = VOLUMES[index].name;
+        index += 1;
+    }
+    names
+};
 
 /// The disposable Team and Brain runtime state one state epoch covers: a release that reads another stored format
 /// of it recreates exactly these volumes empty. Supervisor authentication, Admin data, Team records, Assistant
@@ -252,6 +291,22 @@ mod tests {
         }
         assert_eq!(StorageProfile::LinuxLuks.name(), "linux-luks");
         assert_eq!(StorageProfile::ManagedDisk.name(), "managed-disk");
+    }
+
+    #[test]
+    fn volume_directories_never_admit_other_users() {
+        for volume in VOLUMES {
+            assert_eq!(volume.mode & 0o007, 0, "{}", volume.name);
+            assert_eq!(volume.mode & !0o7777, 0, "{}", volume.name);
+        }
+        for expected in [
+            volume("controller_token", 10001, 10010, 0o2750),
+            volume("supervisor_key", 0, 10021, 0o2770),
+            volume("assistant_egress_policy", 10001, 10017, 0o750),
+            volume("account_egress_capability", 10023, 10022, 0o750),
+        ] {
+            assert!(VOLUMES.contains(&expected), "{}", expected.name);
+        }
     }
 
     #[test]

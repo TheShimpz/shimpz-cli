@@ -17,6 +17,7 @@ use super::evidence::{
     luks_unlock_credentials_valid,
 };
 use crate::space::command::{self, Tool, one_line};
+use crate::space::graph::{VOLUMES, Volume};
 use crate::space::id;
 use crate::space::paths::{self, Paths, STORAGE_MARKER};
 use crate::space::state::write_private;
@@ -31,47 +32,6 @@ macro_rules! live_trace {
         eprintln!("Linux storage live: {}", $stage);
     };
 }
-
-const VOLUME_SPECS: [(&str, u32, u32, u32); 28] = [
-    ("config", 1000, 1000, 0o700),
-    ("data", 1000, 1000, 0o700),
-    ("controller_token", 10001, 10010, 0o2750),
-    ("controller_audit", 10001, 10001, 0o700),
-    ("controller_storage", 10001, 10001, 0o700),
-    ("controller_inference", 10001, 10001, 0o700),
-    ("controller_action_journal", 10001, 10001, 0o700),
-    ("controller_publications", 10001, 10001, 0o700),
-    ("controller_cosign_trust", 10001, 10001, 0o700),
-    (
-        "controller_assistant_integration_state",
-        10001,
-        10001,
-        0o700,
-    ),
-    ("controller_assistant_integration_key", 10001, 10001, 0o700),
-    ("controller_chat_continuation_state", 10001, 10001, 0o700),
-    ("controller_chat_continuation_key", 10001, 10001, 0o700),
-    (
-        "controller_assistant_stored_input_state",
-        10001,
-        10001,
-        0o700,
-    ),
-    ("controller_assistant_stored_input_key", 10001, 10001, 0o700),
-    ("controller_routine_state", 10001, 10001, 0o700),
-    ("controller_routine_key", 10001, 10001, 0o700),
-    ("supervisor_key", 0, 10021, 0o2770),
-    ("release_status", 1000, 1000, 0o700),
-    ("reset_capability", 1000, 1000, 0o700),
-    ("assistant_egress_policy", 10001, 10017, 0o750),
-    ("assistant_egress_audit", 10005, 10005, 0o700),
-    ("assistant_release_audit", 10004, 10004, 0o700),
-    ("account_egress_capability", 10023, 10022, 0o750),
-    ("account_egress_audit", 10006, 10006, 0o700),
-    ("brain_egress_audit", 10001, 10001, 0o700),
-    ("brain_runtime_token", 10001, 10016, 0o750),
-    ("brain_runtime_state", 10001, 10001, 0o700),
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Admission {
@@ -534,7 +494,9 @@ impl<'a> Pool<'a> {
         {
             return Err("encrypted Local storage root ownership is invalid".into());
         }
-        if let Some(name) = missing_volumes(&self.paths.pool_mount, &VOLUME_SPECS)?.first() {
+        if let Some(Volume { name, .. }) =
+            missing_volumes(&self.paths.pool_mount, &VOLUMES)?.first()
+        {
             return Err(format!(
                 "encrypted Local storage lacks the current volume {name}; run shimpz start to add it"
             ));
@@ -635,27 +597,28 @@ impl<'a> Pool<'a> {
     /// path operations, which the pool owner could race; that owner already holds Docker authority.
     fn create_missing_volumes(&self) -> Result<(), String> {
         self.validate_mount()?;
-        for name in missing_volumes(&self.paths.pool_mount, &VOLUME_SPECS)? {
-            let (_, uid, gid, mode) = VOLUME_SPECS
-                .iter()
-                .copied()
-                .find(|spec| spec.0 == name)
-                .ok_or_else(|| "encrypted Local volume specification is inconsistent".to_owned())?;
-            Self::create_volume(&self.paths.pool_mount.join(name), uid, gid, mode)?;
+        for volume in missing_volumes(&self.paths.pool_mount, &VOLUMES)? {
+            self.create_volume(volume)?;
         }
         Ok(())
     }
 
     fn create_volume_layout(&self) -> Result<(), String> {
         self.validate_mount()?;
-        for (name, uid, gid, mode) in VOLUME_SPECS {
-            Self::create_volume(&self.paths.pool_mount.join(name), uid, gid, mode)?;
+        for volume in VOLUMES {
+            self.create_volume(volume)?;
         }
         Ok(())
     }
 
-    /// Creates one volume directory with its exact owner and mode, as root.
-    fn create_volume(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), String> {
+    /// Creates one volume directory in the pool with its exact owner and mode, as root.
+    fn create_volume(&self, volume: Volume) -> Result<(), String> {
+        let Volume {
+            name,
+            uid,
+            gid,
+            mode,
+        } = volume;
         Self::root(
             Tool::Install,
             [
@@ -666,7 +629,7 @@ impl<'a> Pool<'a> {
                 OsString::from(gid.to_string()),
                 OsString::from("-m"),
                 OsString::from(format!("{mode:o}")),
-                path.as_os_str().to_owned(),
+                self.paths.pool_mount.join(name).into_os_string(),
             ],
         )
     }
@@ -1255,16 +1218,19 @@ fn cleanup_error(error: std::io::Error) -> String {
 
 /// Names of declared volumes absent from the pool, after proving every present entry is an exact, unlinked
 /// directory with its declared owner, group, and mode.
-fn missing_volumes(
-    root: &Path,
-    specs: &[(&'static str, u32, u32, u32)],
-) -> Result<Vec<&'static str>, String> {
+fn missing_volumes(root: &Path, volumes: &[Volume]) -> Result<Vec<Volume>, String> {
     let mut missing = Vec::new();
-    for &(name, uid, gid, mode) in specs {
+    for &volume in volumes {
+        let Volume {
+            name,
+            uid,
+            gid,
+            mode,
+        } = volume;
         let metadata = match root.join(name).symlink_metadata() {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(name);
+                missing.push(volume);
                 continue;
             }
             Err(error) => return Err(io_error(error)),
@@ -1290,14 +1256,24 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let uid = rustix::process::getuid().as_raw();
         let gid = rustix::process::getgid().as_raw();
-        let specs = [("present", uid, gid, 0o700), ("absent", uid, gid, 0o700)];
+        let present = Volume {
+            name: "present",
+            uid,
+            gid,
+            mode: 0o700,
+        };
+        let absent = Volume {
+            name: "absent",
+            ..present
+        };
+        let specs = [present, absent];
         fs::create_dir(root.path().join("present")).unwrap();
         fs::set_permissions(
             root.path().join("present"),
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        assert_eq!(missing_volumes(root.path(), &specs), Ok(vec!["absent"]));
+        assert_eq!(missing_volumes(root.path(), &specs), Ok(vec![absent]));
 
         fs::set_permissions(
             root.path().join("present"),
@@ -1389,20 +1365,6 @@ mod tests {
             ]
             .map(OsString::from)
         );
-    }
-
-    #[test]
-    fn volume_specs_match_the_canonical_graph() {
-        assert_eq!(VOLUME_SPECS.len(), crate::space::graph::VOLUME_NAMES.len());
-        for (index, spec) in VOLUME_SPECS.iter().enumerate() {
-            assert_eq!(spec.0, crate::space::graph::VOLUME_NAMES[index]);
-            assert_eq!(spec.3 & 0o007, 0);
-            assert_eq!(spec.3 & !0o7777, 0);
-        }
-        assert!(VOLUME_SPECS.contains(&("controller_token", 10001, 10010, 0o2750)));
-        assert!(VOLUME_SPECS.contains(&("supervisor_key", 0, 10021, 0o2770)));
-        assert!(VOLUME_SPECS.contains(&("assistant_egress_policy", 10001, 10017, 0o750)));
-        assert!(VOLUME_SPECS.contains(&("account_egress_capability", 10023, 10022, 0o750)));
     }
 
     #[test]
