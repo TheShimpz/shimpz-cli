@@ -17,7 +17,7 @@ use super::evidence::{
     luks_unlock_credentials_valid,
 };
 use crate::private_file;
-use crate::space::command::{self, Tool};
+use crate::space::command::{self, Tool, one_line};
 use crate::space::id;
 use crate::space::paths::{Paths, STORAGE_MARKER};
 
@@ -1257,15 +1257,6 @@ fn exact_regular_file(path: &Path) -> Result<(), String> {
 
 fn write_private(path: &Path, value: &str) -> Result<(), String> {
     private_file::replace(path, value.as_bytes()).map_err(io_error)
-}
-
-fn one_line<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
-    let mut lines = value.lines();
-    let line = lines.next().filter(|line| !line.is_empty());
-    if line.is_none() || lines.next().is_some() {
-        return Err(format!("{label} is malformed"));
-    }
-    Ok(line.expect("checked"))
 }
 
 fn remove_if_regular(path: &Path) -> Result<(), String> {

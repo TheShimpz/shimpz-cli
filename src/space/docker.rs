@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::command::Tool;
+use super::command::{Tool, one_line};
 use super::graph;
 use super::host::HostProfile;
 use super::paths::Paths;
@@ -1311,7 +1311,7 @@ impl Engine {
             OsString::from(reference),
         ];
         arguments.extend(command.into_iter().map(|value| value.as_ref().to_owned()));
-        one_line(&self.run_output(arguments)?, "temporary Docker container")
+        one_line(&self.run_output(arguments)?, "temporary Docker container").map(str::to_owned)
     }
 
     fn unique_repo_digest(&self, image: &str, repository: &str) -> Result<String, String> {
@@ -1756,7 +1756,7 @@ pub(crate) fn validate_endpoint(
                 .map_err(|_| "DOCKER_HOST is invalid".to_owned())?,
         )
     } else {
-        let context = one_line(&output(docker, ["context", "show"])?, "Docker context")?;
+        let context = one_line(&output(docker, ["context", "show"])?, "Docker context")?.to_owned();
         let endpoint = one_line(
             &output(
                 docker,
@@ -1769,7 +1769,8 @@ pub(crate) fn validate_endpoint(
                 ],
             )?,
             "Docker endpoint",
-        )?;
+        )?
+        .to_owned();
         (Some(context), endpoint)
     };
     let socket = endpoint
@@ -2004,15 +2005,6 @@ where
         ));
     }
     String::from_utf8(result.stdout).map_err(|_| "Docker returned non-UTF-8 output".into())
-}
-
-fn one_line(value: &str, label: &str) -> Result<String, String> {
-    let mut lines = value.lines();
-    let line = lines.next().filter(|line| !line.is_empty());
-    if line.is_none() || lines.next().is_some() {
-        return Err(format!("{label} is malformed"));
-    }
-    Ok(line.expect("checked").to_owned())
 }
 
 /// The inspected image holds exactly `reference` among its repository digests and runs on `platform`.

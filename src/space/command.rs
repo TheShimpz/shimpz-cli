@@ -217,6 +217,16 @@ fn metadata_refusal(
     }
 }
 
+/// The only line of a command's output: non-empty, with nothing after it but its line ending.
+pub(crate) fn one_line<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
+    let mut lines = value.lines();
+    let line = lines.next().filter(|line| !line.is_empty());
+    if line.is_none() || lines.next().is_some() {
+        return Err(format!("{label} is malformed"));
+    }
+    Ok(line.expect("checked"))
+}
+
 pub(crate) fn output<I, S>(tool: Tool, arguments: I) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
