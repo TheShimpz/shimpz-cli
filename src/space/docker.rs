@@ -849,6 +849,24 @@ fn read_compose_progress(
     Ok((timings, diagnostic))
 }
 
+/// The isolation of every one-shot container the CLI runs: the Space platform from the local image store only, no
+/// network, a read-only root, no capabilities, and no privilege gain.
+fn isolated_container(platform: &str) -> [&str; 11] {
+    [
+        "--platform",
+        platform,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+    ]
+}
+
 fn clear_volumes_arguments(
     platform: &str,
     cpuset: &str,
@@ -865,17 +883,10 @@ fn clear_volumes_arguments(
         "com.shimpz.local.managed=1",
         "--label",
         "com.shimpz.local.kind=runtime-state-reset",
-        "--platform",
-        platform,
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges:true",
+    ]
+    .into_iter()
+    .chain(isolated_container(platform))
+    .chain([
         "--user",
         RUNTIME_STATE_OWNER,
         "--cpuset-cpus",
@@ -886,8 +897,7 @@ fn clear_volumes_arguments(
         "256m",
         "--pids-limit",
         "32",
-    ]
-    .into_iter()
+    ])
     .map(OsString::from)
     .collect();
     for volume in volumes {

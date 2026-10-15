@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::exec::{docker_timed_out, output, quiet_status, silent_status, wait_failure};
-use super::{DOCKER_QUICK, Engine, HELPER_CPUS};
+use super::{DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
 use crate::space::release::ADMIN;
 
@@ -218,18 +218,8 @@ pub(super) fn python_helper_arguments(
     ["run", "--rm"]
         .into_iter()
         .chain(options.iter().copied())
+        .chain(isolated_container(platform))
         .chain([
-            "--platform",
-            platform,
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
             "--cpuset-cpus",
             cpuset,
             "--cpus",
