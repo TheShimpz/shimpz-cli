@@ -24,6 +24,7 @@ mod provider;
 mod publish;
 mod python;
 mod route;
+mod snapshot_docker;
 mod snapshot_files;
 mod snapshot_lock;
 mod source_package;

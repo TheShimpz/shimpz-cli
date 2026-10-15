@@ -1,15 +1,14 @@
 //! Permanently remove unpublished Assistant snapshots from the local Docker daemon.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use crate::manifest::PublicationIdentity;
-use crate::{capture, digest, output, snapshot_lock, source_package, stage};
+use crate::snapshot_docker::{self, REMOVAL};
+use crate::{digest, output, snapshot_lock, source_package, stage};
 
 const MAX_BATCH: usize = 50;
-const MAX_DOCKER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FAILURE_DETAIL_CHARS: usize = 240;
 const INSPECT_TEMPLATE: &str = "{{.Id}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}";
 
@@ -53,7 +52,7 @@ fn staged_images(docker: &Path, assistant_id: &str) -> Result<Vec<String>, Strin
         stage::LOCAL_STAGE_VALUE
     );
     let assistant_filter = format!("label={}={assistant_id}", stage::ASSISTANT_LABEL);
-    let result = docker_output(
+    let result = REMOVAL.output(
         docker,
         [
             "image",
@@ -70,7 +69,7 @@ fn staged_images(docker: &Path, assistant_id: &str) -> Result<Vec<String>, Strin
     if !result.status.success() {
         return Err("Docker could not enumerate Local Assistant snapshots".into());
     }
-    Ok(canonical_image_ids(output_text(&result)?)?
+    Ok(canonical_image_ids(REMOVAL.text(&result)?)?
         .into_iter()
         .take(MAX_BATCH)
         .collect())
@@ -94,12 +93,13 @@ fn canonical_image_ids(output: &str) -> Result<Vec<String>, String> {
 
 fn validate_images(docker: &Path, assistant_id: &str, images: &[String]) -> Result<(), String> {
     for image_id in images {
-        let result = docker_output(
+        let result = REMOVAL.output(
             docker,
             ["image", "inspect", "--format", INSPECT_TEMPLATE, image_id],
         )?;
         let expected = [image_id.as_str(), stage::LOCAL_STAGE_VALUE, assistant_id];
-        if !result.status.success() || output_text(&result)?.lines().collect::<Vec<_>>() != expected
+        if !result.status.success()
+            || REMOVAL.text(&result)?.lines().collect::<Vec<_>>() != expected
         {
             return Err(
                 "a Local Assistant snapshot changed before removal; no image was removed".into(),
@@ -114,7 +114,7 @@ fn remove_images(docker: &Path, assistant_id: &str, images: &[String]) -> Result
     let mut first_failure = None;
     for image_id in images {
         // Removal by exact id untags and deletes the current snapshot in one step, so a refusal keeps its tag.
-        match docker_output(docker, ["image", "rm", "--no-prune", image_id.as_str()]) {
+        match REMOVAL.output(docker, ["image", "rm", "--no-prune", image_id.as_str()]) {
             Ok(result) if result.status.success() => {}
             // The Local Space may have collected a superseded snapshot meanwhile; absence is the desired state.
             Ok(_) if image_absent(docker, image_id)? => {}
@@ -141,7 +141,7 @@ fn remove_images(docker: &Path, assistant_id: &str, images: &[String]) -> Result
 }
 
 fn image_absent(docker: &Path, image_id: &str) -> Result<bool, String> {
-    let result = docker_output(
+    let result = REMOVAL.output(
         docker,
         ["image", "inspect", "--format", "{{.Id}}", image_id],
     )?;
@@ -162,43 +162,14 @@ fn removal_success(assistant_id: &str, removed: usize) -> String {
 }
 
 fn docker_failure_detail(result: &Output) -> String {
-    let message = String::from_utf8_lossy(&result.stderr);
-    message
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map_or_else(
-            || "Docker refused the removal".into(),
-            |line| bounded_detail(line.trim()),
-        )
+    snapshot_docker::last_error_line(result).map_or_else(
+        || "Docker refused the removal".into(),
+        |line| bounded_detail(&line),
+    )
 }
 
 fn bounded_detail(value: &str) -> String {
     value.chars().take(MAX_FAILURE_DETAIL_CHARS).collect()
-}
-
-fn docker_output<I, S>(docker: &Path, arguments: I) -> Result<Output, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    capture::bounded(
-        Command::new(docker).args(arguments),
-        MAX_DOCKER_OUTPUT_BYTES,
-        MAX_DOCKER_OUTPUT_BYTES,
-    )
-    .map_err(|error| match error {
-        capture::Failure::Excessive => "Docker returned excessive Local snapshot removal output",
-        capture::Failure::Unavailable(_) | capture::Failure::TimedOut { .. } => {
-            "Docker could not execute the Local snapshot removal"
-        }
-    })
-    .map_err(Into::into)
-}
-
-fn output_text(result: &Output) -> Result<&str, String> {
-    std::str::from_utf8(&result.stdout)
-        .map_err(|_| "Docker returned invalid Local snapshot removal output".into())
 }
 
 #[cfg(test)]

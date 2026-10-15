@@ -5,18 +5,19 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Output, Stdio};
+use std::process::{self, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use toml::Value;
 
 use crate::language_pack::{self, Catalog, Pack};
 use crate::manifest::{self, PublicationIdentity};
+use crate::snapshot_docker::{self, STAGE};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
 use crate::{
-    capture, digest, identifier, output, python, snapshot_files, snapshot_lock, source_package,
-    toolchain, translation,
+    digest, identifier, output, python, snapshot_files, snapshot_lock, source_package, toolchain,
+    translation,
 };
 
 const PYTHON_VERSION: &str = "3.14";
@@ -36,7 +37,6 @@ const NONCE_LABEL: &str = "org.shimpz.local.stage.nonce";
 pub(crate) const LOCAL_SNAPSHOT_REPOSITORY: &str = "shimpz-local";
 pub(crate) const LOCAL_SNAPSHOT_TAG: &str = "staged";
 const CURRENT_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.local.stage.nonce\"}}";
-const MAX_DOCKER_OUTPUT_BYTES: usize = 32 * 1024;
 const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.actions\"}}\n{{index .Config.Labels \"org.shimpz.assistant.integrations\"}}";
 
 struct DiscoveryProjection {
@@ -241,8 +241,8 @@ pub(crate) fn connect_docker_daemon() -> Result<PathBuf, String> {
 }
 
 fn daemon_platform(docker: &Path) -> Result<&'static str, String> {
-    let result = docker_output(docker, ["info", "--format", "{{.Architecture}}"])?;
-    match output_text(&result)?.trim() {
+    let result = STAGE.output(docker, ["info", "--format", "{{.Architecture}}"])?;
+    match STAGE.text(&result)?.trim() {
         "amd64" | "x86_64" => Ok("linux/amd64"),
         "arm64" | "aarch64" => Ok("linux/arm64"),
         _ => Err("the Docker daemon architecture is unsupported".into()),
@@ -326,7 +326,7 @@ fn current_image(
     reference: &str,
     assistant_id: &str,
 ) -> Result<Option<CurrentImage>, String> {
-    let result = docker_output(
+    let result = STAGE.output(
         docker,
         [
             "image",
@@ -346,7 +346,7 @@ fn current_image(
             "Docker could not resolve the current Local snapshot",
         ));
     }
-    let text = output_text(&result)?;
+    let text = STAGE.text(&result)?;
     let fields = text.lines().collect::<Vec<_>>();
     let expected_tags = format!("[\"{reference}\"]");
     match fields.as_slice() {
@@ -377,11 +377,11 @@ fn current_image(
 }
 
 fn require_current(docker: &Path, reference: &str, image_id: &str) -> Result<(), String> {
-    let result = docker_output(
+    let result = STAGE.output(
         docker,
         ["image", "inspect", "--format", "{{.Id}}", reference],
     )?;
-    if result.status.success() && output_text(&result)?.trim() == image_id {
+    if result.status.success() && STAGE.text(&result)?.trim() == image_id {
         Ok(())
     } else {
         Err("the staged image did not become this Assistant's current Local snapshot".into())
@@ -438,7 +438,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    matches!(docker_output(docker, arguments), Ok(result) if result.status.success())
+    matches!(STAGE.output(docker, arguments), Ok(result) if result.status.success())
 }
 
 fn build_image(
@@ -478,7 +478,7 @@ fn build_image(
     arguments.push(OsString::from("--file"));
     arguments.push(context.join("Dockerfile").into_os_string());
     arguments.push(context.as_os_str().to_owned());
-    let result = docker_output(docker, arguments)?;
+    let result = STAGE.output(docker, arguments)?;
     if !result.status.success() {
         return Err(docker_failure(&result, "Local snapshot image build failed"));
     }
@@ -512,11 +512,11 @@ fn verify_language_files(
     image_id: &str,
     expected: &ExpectedImage,
 ) -> Result<(), String> {
-    let created = docker_output(
+    let created = STAGE.output(
         docker,
         ["create", "--network=none", "--pull=never", image_id],
     )?;
-    let container = output_text(&created)?.trim().to_owned();
+    let container = STAGE.text(&created)?.trim().to_owned();
     if !created.status.success()
         || container.len() != 64
         || !container.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -561,7 +561,7 @@ fn exported_file(
     limit: usize,
 ) -> Result<Vec<u8>, String> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let result = docker_output_within(
+    let result = STAGE.output_within(
         docker,
         [
             "cp".to_owned(),
@@ -586,7 +586,7 @@ fn exported_file(
 fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
     let identity = expected.identity;
     let declared_creators = declared_creators(identity);
-    let result = docker_output(
+    let result = STAGE.output(
         docker,
         [
             "image",
@@ -596,7 +596,7 @@ fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Re
             image_id,
         ],
     )?;
-    let text = output_text(&result)?;
+    let text = STAGE.text(&result)?;
     let fields = text.lines().collect::<Vec<_>>();
     let architecture = expected.platform.rsplit_once('/').map(|(_, value)| value);
     let tags = format!("[\"{}\"]", expected.reference);
@@ -690,42 +690,12 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8])
     format!("sha256:{}", hasher.finish_hex())
 }
 
-fn docker_output<I, S>(docker: &Path, arguments: I) -> Result<Output, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    docker_output_within(docker, arguments, MAX_DOCKER_OUTPUT_BYTES)
-}
-
-/// Run Docker and capture its output, never holding more than `limit` bytes of stdout or
-/// `MAX_DOCKER_OUTPUT_BYTES` of stderr: a stream that exceeds its bound, or cannot be read, kills and reaps Docker
-/// at once instead of letting Creator-controlled output, such as an exported file, exhaust host memory.
-fn docker_output_within<I, S>(docker: &Path, arguments: I, limit: usize) -> Result<Output, String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    capture::bounded(
-        Command::new(docker).args(arguments),
-        limit,
-        MAX_DOCKER_OUTPUT_BYTES,
-    )
-    .map_err(|error| match error {
-        capture::Failure::Excessive => "Docker returned excessive Local snapshot output",
-        capture::Failure::Unavailable(_) | capture::Failure::TimedOut { .. } => {
-            "Docker could not execute the Local snapshot operation"
-        }
-    })
-    .map_err(Into::into)
-}
-
 fn require_docker_success<I, S>(docker: &Path, arguments: I, message: &str) -> Result<(), String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let result = docker_output(docker, arguments)?;
+    let result = STAGE.output(docker, arguments)?;
     if result.status.success() {
         Ok(())
     } else {
@@ -733,18 +703,9 @@ where
     }
 }
 
-fn output_text(result: &Output) -> Result<&str, String> {
-    std::str::from_utf8(&result.stdout)
-        .map_err(|_| "Docker returned invalid Local snapshot output".into())
-}
-
 fn docker_failure(result: &Output, fallback: &str) -> String {
-    let message = String::from_utf8_lossy(&result.stderr);
-    let detail = message.lines().rev().find(|line| !line.trim().is_empty());
-    detail.map_or_else(
-        || fallback.to_owned(),
-        |line| format!("{fallback}: {}", line.trim()),
-    )
+    snapshot_docker::last_error_line(result)
+        .map_or_else(|| fallback.to_owned(), |line| format!("{fallback}: {line}"))
 }
 
 fn validate_dependency_sources(pyproject: &[u8]) -> Result<(), String> {
@@ -807,6 +768,8 @@ fn unsafe_dependencies() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
