@@ -994,7 +994,7 @@ impl Context {
         epoch: Option<u32>,
         team_image: &str,
         fresh: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<(), String> {
         let recreate =
             runtime_state_reset_needed(fresh, epoch, state::read_state_epoch(&self.paths));
         if recreate {
@@ -1014,7 +1014,7 @@ impl Context {
         {
             state::write_state_epoch(&self.paths, epoch)?;
         }
-        Ok(recreate)
+        Ok(())
     }
 
     fn validate_started_storage(&self, space_id: &str) -> Result<(), String> {

@@ -63,7 +63,7 @@ impl Context {
         ) {
             // A restoration that could not run, or outlived its deadline, is a failed restoration: the rollback
             // status is still recorded.
-            Ok(_) => match self.start_previous(installed.port) {
+            Ok(()) => match self.start_previous(installed.port) {
                 Ok(started) => started,
                 Err(error) => {
                     output::warning(&format!(
