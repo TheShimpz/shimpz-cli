@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -305,12 +304,10 @@ pub(crate) fn read_state_epoch(paths: &Paths) -> Option<u32> {
 pub(crate) fn write_state_epoch(paths: &Paths, epoch: u32) -> Result<(), String> {
     let mut identity = [0_u8; 16];
     getrandom::fill(&mut identity).map_err(|_| "the system random source is unavailable")?;
-    let mut record = format!("{epoch} ");
-    for byte in identity {
-        write!(record, "{byte:02x}").expect("String writes are infallible");
-    }
-    record.push('\n');
-    write_private(&paths.state_epoch, &record)
+    write_private(
+        &paths.state_epoch,
+        &format!("{epoch} {}\n", crate::digest::lower_hex(&identity)),
+    )
 }
 
 /// Forget the recorded epoch before runtime state is recreated, so an interrupted recreation is redone.
@@ -411,18 +408,9 @@ pub(crate) fn clear_stopped(paths: &Paths) -> Result<(), String> {
 }
 
 pub(crate) fn random_space_id() -> Result<String, String> {
-    let mut source =
-        File::open("/dev/urandom").map_err(|_| "the system random source is unavailable")?;
     let mut bytes = [0_u8; 12];
-    source
-        .read_exact(&mut bytes)
-        .map_err(|_| "could not generate the Local Space identity")?;
-    let mut encoded = String::with_capacity(24);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("String writes are infallible");
-    }
-    Ok(format!("space-{encoded}"))
+    getrandom::fill(&mut bytes).map_err(|_| "the system random source is unavailable")?;
+    Ok(format!("space-{}", crate::digest::lower_hex(&bytes)))
 }
 
 pub(crate) fn selected_port(installed: Option<&Installed>) -> Result<u16, String> {

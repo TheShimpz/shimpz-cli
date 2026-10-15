@@ -1,8 +1,6 @@
 //! The lifecycle's Local Admin client: the Admin listener attestation, the Local authentication-state contract, and
 //! the Supervisor-authorized Space reset.
 
-use std::fs;
-use std::io::Read;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -321,18 +319,10 @@ fn retry_after_seconds(value: Option<&str>) -> Option<u16> {
 }
 
 fn generate_host_reset_capability(space_id: &str) -> Result<HostResetCapability, String> {
-    let mut source = fs::File::open("/dev/urandom")
-        .map_err(|_| "the system random source is unavailable".to_owned())?;
     let mut secret_bytes = [0_u8; 32];
-    source
-        .read_exact(&mut secret_bytes)
-        .map_err(|_| "could not generate the Local reset capability".to_owned())?;
-    let mut secret = String::with_capacity(64);
-    for byte in secret_bytes {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        secret.push(char::from(HEX[usize::from(byte >> 4)]));
-        secret.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
+    getrandom::fill(&mut secret_bytes)
+        .map_err(|_| "the system random source is unavailable".to_owned())?;
+    let secret = crate::digest::lower_hex(&secret_bytes);
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "the system clock cannot authorize a Local reset".to_owned())?

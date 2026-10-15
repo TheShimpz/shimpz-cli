@@ -1,6 +1,5 @@
 //! Local Action invocation through the local provider-call broker (ADR-0106).
 
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -261,12 +260,7 @@ fn operation_id() -> Result<String, String> {
         .map_err(|_| "Action operation id cannot be generated".to_owned())?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex = bytes
-        .iter()
-        .fold(String::with_capacity(32), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        });
+    let hex = crate::digest::lower_hex(&bytes);
     Ok(format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],

@@ -642,10 +642,7 @@ fn encodings(secret: &str) -> Vec<Zeroizing<String>> {
         json,
         percent_encode(secret, false),
         percent_encode(secret, true),
-        secret.bytes().fold(String::new(), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        }),
+        crate::digest::lower_hex(secret.as_bytes()),
     ];
     let raw = secret.as_bytes();
     for offset in 0..3 {
@@ -1066,12 +1063,7 @@ mod tests {
             "token%2Fvalue%201".to_owned(),
             "token%2Fvalue+1".to_owned(),
             "token\\/value 1".to_owned(),
-            "token/value 1"
-                .bytes()
-                .fold(String::new(), |mut hex, byte| {
-                    let _ = write!(hex, "{byte:02x}");
-                    hex
-                }),
+            crate::digest::lower_hex(b"token/value 1"),
             format!("Basic {}", STANDARD.encode("user:token/value 1")),
             proof("secret-1", "token/value 1"),
             r#"{"a":"token/value 1"}"#.to_owned(),
