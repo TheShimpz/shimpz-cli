@@ -16,10 +16,10 @@ use super::evidence::{
     MIN_CRYPTSETUP_VERSION, cryptsetup_version, cryptsetup_version_supported, luks_dump_valid,
     luks_unlock_credentials_valid,
 };
-use crate::private_file;
 use crate::space::command::{self, Tool, one_line};
 use crate::space::id;
 use crate::space::paths::{Paths, STORAGE_MARKER};
+use crate::space::state::write_private;
 
 const POOL_SIZE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PASSPHRASE_BYTES: usize = 1_024;
@@ -1253,10 +1253,6 @@ fn exact_regular_file(path: &Path) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-fn write_private(path: &Path, value: &str) -> Result<(), String> {
-    private_file::replace(path, value.as_bytes()).map_err(io_error)
 }
 
 fn remove_if_regular(path: &Path) -> Result<(), String> {
