@@ -338,9 +338,7 @@ impl<'a> Pool<'a> {
             return Ok(Admission::Verified);
         }
         command::authorize()?;
-        if self.mapping_path().exists() {
-            self.validate_mapping()?;
-        } else {
+        if !self.mapping_path().exists() {
             let mut passphrase = LockedPassphrase::prompt("Encrypted storage passphrase: ")?;
             passphrase.run_cryptsetup(
                 "open",
@@ -351,8 +349,8 @@ impl<'a> Pool<'a> {
                     OsString::from(self.mapping_name()),
                 ],
             )?;
-            self.validate_mapping()?;
         }
+        self.validate_mapping()?;
         if !self.is_mounted()? {
             Self::root(
                 Tool::Mount,
