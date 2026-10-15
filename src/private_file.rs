@@ -132,8 +132,7 @@ mod tests {
         assert!(options.open(&link).is_err());
     }
 
-    /// Space lifecycle state once deleted whatever sat at its temporary path, following storage only in refusing a
-    /// planted link; both now refuse any non-regular leftover and discard only a stale regular one.
+    /// A write refuses any non-regular leftover at its temporary path and discards only a stale regular one.
     #[test]
     fn replaces_atomically_and_refuses_a_planted_temporary() {
         let directory = tempfile::tempdir().unwrap();

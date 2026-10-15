@@ -297,8 +297,8 @@ fn developer_digest(release_ref: &str) -> Option<&str> {
 
 /// Decide, before a scheduled update replaces the running graph, whether active Team work defers it. Busy work
 /// waits at most `BUSY_DEFER_SECONDS` per continuous deferral of one digest; a deferral retries at the next poll
-/// instead of backing off. Unobservable activity applies at once: an unavailable or older Team, which cannot report
-/// activity, must never hold back the update that repairs it.
+/// instead of backing off. Unobservable activity applies at once: a Team that cannot report activity must never hold
+/// back the update that repairs it.
 pub(crate) fn defer_for_activity(
     paths: &Paths,
     digest: &str,
