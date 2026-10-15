@@ -10,7 +10,6 @@ use crate::{digest, output, snapshot_lock, source_package, stage};
 
 const MAX_BATCH: usize = 50;
 const MAX_FAILURE_DETAIL_CHARS: usize = 240;
-const INSPECT_TEMPLATE: &str = "{{.Id}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}";
 
 pub(crate) fn run(project: &Path) -> Result<String, String> {
     let manifest = source_package::read_manifest(project)?;
@@ -95,7 +94,16 @@ fn validate_images(docker: &Path, assistant_id: &str, images: &[String]) -> Resu
     for image_id in images {
         let result = REMOVAL.output(
             docker,
-            ["image", "inspect", "--format", INSPECT_TEMPLATE, image_id],
+            [
+                "image",
+                "inspect",
+                "--format",
+                &stage::inspect_template(
+                    &[".Id"],
+                    &[stage::LOCAL_STAGE_LABEL, stage::ASSISTANT_LABEL],
+                ),
+                image_id,
+            ],
         )?;
         let expected = [image_id.as_str(), stage::LOCAL_STAGE_VALUE, assistant_id];
         if !result.status.success()

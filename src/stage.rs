@@ -36,8 +36,28 @@ const NONCE_LABEL: &str = "org.shimpz.local.stage.nonce";
 /// The one tag that makes a staged image its Assistant's current snapshot; untagged staged images are superseded.
 pub(crate) const LOCAL_SNAPSHOT_REPOSITORY: &str = "shimpz-local";
 pub(crate) const LOCAL_SNAPSHOT_TAG: &str = "staged";
-const CURRENT_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.local.stage.nonce\"}}";
-const IMAGE_INSPECT_TEMPLATE: &str = "{{.Id}}\n{{.Architecture}}\n{{json .RepoDigests}}\n{{json .RepoTags}}\n{{index .Config.Labels \"org.shimpz.local.stage\"}}\n{{index .Config.Labels \"org.shimpz.assistant.id\"}}\n{{index .Config.Labels \"org.shimpz.assistant.name\"}}\n{{index .Config.Labels \"org.shimpz.assistant.summary\"}}\n{{index .Config.Labels \"org.shimpz.assistant.declared-creators\"}}\n{{index .Config.Labels \"org.shimpz.source.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.version\"}}\n{{index .Config.Labels \"org.shimpz.local.build.digest\"}}\n{{index .Config.Labels \"org.shimpz.assistant.actions\"}}\n{{index .Config.Labels \"org.shimpz.assistant.integrations\"}}";
+/// The image fields an inspection prints before its labels.
+const CURRENT_INSPECT_FIELDS: [&str; 3] = [".Id", "json .RepoDigests", "json .RepoTags"];
+const CURRENT_INSPECT_LABELS: [&str; 4] =
+    [LOCAL_STAGE_LABEL, ASSISTANT_LABEL, BUILD_LABEL, NONCE_LABEL];
+const IMAGE_INSPECT_FIELDS: [&str; 4] = [
+    ".Id",
+    ".Architecture",
+    "json .RepoDigests",
+    "json .RepoTags",
+];
+const IMAGE_INSPECT_LABELS: [&str; 10] = [
+    LOCAL_STAGE_LABEL,
+    ASSISTANT_LABEL,
+    NAME_LABEL,
+    SUMMARY_LABEL,
+    DECLARED_CREATORS_LABEL,
+    SOURCE_LABEL,
+    VERSION_LABEL,
+    BUILD_LABEL,
+    ACTIONS_LABEL,
+    INTEGRATIONS_LABEL,
+];
 
 struct DiscoveryProjection {
     actions: Vec<String>,
@@ -332,7 +352,7 @@ fn current_image(
             "image",
             "inspect",
             "--format",
-            CURRENT_INSPECT_TEMPLATE,
+            &inspect_template(&CURRENT_INSPECT_FIELDS, &CURRENT_INSPECT_LABELS),
             reference,
         ],
     )?;
@@ -592,7 +612,7 @@ fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Re
             "image",
             "inspect",
             "--format",
-            IMAGE_INSPECT_TEMPLATE,
+            &inspect_template(&IMAGE_INSPECT_FIELDS, &IMAGE_INSPECT_LABELS),
             image_id,
         ],
     )?;
@@ -624,6 +644,20 @@ fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Re
         return Err("the staged image does not match its Local snapshot contract".into());
     }
     Ok(())
+}
+
+/// A Docker image inspect template that prints each of `fields`, then the value of each of `labels`, one per line.
+pub(crate) fn inspect_template(fields: &[&str], labels: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{{{{{field}}}}}"))
+        .chain(
+            labels
+                .iter()
+                .map(|label| format!("{{{{index .Config.Labels \"{label}\"}}}}")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn stage_labels(
