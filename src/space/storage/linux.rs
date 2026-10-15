@@ -16,6 +16,7 @@ use super::evidence::{
     MIN_CRYPTSETUP_VERSION, cryptsetup_version, cryptsetup_version_supported, luks_dump_valid,
     luks_unlock_credentials_valid,
 };
+use crate::private_file;
 use crate::space::command::{self, Tool, one_line};
 use crate::space::graph::{VOLUMES, Volume};
 use crate::space::id;
@@ -820,7 +821,7 @@ fn reset_marker(paths: &Paths) -> Result<Option<PathBuf>, String> {
     };
     if let Some(marker) = &marker {
         exact_regular_file(marker)?;
-        if fs::read_to_string(marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
+        if !storage_marker_is_valid(marker)? {
             return Err("encrypted Local storage marker is invalid".into());
         }
     }
@@ -870,8 +871,7 @@ fn reset_incomplete(paths: &Paths) -> Result<(), String> {
         return remove_if_empty(&paths.security);
     }
     exact_regular_file(&paths.storage_marker)?;
-    if fs::read_to_string(&paths.storage_marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n")
-    {
+    if !storage_marker_is_valid(&paths.storage_marker)? {
         return Err("encrypted Local storage marker is invalid".into());
     }
     validate_partial_pool(paths)?;
@@ -948,7 +948,7 @@ fn reconcile_storage_marker(paths: &Paths) -> Result<(), String> {
         return Err("the encrypted Local storage has an unexpected marker temporary".into());
     }
     exact_regular_file(&temporary)?;
-    if fs::read_to_string(&temporary).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
+    if !storage_marker_is_valid(&temporary)? {
         return Err("encrypted Local storage marker temporary is invalid".into());
     }
     fs::rename(temporary, &paths.storage_marker).map_err(io_error)
@@ -956,7 +956,7 @@ fn reconcile_storage_marker(paths: &Paths) -> Result<(), String> {
 
 fn discover_pool_mappings(paths: &Paths) -> Result<Vec<String>, String> {
     let pool = paths.pool_image.canonicalize().map_err(io_error)?;
-    let recorded_uuid = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
+    let recorded_uuid = read_storage_record(&paths.pool_uuid)?;
     let recorded_uuid = one_line(&recorded_uuid, "pool UUID")?.replace('-', "");
     let mut identities = Vec::new();
     for device in pool_loop_devices(
@@ -1062,10 +1062,10 @@ fn validate_metadata_with_marker(paths: &Paths, marker: &Path) -> Result<(), Str
     exact_regular_file(marker)?;
     exact_regular_file(&paths.pool_image)?;
     exact_regular_file(&paths.pool_uuid)?;
-    if fs::read_to_string(marker).map_err(io_error)? != format!("{STORAGE_MARKER}\n") {
+    if !storage_marker_is_valid(marker)? {
         return Err("encrypted Local storage marker is invalid".into());
     }
-    let expected_document = fs::read_to_string(&paths.pool_uuid).map_err(io_error)?;
+    let expected_document = read_storage_record(&paths.pool_uuid)?;
     let expected = one_line(&expected_document, "pool UUID")?;
     let actual_document = command::output(
         Tool::Luks,
@@ -1187,6 +1187,21 @@ fn exact_regular_file(path: &Path) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// The most bytes a storage marker or pool UUID record holds.
+const STORAGE_RECORD_BYTES: u64 = 64;
+
+/// Read a storage marker or pool UUID record, which this CLI writes only through [`write_private`], through its
+/// admitted handle: never a link, a file of another owner or mode, or more than [`STORAGE_RECORD_BYTES`].
+fn read_storage_record(path: &Path) -> Result<String, String> {
+    let name = format!("Local storage file {}", path.display());
+    private_file::read_record(path, STORAGE_RECORD_BYTES, &name)?
+        .ok_or_else(|| format!("invalid Local storage file: {}", path.display()))
+}
+
+fn storage_marker_is_valid(path: &Path) -> Result<bool, String> {
+    Ok(read_storage_record(path)? == format!("{STORAGE_MARKER}\n"))
 }
 
 fn remove_if_regular(path: &Path) -> Result<(), String> {
@@ -1439,9 +1454,9 @@ mod tests {
         fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(incomplete(&paths).unwrap());
 
-        fs::write(
-            paths.storage_marker.with_extension("tmp"),
-            format!("{STORAGE_MARKER}\n"),
+        write_private(
+            &paths.storage_marker.with_extension("tmp"),
+            &format!("{STORAGE_MARKER}\n"),
         )
         .unwrap();
         assert!(incomplete(&paths).unwrap());
@@ -1466,7 +1481,7 @@ mod tests {
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir_all(&paths.security).unwrap();
         fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(&paths.storage_marker, format!("{STORAGE_MARKER}\n")).unwrap();
+        write_private(&paths.storage_marker, &format!("{STORAGE_MARKER}\n")).unwrap();
         reset_incomplete(&paths).unwrap();
         assert!(!paths.security.exists());
 
@@ -1476,6 +1491,29 @@ mod tests {
         assert!(!paths.security.exists());
     }
 
+    /// A marker is read only through its admitted handle: a link, or a marker this CLI did not write with mode 0600,
+    /// is refused even when it holds the current marker text.
+    #[test]
+    fn reads_a_storage_marker_only_as_a_private_record() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::under(home.path()).unwrap();
+        fs::create_dir_all(&paths.security).unwrap();
+        fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = home.path().join("target");
+        write_private(&target, &format!("{STORAGE_MARKER}\n")).unwrap();
+        std::os::unix::fs::symlink(&target, &paths.storage_marker).unwrap();
+        assert!(storage_marker_is_valid(&paths.storage_marker).is_err());
+
+        fs::remove_file(&paths.storage_marker).unwrap();
+        fs::write(&paths.storage_marker, format!("{STORAGE_MARKER}\n")).unwrap();
+        fs::set_permissions(&paths.storage_marker, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(reset_incomplete(&paths).is_err());
+        assert!(paths.storage_marker.exists());
+
+        write_private(&paths.storage_marker, "foreign\n").unwrap();
+        assert_eq!(storage_marker_is_valid(&paths.storage_marker), Ok(false));
+    }
+
     #[test]
     fn hard_reset_preflight_admits_current_partial_storage_without_mutation() {
         let home = tempfile::tempdir().unwrap();
@@ -1483,7 +1521,7 @@ mod tests {
         fs::create_dir_all(&paths.security).unwrap();
         fs::set_permissions(&paths.security, fs::Permissions::from_mode(0o700)).unwrap();
         let temporary = paths.storage_marker.with_extension("tmp");
-        fs::write(&temporary, format!("{STORAGE_MARKER}\n")).unwrap();
+        write_private(&temporary, &format!("{STORAGE_MARKER}\n")).unwrap();
 
         preflight_reset(&paths, None).unwrap();
 
