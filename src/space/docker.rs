@@ -150,7 +150,6 @@ const ACCOUNT_EGRESS: &str = graph::ACCOUNT_EGRESS.container;
 const ACCOUNT_CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// State, exit code, Compose project, service and configuration hash, image, and the capability mount's source.
 const INIT_RECORD_FORMAT: &str = "{{.State.Status}}|{{.State.ExitCode}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{index .Config.Labels \"com.docker.compose.config-hash\"}}|{{.Config.Image}}|{{range .Mounts}}{{if eq .Destination \"/run/shimpz-account-egress\"}}{{.Type}}:{{.Name}}{{end}}{{end}}";
-const SPACE_PROJECT: &str = "shimpz-space";
 pub(crate) const COMPOSE_UP: [&str; 9] = [
     "up",
     "-d",
@@ -636,7 +635,7 @@ impl Engine {
                 "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
                 &name,
             ])?;
-            if identity.trim_end() != format!("{name}|{SPACE_PROJECT}|{volume}") {
+            if identity.trim_end() != format!("{name}|{}|{volume}", graph::PROJECT) {
                 return Err(format!(
                     "the Local volume {volume} is not owned by this Space"
                 ));
@@ -1385,7 +1384,8 @@ fn completed_init_matches(records: &str, configuration: &str) -> bool {
     );
     let Some(image) = init
         .strip_prefix(&format!(
-            "exited|0|{SPACE_PROJECT}|{}|{hash}|",
+            "exited|0|{}|{}|{hash}|",
+            graph::PROJECT,
             graph::ACCOUNT_EGRESS_INIT
         ))
         .and_then(|rest| rest.strip_suffix(&format!("|{capability}")))
@@ -1394,7 +1394,7 @@ fn completed_init_matches(records: &str, configuration: &str) -> bool {
         return false;
     };
     egress
-        .strip_prefix(&format!("running|0|{SPACE_PROJECT}|{ACCOUNT_EGRESS}|"))
+        .strip_prefix(&format!("running|0|{}|{ACCOUNT_EGRESS}|", graph::PROJECT))
         .and_then(|rest| rest.split_once('|'))
         .is_some_and(|(egress_hash, rest)| {
             digest::is_sha256_hex(egress_hash) && rest == format!("{image}|{capability}")

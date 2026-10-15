@@ -11,8 +11,6 @@ use super::paths::Paths;
 use super::resources;
 use crate::output;
 
-const PROJECT_FILTER: &str = "label=com.docker.compose.project=shimpz-space";
-
 /// After a start, recreate from the graph every running member Docker left detached, and prove each recreated member
 /// runs attached exactly as declared, with Admin published on `port`. Any other running member found detached by the
 /// final observation also fails the start.
@@ -71,7 +69,7 @@ fn running_project_containers(engine: &Engine) -> Result<Vec<String>, String> {
             "--quiet",
             "--no-trunc",
             "--filter",
-            PROJECT_FILTER,
+            &resources::project_filter(),
             "--filter",
             "status=running",
         ])?

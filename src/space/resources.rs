@@ -10,8 +10,12 @@ use super::paths::Paths;
 use super::release::Package;
 use crate::{identifier, team_id};
 
-const PROJECT: &str = "shimpz-space";
 const PROFILE: &str = "local-v1";
+
+/// The Docker filter that selects the members of the Local Compose project.
+pub(crate) fn project_filter() -> String {
+    format!("label=com.docker.compose.project={}", graph::PROJECT)
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Inventory {
@@ -31,7 +35,7 @@ impl Inventory {
         paths: &Paths,
         storage: StorageProfile,
     ) -> Result<Self, String> {
-        let project = format!("label=com.docker.compose.project={PROJECT}");
+        let project = project_filter();
         let profile = format!("label=com.shimpz.local.profile={PROFILE}");
         let local_filter = [
             "--filter",
@@ -229,7 +233,7 @@ fn reserved_occupant(engine: &Engine, name: &str) -> Result<(), String> {
         name,
     ]);
     match record {
-        Ok(value) if value.trim() != PROJECT => {
+        Ok(value) if value.trim() != graph::PROJECT => {
             Err(format!("another Docker container is already named {name}"))
         }
         Ok(_) | Err(_) => Ok(()),
@@ -253,7 +257,7 @@ fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
     ]);
     match project {
         Err(_) => Ok(None),
-        Ok(value) if value.trim() != PROJECT => {
+        Ok(value) if value.trim() != graph::PROJECT => {
             Err("the reserved controller belongs to another project".into())
         }
         Ok(_) => {

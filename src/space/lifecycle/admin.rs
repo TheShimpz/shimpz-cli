@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::output;
 use crate::space::docker::Engine;
+use crate::space::graph;
 use crate::space::state::Installed;
 
 use super::Context;
@@ -22,7 +23,7 @@ impl Context {
             "--type=container",
             "--format",
             "{{.State.Running}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{json .HostConfig.PortBindings}}",
-            "shimpz-admin",
+            graph::ADMIN.container,
         ]);
         match record {
             Ok(record) => parse_admin_attestation(&record),
@@ -70,7 +71,7 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
         .filter(|line| !line.is_empty() && lines.next().is_none())
         .ok_or_else(|| "the owned Admin listener attestation is malformed".to_owned())?;
     let fields: Vec<_> = line.splitn(4, '|').collect();
-    if fields.len() != 4 || fields[1] != "shimpz-space" || fields[2] != "admin" {
+    if fields.len() != 4 || fields[1] != graph::PROJECT || fields[2] != graph::ADMIN.service {
         return Err("the owned Admin listener identity is invalid".into());
     }
     let binding_map = serde_json::from_str::<serde_json::Value>(fields[3])

@@ -8,6 +8,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use super::docker::ResolvedRelease;
+use super::graph;
 use super::host::HostProfile;
 use super::id;
 use super::paths::{MARKER, Paths};
@@ -240,7 +241,7 @@ fn validate_environment(
         .ok()
         .filter(|value| *value >= 1024)
         .ok_or_else(|| "the installed Admin port is invalid".to_owned())?;
-    if values["SHIMPZ_PROJECT_NAME"] != "shimpz-space" {
+    if values["SHIMPZ_PROJECT_NAME"] != graph::PROJECT {
         return Err("the installed Compose project is invalid".into());
     }
     let expected_platform = match profile {
@@ -316,7 +317,7 @@ pub(crate) fn write_environment(
     let profile = environment.profile.storage().name();
     let release = &environment.release;
     let mut document = format!(
-        "SHIMPZ_ADMIN_IMAGE={}\nSHIMPZ_TEAM_IMAGE={}\nSHIMPZ_BRAIN_IMAGE={}\nSHIMPZ_EGRESS_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_ORDINAL={}\nSHIMPZ_SPACE_PLATFORM={platform}\nSHIMPZ_PORT={}\nSHIMPZ_DOCKER_GID={}\nSHIMPZ_DOCKER_SOCKET={}\nSHIMPZ_SPACE_ID={}\nSHIMPZ_CPUSET={}\nSHIMPZ_PROJECT_NAME=shimpz-space\nSHIMPZ_ADMIN_ALLOWED_ORIGINS=http://localhost:{},http://127.0.0.1:{}\nSHIMPZ_STORAGE_PROFILE={profile}\n",
+        "SHIMPZ_ADMIN_IMAGE={}\nSHIMPZ_TEAM_IMAGE={}\nSHIMPZ_BRAIN_IMAGE={}\nSHIMPZ_EGRESS_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_ORDINAL={}\nSHIMPZ_SPACE_PLATFORM={platform}\nSHIMPZ_PORT={}\nSHIMPZ_DOCKER_GID={}\nSHIMPZ_DOCKER_SOCKET={}\nSHIMPZ_SPACE_ID={}\nSHIMPZ_CPUSET={}\nSHIMPZ_PROJECT_NAME={project}\nSHIMPZ_ADMIN_ALLOWED_ORIGINS=http://localhost:{},http://127.0.0.1:{}\nSHIMPZ_STORAGE_PROFILE={profile}\n",
         release.metadata.admin,
         release.metadata.team,
         release.metadata.brain,
@@ -330,6 +331,7 @@ pub(crate) fn write_environment(
         environment.cpuset,
         environment.port,
         environment.port,
+        project = graph::PROJECT,
     );
     if environment.profile == HostProfile::Linux {
         writeln!(

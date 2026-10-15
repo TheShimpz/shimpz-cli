@@ -11,7 +11,7 @@ use crate::space::paths::Paths;
 use crate::space::resources::Inventory;
 use crate::space::status as status_report;
 use crate::space::storage::linux;
-use crate::space::{members, scheduler, state};
+use crate::space::{graph, members, scheduler, state};
 
 use super::admin::{AdminAttestation, admin_available, admin_reset};
 use super::cli_binary::validate_private_cli;
@@ -220,11 +220,12 @@ impl Context {
                 return Err("the stopped Space could not start for reset authorization".into());
             }
         }
-        self.start_container_if_present("shimpz-team")?;
+        self.start_container_if_present(graph::TEAM.container)?;
         if self.admin_attestation()? == AdminAttestation::Stopped {
-            let status = self
-                .engine
-                .run_quiet_status("Docker Admin container start", ["start", "shimpz-admin"])?;
+            let status = self.engine.run_quiet_status(
+                "Docker Admin container start",
+                ["start", graph::ADMIN.container],
+            )?;
             if !status.success() {
                 return Err("the owned Admin container could not be started".into());
             }
@@ -249,7 +250,10 @@ impl Context {
         if attestation == AdminAttestation::Absent {
             return Ok(attestation);
         }
-        if self.start_container_if_present("shimpz-team").is_err() {
+        if self
+            .start_container_if_present(graph::TEAM.container)
+            .is_err()
+        {
             output::info(
                 "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
             );
@@ -260,7 +264,7 @@ impl Context {
                 .engine
                 .run_quiet_status(
                     "Docker Admin container recovery start",
-                    ["start", "shimpz-admin"],
+                    ["start", graph::ADMIN.container],
                 )
                 .is_ok_and(|status| status.success());
             if !started {

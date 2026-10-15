@@ -6,6 +6,8 @@ const VOLUME_NOCOPY_TOKEN: &str = "{{SHIMPZ_VOLUME_NOCOPY}}";
 
 use super::release::{self, Package};
 
+/// The Compose project every Local Space member belongs to.
+pub(crate) const PROJECT: &str = "shimpz-space";
 /// The container port Admin publishes, the only published port of the graph.
 pub(crate) const ADMIN_PUBLISHED_PORT: &str = "4600/tcp";
 /// The only host address Admin's published port binds.
