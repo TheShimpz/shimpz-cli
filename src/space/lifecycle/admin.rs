@@ -131,7 +131,7 @@ fn admin_authentication_state_response(
         return Err(invalid());
     }
     let object = body.as_object().ok_or_else(invalid)?;
-    if object.len() != 5
+    if object.len() != 4
         || object.get("profile").and_then(serde_json::Value::as_str) != Some("local")
         || object
             .get("authenticated")
@@ -139,18 +139,6 @@ fn admin_authentication_state_response(
             != Some(false)
         || object
             .get("initialized")
-            .and_then(serde_json::Value::as_bool)
-            .is_none()
-    {
-        return Err(invalid());
-    }
-    let features = object
-        .get("features")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(invalid)?;
-    if features.len() != 1
-        || features
-            .get("teamCredentials")
             .and_then(serde_json::Value::as_bool)
             .is_none()
     {
@@ -509,8 +497,7 @@ mod tests {
             "profile": "local",
             "authenticated": false,
             "initialized": initialized,
-            "authentication_state": authentication_state,
-            "features": {"teamCredentials": true}
+            "authentication_state": authentication_state
         })
     }
 
@@ -550,8 +537,7 @@ mod tests {
                     "profile": "unknown",
                     "authenticated": false,
                     "initialized": true,
-                    "authentication_state": "configured",
-                    "features": {"teamCredentials": true}
+                    "authentication_state": "configured"
                 }),
             ),
             (
@@ -561,7 +547,6 @@ mod tests {
                     "authenticated": false,
                     "initialized": true,
                     "authentication_state": "configured",
-                    "features": {"teamCredentials": true},
                     "extra": true
                 }),
             ),
