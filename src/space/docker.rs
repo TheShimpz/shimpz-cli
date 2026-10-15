@@ -47,7 +47,7 @@ const DOCKER_STOP: Duration = Duration::from_mins(5);
 const DOCKER_COMPOSE: Duration = Duration::from_mins(10);
 /// How long emptying the runtime-state volumes may run.
 const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
-const ADMIN_AUTHENTICATION_VOLUME: &str = "shimpz-space-data";
+const ADMIN_AUTHENTICATION_VOLUME: &str = "data";
 const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -206,15 +206,7 @@ impl Engine {
             return Err("the selected Team image reference is invalid".into());
         }
         for volume in volumes {
-            let name = graph::resource_name(volume);
-            let identity = self.run_output([
-                "volume",
-                "inspect",
-                "--format",
-                "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-                &name,
-            ])?;
-            if identity.trim_end() != format!("{name}|{}|{volume}", graph::PROJECT) {
+            if !self.owns_volume(volume)? {
                 return Err(format!(
                     "the Local volume {volume} is not owned by this Space"
                 ));
@@ -299,7 +291,8 @@ impl Engine {
         }
         self.validate_admin_authentication_volume()?;
         let mount = format!(
-            "type=volume,src={ADMIN_AUTHENTICATION_VOLUME},dst=/data,volume-nocopy,readonly"
+            "type=volume,src={},dst=/data,volume-nocopy,readonly",
+            graph::resource_name(ADMIN_AUTHENTICATION_VOLUME)
         );
         for attempt in 0..ADMIN_AUTHENTICATION_ATTEMPTS {
             let container = format!(
@@ -360,18 +353,25 @@ impl Engine {
     }
 
     fn validate_admin_authentication_volume(&self) -> Result<(), String> {
+        if self.owns_volume(ADMIN_AUTHENTICATION_VOLUME)? {
+            Ok(())
+        } else {
+            Err("the Admin data volume is not owned by this Space".into())
+        }
+    }
+
+    /// Whether the volume of the graph's `key` is exactly this Space's: its graph name, labeled with this Compose
+    /// project and that volume key. A failed inspection, such as of an absent volume, is the error.
+    pub(super) fn owns_volume(&self, key: &str) -> Result<bool, String> {
+        let name = graph::resource_name(key);
         let identity = self.run_output([
             "volume",
             "inspect",
             "--format",
             "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-            ADMIN_AUTHENTICATION_VOLUME,
+            &name,
         ])?;
-        if identity.trim() == "shimpz-space-data|shimpz-space|data" {
-            Ok(())
-        } else {
-            Err("the Admin data volume is not owned by this Space".into())
-        }
+        Ok(identity.trim_end() == format!("{name}|{}|{key}", graph::PROJECT))
     }
 
     fn remove_authentication_probe(&self, container: &str) -> Result<bool, String> {
@@ -1071,20 +1071,22 @@ mod tests {
 
     use super::exec::{MAX_DOCKER_OUTPUT_BYTES, drain_diagnostic, execute_quiet};
     use super::helper::{
-        RELEASE_STATUS_HELPER, RESET_CAPABILITY_VOLUME, helper_name, remove_helper,
-        reset_capability_arguments, reset_capability_clear_script, reset_capability_write_script,
-        status_projection_arguments, sweep_helpers,
+        RELEASE_STATUS_HELPER, RELEASE_STATUS_VOLUME, RESET_CAPABILITY_VOLUME, helper_name,
+        remove_helper, reset_capability_arguments, reset_capability_clear_script,
+        reset_capability_write_script, status_projection_arguments, sweep_helpers,
     };
     use super::release::image_present;
     use super::*;
 
     #[test]
-    fn fixed_volume_names_are_the_graph_names_of_their_keys() {
-        assert_eq!(ADMIN_AUTHENTICATION_VOLUME, graph::resource_name("data"));
-        assert_eq!(
+    fn helper_volumes_are_graph_volumes() {
+        for key in [
+            ADMIN_AUTHENTICATION_VOLUME,
             RESET_CAPABILITY_VOLUME,
-            graph::resource_name("reset_capability")
-        );
+            RELEASE_STATUS_VOLUME,
+        ] {
+            assert!(graph::VOLUME_NAMES.contains(&key));
+        }
     }
 
     /// Captured Docker output was once read without any bound; it now stops Docker one byte past its bound.

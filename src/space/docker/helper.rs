@@ -11,6 +11,7 @@ use std::time::Instant;
 use super::exec::{docker_timed_out, output, quiet_status, silent_status, wait_failure};
 use super::{DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
+use crate::space::graph;
 use crate::space::release::ADMIN;
 
 /// Distinguishes the one-shot helper containers this process names.
@@ -96,7 +97,9 @@ pub(super) fn helper_failure(docker: &Path, name: &str, cause: String) -> String
         Err(cleanup) => format!("{cause}; {cleanup}"),
     }
 }
-pub(super) const RESET_CAPABILITY_VOLUME: &str = "shimpz-space-reset-capability";
+/// The graph keys of the volumes the reset capability and release status helpers mount.
+pub(super) const RESET_CAPABILITY_VOLUME: &str = "reset_capability";
+pub(super) const RELEASE_STATUS_VOLUME: &str = "release_status";
 
 /// A started release status helper waiting for its document. It writes nothing unless committed: an abandoned
 /// helper reads an empty input, which its script refuses before opening any file.
@@ -341,15 +344,12 @@ impl Engine {
         if !ADMIN.admits(admin_image) {
             return Err("the Local release status projection is invalid".into());
         }
-        let volume = "shimpz-space-release-status";
-        let identity = match self.run_output([
-            "volume",
-            "inspect",
-            "--format",
-            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-            volume,
-        ]) {
-            Ok(identity) => identity,
+        let volume = graph::resource_name(RELEASE_STATUS_VOLUME);
+        match self.owns_volume(RELEASE_STATUS_VOLUME) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err("the Local release status volume is not owned by this Space".into());
+            }
             // A failed inspection is absence only when the daemon lists no volume of exactly that name.
             Err(error) => {
                 let listed = self.run_output([
@@ -365,9 +365,6 @@ impl Engine {
                     Ok(None)
                 };
             }
-        };
-        if identity.trim() != "shimpz-space-release-status|shimpz-space|release_status" {
-            return Err("the Local release status volume is not owned by this Space".into());
         }
         // A status helper an earlier projection could not prove removed may still write; no other may start first.
         sweep_helpers(&self.docker, RELEASE_STATUS_HELPER)?;
@@ -452,7 +449,8 @@ impl Engine {
         self.validate_reset_capability_volume()?;
         sweep_helpers(&self.docker, RESET_CAPABILITY_HELPER)?;
         let mount = format!(
-            "type=volume,src={RESET_CAPABILITY_VOLUME},dst=/run/shimpz-local-reset,volume-nocopy"
+            "type=volume,src={},dst=/run/shimpz-local-reset,volume-nocopy",
+            graph::resource_name(RESET_CAPABILITY_VOLUME)
         );
         let name = helper_name(RESET_CAPABILITY_HELPER);
         let script = if write {
@@ -473,14 +471,7 @@ impl Engine {
     }
 
     fn validate_reset_capability_volume(&self) -> Result<(), String> {
-        let identity = self.run_output([
-            "volume",
-            "inspect",
-            "--format",
-            "{{.Name}}|{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.volume\"}}",
-            RESET_CAPABILITY_VOLUME,
-        ])?;
-        if identity.trim() == "shimpz-space-reset-capability|shimpz-space|reset_capability" {
+        if self.owns_volume(RESET_CAPABILITY_VOLUME)? {
             Ok(())
         } else {
             Err("the Local reset capability volume is not owned by this Space".into())
