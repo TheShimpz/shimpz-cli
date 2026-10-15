@@ -8,7 +8,6 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -921,11 +920,8 @@ impl Engine {
             .stderr
             .take()
             .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
-        let group = capture::Target::of(&child);
-        let (sender, receiver) = mpsc::channel();
-        // The reader is never joined: a process Compose started may still hold its stream after a stop.
-        thread::spawn(move || {
-            let _ = sender.send(read_compose_progress(stderr, started));
+        let reader = capture::Reader::start(&child, stderr, move |stderr| {
+            read_compose_progress(stderr, started)
         });
         let status = capture::wait(&mut child, deadline).map_err(|failure| {
             format!(
@@ -933,13 +929,10 @@ impl Engine {
                 wait_failure(DOCKER_COMPOSE, failure)
             )
         })?;
-        let (timings, diagnostic) =
-            capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
-                .unwrap_or_else(|| {
-                    // A descendant still holds the stream after Compose exited; it ends with Compose's own group.
-                    group.kill_remaining_group();
-                    Err("Docker Compose progress could not be read".to_owned())
-                })?;
+        let (timings, diagnostic) = reader.finish(
+            deadline.max(Instant::now() + STREAM_GRACE),
+            "Docker Compose progress could not be read",
+        )?;
         if !status.success() {
             crate::output::warning(&format!(
                 "Docker Compose failed; Docker returned {status}: {}",
@@ -1870,20 +1863,13 @@ fn execute_quiet(command: &mut Command, budget: Duration) -> Result<(ExitStatus,
         .stderr
         .take()
         .ok_or_else(|| "Docker diagnostic output is unavailable".to_owned())?;
-    let group = capture::Target::of(&child);
-    let (sender, receiver) = mpsc::channel();
-    // The reader is never joined: a process Docker started may still hold its stream after a stop.
-    thread::spawn(move || {
-        let _ = sender.send(drain_diagnostic(stderr));
-    });
+    let reader = capture::Reader::start(&child, stderr, drain_diagnostic);
     let status =
         capture::wait(&mut child, deadline).map_err(|failure| wait_failure(budget, failure))?;
-    let captured = capture::receive(&receiver, deadline.max(Instant::now() + STREAM_GRACE))
-        .unwrap_or_else(|| {
-            // A descendant still holds the stream after Docker exited; it ends with Docker's own group.
-            group.kill_remaining_group();
-            Err("Docker diagnostic output could not be read".to_owned())
-        })?;
+    let captured = reader.finish(
+        deadline.max(Instant::now() + STREAM_GRACE),
+        "Docker diagnostic output could not be read",
+    )?;
     let diagnostic = render_diagnostic(&captured);
     Ok((status, diagnostic))
 }
@@ -1930,23 +1916,16 @@ fn execute_bounded_stdout(
         .stdout
         .take()
         .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
-    let group = capture::Target::of(&child);
-    let (sender, receiver) = mpsc::channel();
-    // The reader is never joined: a process Docker started may still hold its stream after a stop.
-    thread::spawn(move || {
-        let _ = sender.send(drain_bounded_stdout(stdout));
-    });
+    let reader = capture::Reader::start(&child, stdout, drain_bounded_stdout);
     let status = match capture::wait(&mut child, deadline) {
         Ok(status) => status,
         Err(capture::Failure::TimedOut { stopped: true }) => return Ok(BoundedOutput::TimedOut),
         Err(failure) => return Err(wait_failure(timeout, failure)),
     };
-    let captured =
-        capture::receive(&receiver, Instant::now() + STREAM_GRACE).unwrap_or_else(|| {
-            // A descendant still holds the stream after Docker exited; it ends with Docker's own group.
-            group.kill_remaining_group();
-            Err("Docker authentication-state output could not be read".to_owned())
-        })?;
+    let captured = reader.finish(
+        Instant::now() + STREAM_GRACE,
+        "Docker authentication-state output could not be read",
+    )?;
     Ok(BoundedOutput::Completed {
         status,
         bytes: captured.bytes,

@@ -72,10 +72,42 @@ pub(crate) fn wait(child: &mut Child, deadline: Instant) -> Result<ExitStatus, F
 }
 
 /// Receive what a reader thread sends before `deadline`; `None` past it or when the reader is gone.
-pub(crate) fn receive<T>(receiver: &Receiver<T>, deadline: Instant) -> Option<T> {
+fn receive<T>(receiver: &Receiver<T>, deadline: Instant) -> Option<T> {
     receiver
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .ok()
+}
+
+/// One stream of a started child, read on a thread of its own. The thread is never joined: a process the child
+/// started may still hold the stream after the child stops.
+pub(crate) struct Reader<T> {
+    receiver: Receiver<Result<T, String>>,
+    group: Target,
+}
+
+impl<T: Send + 'static> Reader<T> {
+    /// Start reading `stream`, taken from `child`, with `read`.
+    pub(crate) fn start<S: Send + 'static>(
+        child: &Child,
+        stream: S,
+        read: impl FnOnce(S) -> Result<T, String> + Send + 'static,
+    ) -> Self {
+        let group = Target::of(child);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(read(stream));
+        });
+        Self { receiver, group }
+    }
+
+    /// The read's result once it arrives before `deadline`, after the caller reaped the child. Past the deadline a
+    /// descendant still holds the stream: it ends with the child's own group, and the read fails as `unreadable`.
+    pub(crate) fn finish(self, deadline: Instant, unreadable: &str) -> Result<T, String> {
+        receive(&self.receiver, deadline).unwrap_or_else(|| {
+            self.group.kill_remaining_group();
+            Err(unreadable.to_owned())
+        })
+    }
 }
 
 /// Terminate the child, and its whole group when it leads one of its own; kill what outlives the grace; and reap
