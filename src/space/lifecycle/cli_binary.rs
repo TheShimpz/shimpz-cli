@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::space::docker::ResolvedRelease;
 use crate::space::host::HostProfile;
@@ -13,45 +13,52 @@ use crate::space::{poll, state};
 
 use super::{PathReport, io_error, remove_regular_if_present};
 
-pub(super) fn validate_managed_bin(paths: &Paths) -> Result<(), String> {
-    let bin = paths
-        .managed_cli
-        .parent()
-        .expect("managed CLI has a parent");
+/// Reads the managed CLI directory when it exists: records every entry other than the managed artifacts in `others`
+/// and returns the managed artifacts present, sorted. The directory must be a real directory, and owned by this user
+/// when `require_owner`.
+pub(super) fn scan_managed_bin(
+    paths: &Paths,
+    require_owner: bool,
+    others: &mut PathReport,
+) -> Result<Vec<PathBuf>, String> {
+    let bin = paths.managed_bin();
     let metadata = match bin.symlink_metadata() {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(io_error(error)),
     };
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
+        || require_owner && metadata.uid() != rustix::process::getuid().as_raw()
     {
         return Err(format!(
             "the managed CLI directory is invalid: {}",
             bin.display()
         ));
     }
-    let mut managed = Vec::with_capacity(3);
-    let mut unowned = PathReport::default();
+    let artifacts = paths.managed_artifacts();
+    let mut managed = Vec::with_capacity(artifacts.len());
     for entry in fs::read_dir(bin).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
-        if path != paths.managed_cli
-            && path != paths.managed_cli.with_extension("candidate")
-            && path != paths.managed_cli.with_extension("previous")
-        {
-            unowned.record(path);
-        } else {
+        if artifacts.contains(&path) {
             managed.push(path);
+        } else {
+            others.record(path);
         }
     }
+    managed.sort();
+    Ok(managed)
+}
+
+pub(super) fn validate_managed_bin(paths: &Paths) -> Result<(), String> {
+    let mut unowned = PathReport::default();
+    let managed = scan_managed_bin(paths, true, &mut unowned)?;
     if !unowned.is_empty() {
         return Err(format!(
             "refusing to use unowned managed CLI entries: {}; move or remove every unowned entry, then run shimpz install",
             unowned.render()
         ));
     }
-    managed.sort();
     for path in managed {
         let metadata = path.symlink_metadata().map_err(io_error)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -125,10 +132,7 @@ pub(super) fn commit_evidence(
 /// Make the verified release-bound CLI the managed executable. The caller holds the lifecycle lock and has admitted
 /// the exact release; nothing restores the previous executable, because apply retains the release-bound CLI.
 pub(super) fn activate_cli(paths: &Paths, running: &Path, expected: &str) -> Result<(), String> {
-    let bin = paths
-        .managed_cli
-        .parent()
-        .expect("managed CLI has a parent");
+    let bin = paths.managed_bin();
     match bin.symlink_metadata() {
         Ok(_) => validate_managed_bin(paths)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

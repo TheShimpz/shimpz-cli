@@ -43,6 +43,22 @@ impl Paths {
         Self::under(&home)
     }
 
+    /// The private directory of the managed CLI.
+    #[cfg(unix)]
+    pub(crate) fn managed_bin(&self) -> &Path {
+        self.managed_cli.parent().expect("managed CLI has a parent")
+    }
+
+    /// The managed CLI artifacts: the executable, its staged candidate, and the previous executable it replaced.
+    #[cfg(unix)]
+    pub(crate) fn managed_artifacts(&self) -> [PathBuf; 3] {
+        [
+            self.managed_cli.clone(),
+            self.managed_cli.with_extension("candidate"),
+            self.managed_cli.with_extension("previous"),
+        ]
+    }
+
     pub(crate) fn under(user_home: &Path) -> Result<Self, String> {
         if !user_home.is_absolute() {
             return Err("the user home must be absolute".into());

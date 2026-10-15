@@ -1507,10 +1507,7 @@ fn unmarked_runtime_entries(paths: &Paths) -> Result<PathReport, String> {
     if !paths.home.exists() {
         return Ok(entries);
     }
-    let bin = paths
-        .managed_cli
-        .parent()
-        .expect("managed CLI has a parent");
+    let bin = paths.managed_bin();
     for entry in fs::read_dir(&paths.home).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
         if path != bin {

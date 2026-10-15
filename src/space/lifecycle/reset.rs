@@ -14,7 +14,7 @@ use crate::space::storage::linux;
 use crate::space::{graph, members, scheduler, state};
 
 use super::admin::{AdminAttestation, admin_available, admin_reset};
-use super::cli_binary::validate_private_cli;
+use super::cli_binary::{scan_managed_bin, validate_private_cli};
 use super::outcome::{
     hard_reset_incomplete, hard_reset_outcome, hard_reset_preflight, reset_outcome,
 };
@@ -321,13 +321,7 @@ impl Context {
         if self.paths.home.exists() {
             for entry in fs::read_dir(&self.paths.home).map_err(io_error)? {
                 let path = entry.map_err(io_error)?.path();
-                if path
-                    == self
-                        .paths
-                        .managed_cli
-                        .parent()
-                        .expect("managed CLI has a parent")
-                {
+                if path == self.paths.managed_bin() {
                     record_retained_bin_entries(&self.paths, &mut preserved)?;
                 } else {
                     preserved.record(path);
@@ -403,10 +397,7 @@ pub(super) fn preflight_remove_files(
     }
     let mut preserved = PathReport::default();
     if paths.home.exists() {
-        let bin = paths
-            .managed_cli
-            .parent()
-            .expect("managed CLI has a parent");
+        let bin = paths.managed_bin();
         for entry in fs::read_dir(&paths.home).map_err(io_error)? {
             let path = entry.map_err(io_error)?.path();
             if path == bin {
@@ -423,31 +414,8 @@ pub(super) fn record_retained_bin_entries(
     paths: &Paths,
     preserved: &mut PathReport,
 ) -> Result<(), String> {
-    let bin = paths
-        .managed_cli
-        .parent()
-        .expect("managed CLI has a parent");
-    let metadata = match bin.symlink_metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(io_error(error)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!(
-            "the managed CLI directory is invalid: {}",
-            bin.display()
-        ));
-    }
-    for entry in fs::read_dir(bin).map_err(io_error)? {
-        let path = entry.map_err(io_error)?.path();
-        if path == paths.managed_cli
-            || path == paths.managed_cli.with_extension("candidate")
-            || path == paths.managed_cli.with_extension("previous")
-        {
-            validate_private_cli(&path)?;
-        } else {
-            preserved.record(path);
-        }
+    for path in scan_managed_bin(paths, false, preserved)? {
+        validate_private_cli(&path)?;
     }
     Ok(())
 }
