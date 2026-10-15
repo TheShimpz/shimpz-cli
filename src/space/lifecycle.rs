@@ -3,9 +3,8 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -13,7 +12,7 @@ use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
 
 use super::deploy;
-use super::docker::{COMPOSE_UP, Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
+use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
 use super::graph::{self, StorageProfile};
 use super::host::{self, HostProfile};
 use super::members;
@@ -28,18 +27,16 @@ use super::storage::linux;
 
 mod admin;
 mod cli_binary;
+mod handoff;
 mod home;
 mod outcome;
 mod reset;
+mod rollback;
 
 use admin::{
     AdminAuthenticationState, admin_authentication_state, admin_authentication_state_probe_response,
 };
-use cli_binary::{
-    CommitEvidence, activate_cli, commit_evidence, ensure_public_cli, expected_cli_hash,
-    handoff_failure, hash_file, reconcile_previous_cli, restore_previous_cli, validate_managed_bin,
-    validate_private_cli, verify_running_cli,
-};
+use cli_binary::{activate_cli, expected_cli_hash, validate_managed_bin, verify_running_cli};
 use home::{
     PathReport, adopt_unmarked_home, remove_regular_if_present, unmarked_runtime_entries,
     validate_existing_install_home, validate_install_home, validate_regular_if_present,
@@ -50,6 +47,7 @@ use outcome::{
     recreation_notice, release_outcome, scheduler_outcome,
 };
 use reset::remove_runtime_files;
+use rollback::{Backup, backup_current, remove_backup};
 
 const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1035,25 +1033,6 @@ impl Context {
         }
     }
 
-    /// Report a release-bound CLI run truthfully: it may have deferred the update or left it unapplied.
-    fn handoff_outcome(&self, release: &ResolvedRelease) -> Result<String, String> {
-        if state::read_installed(&self.paths, self.profile)?.release_ref == release.reference {
-            let completed = "The release-bound CLI completed reconciliation.";
-            return Ok(if self.recreated.get() {
-                format!("{completed}\n{}", recreation_notice(release))
-            } else {
-                completed.into()
-            });
-        }
-        let deferred = poll::release_digest(&release.reference)
-            .is_some_and(|digest| poll::deferred(&self.paths, digest, poll::now()));
-        Ok(if deferred {
-            UPDATE_DEFERRED.into()
-        } else {
-            "The release-bound CLI finished without applying the selected Local release.".into()
-        })
-    }
-
     /// Immediately before a scheduled update replaces a different running release, give active Team work a
     /// bounded chance to finish. A repair of the installed release never waits.
     fn defer_for_activity(
@@ -1075,308 +1054,6 @@ impl Context {
             None => poll::TeamActivity::Idle,
         })
     }
-
-    fn handoff_if_needed(
-        &self,
-        release: &ResolvedRelease,
-        installed: Option<&Installed>,
-        scheduled: bool,
-    ) -> Result<bool, String> {
-        admit_before_handoff(release, installed, || {
-            self.handoff_admitted_release(release, scheduled)
-        })
-    }
-
-    fn handoff_admitted_release(
-        &self,
-        release: &ResolvedRelease,
-        scheduled: bool,
-    ) -> Result<bool, String> {
-        let running = std::env::current_exe().map_err(|_| "the running CLI path is unavailable")?;
-        reconcile_previous_cli(&self.paths.managed_cli, &running)?;
-        let expected = expected_cli_hash(release, self.profile)?;
-        if hash_file(&running)? == expected {
-            return Ok(false);
-        }
-        let bin = self
-            .paths
-            .managed_cli
-            .parent()
-            .ok_or_else(|| "the managed CLI directory is invalid".to_owned())?;
-        fs::create_dir_all(bin).map_err(io_error)?;
-        fs::set_permissions(bin, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-        let candidate = self.paths.managed_cli.with_extension("candidate");
-        if candidate.exists() {
-            fs::remove_file(&candidate).map_err(io_error)?;
-        }
-        self.engine
-            .extract_cli(&release.reference, self.profile, &candidate)?;
-        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-        if hash_file(&candidate)? != expected {
-            fs::remove_file(&candidate).map_err(io_error)?;
-            return Err("the extracted CLI hash does not match the atomic release".into());
-        }
-        let previous = self.paths.managed_cli.with_extension("previous");
-        if self.paths.managed_cli.exists() {
-            validate_private_cli(&self.paths.managed_cli)?;
-            fs::rename(&self.paths.managed_cli, &previous).map_err(io_error)?;
-        }
-        if let Err(error) = fs::rename(&candidate, &self.paths.managed_cli) {
-            restore_previous_cli(&self.paths.managed_cli, &previous)?;
-            return Err(io_error(error));
-        }
-        let mut command = Command::new(&self.paths.managed_cli);
-        if self.paths.marker.exists() {
-            command.arg("start");
-            if scheduled {
-                command.arg("--scheduled");
-            }
-            command
-                .arg("--release")
-                .arg(&release.reference)
-                .arg("--candidate");
-        } else {
-            command
-                .arg("install")
-                .arg(&release.reference)
-                .arg("--candidate");
-        }
-        let record_before = state::read_state_record(&self.paths);
-        let failure = handoff_failure(command.stdin(Stdio::null()).status());
-        // Only a completed recreation writes a new record; a record the child forgot but never rewrote proves none.
-        if state::read_state_record(&self.paths)
-            .is_some_and(|record| Some(&record) != record_before.as_ref())
-        {
-            self.recreated.set(true);
-        }
-        self.handoff_result(release, scheduled, &previous, failure)
-            .map_err(|error| self.with_recreation(error))
-    }
-
-    /// Append the recreation of the runtime state to a failure that followed it: no rollback restores that state.
-    fn with_recreation(&self, error: String) -> String {
-        if self.recreated.get() {
-            format!("{error}; the Team runtime state was recreated empty")
-        } else {
-            error
-        }
-    }
-
-    fn handoff_result(
-        &self,
-        release: &ResolvedRelease,
-        scheduled: bool,
-        previous: &Path,
-        failure: Option<String>,
-    ) -> Result<bool, String> {
-        // A successful exit proves nothing on its own: a scheduled child also succeeds when it defers the update or
-        // finds storage locked, so the durable commit evidence decides which CLI matches the Space.
-        match (commit_evidence(&self.paths, self.profile, release), failure) {
-            (CommitEvidence::Committed, None) => {
-                remove_regular_if_present(previous)?;
-                ensure_public_cli(&self.paths)?;
-                Ok(true)
-            }
-            (CommitEvidence::Committed, Some(reason)) => {
-                // The child committed this release before failing, for example while enabling its scheduler, so
-                // the Space now runs the release this CLI is bound to; the previous CLI must not be paired with it.
-                let failure = format!(
-                    "the release-bound CLI committed the release but did not complete ({reason}); the release-bound CLI was kept"
-                );
-                Err(
-                    match remove_regular_if_present(previous)
-                        .and_then(|()| ensure_public_cli(&self.paths))
-                    {
-                        Ok(()) => failure,
-                        Err(error) => format!("{failure}; {error}"),
-                    },
-                )
-            }
-            (CommitEvidence::Unknown(cause), None) => {
-                Err(self.uncertain_handoff("exited successfully, but", &cause, previous))
-            }
-            (CommitEvidence::Unknown(cause), Some(reason)) => Err(self.uncertain_handoff(
-                &format!("did not complete ({reason}), and"),
-                &cause,
-                previous,
-            )),
-            (CommitEvidence::NotCommitted, None) => {
-                restore_previous_cli(&self.paths.managed_cli, previous)?;
-                if scheduled {
-                    // Only a scheduled run may legitimately skip the commit; the caller reports the deferred or
-                    // unapplied outcome from the unchanged Local state.
-                    Ok(true)
-                } else {
-                    Err("the release-bound CLI exited without committing the selected Local release; the previous CLI was restored".into())
-                }
-            }
-            (CommitEvidence::NotCommitted, Some(reason)) => {
-                restore_previous_cli(&self.paths.managed_cli, previous)?;
-                Err(format!(
-                    "the release-bound CLI did not complete ({reason}); the previous CLI was restored"
-                ))
-            }
-        }
-    }
-
-    /// Neither CLI can be proved to match the Space, so neither is discarded.
-    fn uncertain_handoff(&self, outcome: &str, cause: &str, previous: &Path) -> String {
-        format!(
-            "the release-bound CLI {outcome} whether it committed the release could not be determined: {cause}; both CLIs were kept: {} (release-bound) and {} (previous). Next: run {} install; it reconciles the Space, offers recovery when its state is corrupt, and removes the previous CLI",
-            self.paths.managed_cli.display(),
-            previous.display(),
-            self.paths.managed_cli.display()
-        )
-    }
-
-    fn rollback(
-        &self,
-        release: &ResolvedRelease,
-        space_id: &str,
-        backup: Option<Backup>,
-    ) -> Result<String, String> {
-        let _ = self
-            .engine
-            .compose(&self.paths, ["down", "--remove-orphans"]);
-        let Some(backup) = backup else {
-            return match self.compensate_fresh_failure(space_id) {
-                Ok(()) => Err(
-                    "the partial fresh Local release was removed, so installation can be retried"
-                        .into(),
-                ),
-                Err(cleanup) => Err(format!(
-                    "the partial fresh Local release could not be removed; compensation failed: {cleanup}"
-                )),
-            };
-        };
-        let memory_error = state::remember_failed_release(&self.paths, release).err();
-        fs::rename(&backup.compose, &self.paths.compose).map_err(io_error)?;
-        fs::rename(&backup.environment, &self.paths.environment).map_err(io_error)?;
-        let installed = state::read_installed(&self.paths, self.profile)?;
-        let previous_epoch = self.engine.release_state_epoch(&installed.release_ref).ok();
-        match self.ensure_storage(&installed.space_id, false, self.scheduled)? {
-            linux::Admission::Verified => {}
-            linux::Admission::Locked => {
-                state::write_status(&self.paths, release, "rollback-needed")?;
-                if memory_error.is_some() {
-                    return Err(format!(
-                        "the previous release remained stopped because storage was locked, and {}",
-                        self.disable_automatic_updates()
-                    ));
-                }
-                return Err(
-                    "the update failed; the previous release remained stopped because encrypted storage was locked"
-                        .into(),
-                );
-            }
-        }
-        // The previous release must never start on runtime state in a stored format it does not read.
-        let restored = match self.reconcile_runtime_state(
-            previous_epoch,
-            &release.metadata.team,
-            false,
-        ) {
-            // A restoration that could not run, or outlived its deadline, is a failed restoration: the rollback
-            // status is still recorded.
-            Ok(_) => match self.start_previous(installed.port) {
-                Ok(started) => started,
-                Err(error) => {
-                    output::warning(&format!(
-                        "the previous release could not be started: {error}"
-                    ));
-                    false
-                }
-            },
-            Err(error) => {
-                output::warning(&format!(
-                    "the previous release was not started because its runtime state could not be recreated: {error}"
-                ));
-                false
-            }
-        };
-        // Persist and project independently: a failed local write must not leave Admin reporting the abandoned release.
-        let status = state::status_document(release, "rollback-needed")?;
-        let persisted = state::write_private(&self.paths.status, &status);
-        let unreaped = if restored {
-            self.project_rollback_status(release, &status)
-        } else {
-            None
-        };
-        // The restoration's own outcome leads; failed-release memory and scheduler diagnostics only follow it.
-        let primary = if restored {
-            "the update failed; the previous healthy release was restored"
-        } else {
-            "the update and its rollback both failed"
-        };
-        let primary = match persisted {
-            Ok(()) => primary.to_owned(),
-            Err(error) => format!("{primary}; the rollback status could not be recorded: {error}"),
-        };
-        // A status helper that could not be reaped may remain, so its cause follows the outcome.
-        let primary = match unreaped {
-            Some(cause) => format!("{primary}; {cause}"),
-            None => primary,
-        };
-        if memory_error.is_some() {
-            return Err(format!("{primary}; {}", self.disable_automatic_updates()));
-        }
-        Err(primary)
-    }
-
-    /// Bring the restored previous release up and prove its running members attached as declared, with Admin
-    /// published on `port`. `Ok(false)` is a start Compose already reported as failed.
-    fn start_previous(&self, port: u16) -> Result<bool, String> {
-        if !self.engine.compose(&self.paths, COMPOSE_UP)?.success() {
-            return Ok(false);
-        }
-        members::converge(&self.engine, &self.paths, port)?;
-        Ok(true)
-    }
-
-    /// Project the rollback status to the restored Admin, warning when it cannot receive it, and return the cause of
-    /// a status helper that could not be reaped, which may remain.
-    fn project_rollback_status(&self, release: &ResolvedRelease, status: &str) -> Option<String> {
-        let failure = self
-            .engine
-            .project_release_status(&release.metadata.admin, status.as_bytes())
-            .err()?;
-        output::warning(
-            "the previous release was restored, but Admin could not receive the rollback status",
-        );
-        match failure {
-            ProjectionFailure::Unreaped(cause) => Some(cause),
-            ProjectionFailure::NotProjected(_) => None,
-        }
-    }
-
-    fn disable_automatic_updates(&self) -> String {
-        match scheduler::remove(self.profile, &self.paths) {
-            Ok(outcome) if outcome.execution_unverified => format!(
-                "automatic retry could not be proven disabled because unrecognized scheduler entries were preserved: {}",
-                outcome.preserved.join(", ")
-            ),
-            Ok(_) => {
-                "automatic updates were disabled because the failed release could not be remembered"
-                    .into()
-            }
-            Err(error) => format!(
-                "automatic retry could not be disabled because scheduler cleanup failed: {error}"
-            ),
-        }
-    }
-
-    fn compensate_fresh_failure(&self, space_id: &str) -> Result<(), String> {
-        let inventory = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
-        inventory.remove(&self.engine)?;
-        let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
-        if !remaining.empty() {
-            return Err("managed Docker residue remains after fresh-install compensation".into());
-        }
-        if self.profile == HostProfile::Linux && self.paths.security.exists() {
-            linux::reset(&self.paths, Some(space_id))?;
-        }
-        remove_runtime_files(&self.paths)
-    }
 }
 
 /// The release a lifecycle run is replacing the live configuration with.
@@ -1387,23 +1064,6 @@ struct Candidate<'a> {
     port: u16,
     docker_gid: u32,
     docker_socket: &'a Path,
-}
-
-#[derive(Debug)]
-struct Backup {
-    compose: PathBuf,
-    environment: PathBuf,
-}
-
-fn backup_current(paths: &Paths, profile: HostProfile) -> Result<Backup, String> {
-    let compose = paths.compose.with_extension("previous");
-    let environment = paths.environment.with_extension("previous");
-    state::write_private(&compose, &graph::render(profile.storage()))?;
-    fs::copy(&paths.environment, &environment).map_err(io_error)?;
-    Ok(Backup {
-        compose,
-        environment,
-    })
 }
 
 /// Admit only forward moves among published releases (ADR-0041). A developer release is an explicit selection on
@@ -1435,15 +1095,6 @@ fn validate_forward_release(
 /// and equal; a fresh Space has none.
 fn runtime_state_reset_needed(fresh: bool, epoch: Option<u32>, recorded: Option<u32>) -> bool {
     !fresh && (epoch.is_none() || recorded != epoch)
-}
-
-fn admit_before_handoff<T>(
-    release: &ResolvedRelease,
-    installed: Option<&Installed>,
-    handoff: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    validate_forward_release(release, installed)?;
-    handoff()
 }
 
 /// How many long-running Space containers `release` replaces, from the `previous` Admin, Team, Brain, and egress
@@ -1513,14 +1164,6 @@ fn joined<T>(
         .unwrap_or_else(|_| output::withhold(|| Err("a Local release check failed".into())))
 }
 
-fn remove_backup(backup: Option<Backup>) -> Result<(), String> {
-    if let Some(backup) = backup {
-        fs::remove_file(backup.compose).map_err(io_error)?;
-        fs::remove_file(backup.environment).map_err(io_error)?;
-    }
-    Ok(())
-}
-
 fn finish_failed_release_memory(paths: &Paths, preserve: bool) -> Result<(), String> {
     if preserve {
         Ok(())
@@ -1573,10 +1216,12 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::admin::AdminAttestation;
+    use super::cli_binary::{CommitEvidence, commit_evidence, handoff_failure, hash_file};
+    use super::handoff::admit_before_handoff;
     use super::*;
     use crate::space::release::Release;
 
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
