@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::exec::{docker_timed_out, output, quiet_status, silent_status, wait_failure};
-use super::{DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
+use super::{ADMIN_IDENTITY, DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
 use crate::space::graph::{self, KIND_LABEL, MANAGED_LABEL};
 use crate::space::release::ADMIN;
@@ -264,19 +264,13 @@ pub(super) fn status_projection_arguments(
     name: &str,
 ) -> Vec<OsString> {
     let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
-    let labels = helper_labels(RELEASE_STATUS_HELPER);
-    let options: Vec<&str> = ["--interactive", "--user", "1000:1000", "--name", name]
-        .into_iter()
-        .chain(labels.iter().map(String::as_str))
-        .collect();
-    python_helper_arguments(
+    admin_helper_arguments(
         platform,
         cpuset,
-        "64m",
-        &options,
         mount,
         admin_image,
-        &["-c", script],
+        &admin_helper_options(RELEASE_STATUS_HELPER, true, name),
+        script,
     )
 }
 
@@ -297,13 +291,37 @@ pub(super) fn reset_capability_arguments(
     script: &str,
     name: &str,
 ) -> Vec<OsString> {
-    let labels = helper_labels(RESET_CAPABILITY_HELPER);
-    let options: Vec<&str> = interactive
+    admin_helper_arguments(
+        platform,
+        cpuset,
+        mount,
+        admin_image,
+        &admin_helper_options(RESET_CAPABILITY_HELPER, interactive, name),
+        script,
+    )
+}
+
+/// The options of one helper of `kind` named `name` that runs as Admin, reading its standard input when `interactive`.
+fn admin_helper_options(kind: &str, interactive: bool, name: &str) -> Vec<String> {
+    interactive
         .then_some("--interactive")
         .into_iter()
-        .chain(["--user", "1000:1000", "--name", name])
-        .chain(labels.iter().map(String::as_str))
-        .collect();
+        .chain(["--user", ADMIN_IDENTITY, "--name", name])
+        .map(str::to_owned)
+        .chain(helper_labels(kind))
+        .collect()
+}
+
+/// A bounded helper with `options` that runs `script` with the Admin image.
+fn admin_helper_arguments(
+    platform: &str,
+    cpuset: &str,
+    mount: &str,
+    admin_image: &str,
+    options: &[String],
+    script: &str,
+) -> Vec<OsString> {
+    let options: Vec<&str> = options.iter().map(String::as_str).collect();
     python_helper_arguments(
         platform,
         cpuset,

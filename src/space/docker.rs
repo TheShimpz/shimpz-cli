@@ -78,6 +78,8 @@ const ADMIN_AUTHENTICATION_PROBE: &str = "admin-authentication-probe";
 /// too and needs no capability.
 const RUNTIME_STATE_OWNER: &str = "10001:10001";
 const RUNTIME_STATE_OWNER_UID: u32 = 10001;
+/// Admin's runtime identity: its helpers run as it, so they own exactly what Admin itself writes and reads.
+const ADMIN_IDENTITY: &str = "1000:1000";
 
 /// First proves every volume root below `root` and every entry below it belongs to `owner`, never following a link; a
 /// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
@@ -731,7 +733,7 @@ fn socket_probe_arguments(
 ) -> Vec<OsString> {
     let gid = gid.map(|gid| gid.to_string());
     // The probe runs as the Team controller's own identity, so it proves exactly the access Team will have.
-    let mut options = vec!["--user", "10001:10001"];
+    let mut options = vec!["--user", RUNTIME_STATE_OWNER];
     if let Some(gid) = gid.as_deref() {
         options.extend(["--group-add", gid]);
     }
@@ -922,7 +924,7 @@ fn admin_authentication_probe_arguments(
     let options: Vec<&str> = ["--name", container]
         .into_iter()
         .chain(labels.iter().map(String::as_str))
-        .chain(["--user", "1000:1000"])
+        .chain(["--user", ADMIN_IDENTITY])
         .collect();
     python_helper_arguments(
         platform,
