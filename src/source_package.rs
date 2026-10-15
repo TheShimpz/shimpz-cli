@@ -90,7 +90,7 @@ pub(crate) fn build(root: &Path) -> Result<SourcePackage, String> {
         .filter_map(|entry| entry.path.strip_prefix("actions/").map(str::to_owned))
         .collect();
     let bytes = ustar::build(&entries).map_err(|error| error.to_string())?;
-    let digest = format!("sha256:{}", crate::digest::sha256_hex(&bytes));
+    let digest = crate::digest::sha256_digest(&bytes);
     Ok(SourcePackage {
         bytes,
         digest,

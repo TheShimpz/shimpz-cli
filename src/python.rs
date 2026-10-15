@@ -9,7 +9,7 @@ use std::process::{Child, ChildStderr, Command, Stdio};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::{language_pack, toolchain};
+use crate::toolchain;
 
 const PYTHON_VERSION: &str = "3.14";
 const SDK_REQUIREMENT: &str = "shimpz==0.7.2";
@@ -95,7 +95,7 @@ pub(crate) fn verify_pack(project: &Path, catalog_digest: &str, pack: &[u8]) -> 
     .map_err(|reason| format!("the Python SDK refuses the language pack ({reason})"))?;
     let expected = serde_json::json!({
         "catalog": catalog_digest,
-        "pack": language_pack::digest(pack),
+        "pack": crate::digest::sha256_digest(pack),
     });
     if serde_json::from_str::<Value>(&acknowledgement).ok() == Some(expected) {
         Ok(())

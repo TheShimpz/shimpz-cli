@@ -21,6 +21,11 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     lower_hex(ring::digest::digest(&SHA256, bytes).as_ref())
 }
 
+/// The prefixed SHA-256 digest (`sha256:<hex>`) of `bytes`.
+pub(crate) fn sha256_digest(bytes: &[u8]) -> String {
+    format!("{SHA256_PREFIX}{}", sha256_hex(bytes))
+}
+
 /// An incremental SHA-256 whose result is its bare lowercase hexadecimal value.
 pub(crate) struct Sha256Hasher(Context);
 

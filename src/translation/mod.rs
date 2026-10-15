@@ -22,7 +22,7 @@ use icu_properties::CodePointSetData;
 use icu_properties::props::BidiControl;
 use serde_json::json;
 
-use crate::language_pack::{self, Catalog, LOCALES, Pack};
+use crate::language_pack::{Catalog, LOCALES, Pack};
 use crate::{output, toolchain};
 use memory::Memory;
 use provider::{OpenAi, ProviderError, Translator};
@@ -70,7 +70,7 @@ fn source_text_policy() -> String {
 }
 
 fn policy(document: &serde_json::Value) -> String {
-    language_pack::digest(&serde_json::to_vec(document).unwrap_or_default())
+    crate::digest::sha256_digest(&serde_json::to_vec(document).unwrap_or_default())
 }
 
 /// The SDK reference validator applied to the exact pack bytes before staging or remembering anything.

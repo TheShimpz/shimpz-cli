@@ -78,7 +78,7 @@ impl Catalog {
         }
         Ok(Self {
             entries,
-            digest: digest(&canonical),
+            digest: crate::digest::sha256_digest(&canonical),
             canonical,
         })
     }
@@ -178,7 +178,7 @@ impl Message {
             .iter()
             .map(|param| param.name.as_str())
             .collect::<Vec<_>>();
-        self.id == hex_sha256(self.msgid.as_bytes())
+        self.id == crate::digest::sha256_hex(self.msgid.as_bytes())
             && FIELD_BOUNDS.contains(&self.max_length)
             && self.params.len() <= MAX_PARAMS
             && names.windows(2).all(|pair| pair[0] < pair[1])
@@ -351,14 +351,6 @@ fn mark_follows_field(template: &str) -> bool {
     })
 }
 
-pub(crate) fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_sha256(bytes))
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    crate::digest::sha256_hex(bytes)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use serde_json::json;
@@ -370,7 +362,7 @@ pub(crate) mod tests {
     const DESCRIPTION: &str = "Greet {name} with a Hello World message: {count}.";
 
     fn message(msgid: &str, max_length: usize, params: &Value) -> Value {
-        json!({"id": hex_sha256(msgid.as_bytes()), "msgid": msgid, "max_length": max_length, "params": params})
+        json!({"id": crate::digest::sha256_hex(msgid.as_bytes()), "msgid": msgid, "max_length": max_length, "params": params})
     }
 
     /// One valid catalog document with a parameterized, a plain, and the summary message.
@@ -412,16 +404,16 @@ pub(crate) mod tests {
         // The 80-character summary fits 80 characters; the description keeps 500 less its parameters' budgets
         // (4 + 80) plus the written placeholders `{count}` and `{name}` (7 + 6).
         assert_eq!(
-            catalog.template_budget(&hex_sha256(SUMMARY.as_bytes())),
+            catalog.template_budget(&crate::digest::sha256_hex(SUMMARY.as_bytes())),
             Some(80)
         );
         assert_eq!(
-            catalog.template_budget(&hex_sha256(DESCRIPTION.as_bytes())),
+            catalog.template_budget(&crate::digest::sha256_hex(DESCRIPTION.as_bytes())),
             Some(429)
         );
         assert_eq!(catalog.template_budget("unknown"), None);
         assert_eq!(
-            catalog.placeholder_characters(&hex_sha256(DESCRIPTION.as_bytes())),
+            catalog.placeholder_characters(&crate::digest::sha256_hex(DESCRIPTION.as_bytes())),
             13
         );
         // A budget never exceeds the 500-character template limit, whatever its parameters' budgets leave.
@@ -437,18 +429,21 @@ pub(crate) mod tests {
         )
         .expect("valid catalog");
         assert_eq!(
-            wide.template_budget(&hex_sha256(template.as_bytes())),
+            wide.template_budget(&crate::digest::sha256_hex(template.as_bytes())),
             Some(MAX_TEMPLATE_CHARACTERS)
         );
         let at_budget = format!("{} {{name}} {{count}}", "x".repeat(429 - 15));
         assert_eq!(at_budget.chars().count(), 429);
         assert_eq!(
-            catalog.translation_error(&hex_sha256(DESCRIPTION.as_bytes()), &at_budget),
+            catalog.translation_error(
+                &crate::digest::sha256_hex(DESCRIPTION.as_bytes()),
+                &at_budget
+            ),
             None
         );
         let over = format!("x{at_budget}");
         assert_eq!(
-            catalog.translation_error(&hex_sha256(DESCRIPTION.as_bytes()), &over),
+            catalog.translation_error(&crate::digest::sha256_hex(DESCRIPTION.as_bytes()), &over),
             Some("translation_budget")
         );
     }
@@ -598,7 +593,7 @@ pub(crate) mod tests {
                     json!(format!("{} {{name}} {{count}}", "x".repeat(417)));
             }),
         ];
-        let description = hex_sha256(DESCRIPTION.as_bytes());
+        let description = crate::digest::sha256_hex(DESCRIPTION.as_bytes());
         for (expected, mutate) in cases {
             let mut pack = pack_value(&catalog);
             mutate(&mut pack, &description);
@@ -616,7 +611,7 @@ pub(crate) mod tests {
     #[test]
     fn applies_the_reference_unicode_text_rules_to_every_translation() {
         let catalog = catalog();
-        let description = hex_sha256(DESCRIPTION.as_bytes());
+        let description = crate::digest::sha256_hex(DESCRIPTION.as_bytes());
         for (expected, text) in [
             // Decomposed "é" is not NFC.
             ("public_text", "Cumprimente {name}: {count}. Olá e\u{301}."),
