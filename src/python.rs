@@ -1,7 +1,6 @@
 //! Lock-free Python environment management through `uv`.
 
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -424,7 +423,7 @@ fn diagnostic(stderr: &[u8], fallback: &str) -> String {
 }
 
 struct Requirements {
-    path: PathBuf,
+    path: tempfile::TempPath,
 }
 
 impl Requirements {
@@ -457,26 +456,15 @@ impl Requirements {
         }
     }
 
+    /// Create the file exclusively under an unpredictable name, readable only by this user; it is removed on drop.
     fn temporary() -> Result<Self, String> {
-        for nonce in 0..16 {
-            let path = std::env::temp_dir().join(format!(
-                "shimpz-{}-{nonce}-requirements.txt",
-                std::process::id()
-            ));
-            let created = OpenOptions::new().write(true).create_new(true).open(&path);
-            match created {
-                Ok(_) => return Ok(Self { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(_) => return Err("temporary dependency file cannot be created".into()),
-            }
-        }
-        Err("temporary dependency file cannot be created".into())
-    }
-}
-
-impl Drop for Requirements {
-    fn drop(&mut self) {
-        let _result = fs::remove_file(&self.path);
+        let path = tempfile::Builder::new()
+            .prefix("shimpz-")
+            .suffix("-requirements.txt")
+            .tempfile()
+            .map_err(|_| "temporary dependency file cannot be created")?
+            .into_temp_path();
+        Ok(Self { path })
     }
 }
 
