@@ -93,13 +93,7 @@ pub(crate) fn read_installed_images(
         .map_err(|error| format!("could not read the installed Local environment: {error}"))?;
     let values = parse_environment(&document)?;
     validate_environment(&values, paths, profile)?;
-    Ok([
-        "SHIMPZ_ADMIN_IMAGE",
-        "SHIMPZ_TEAM_IMAGE",
-        "SHIMPZ_BRAIN_IMAGE",
-        "SHIMPZ_EGRESS_IMAGE",
-    ]
-    .map(|key| values[key].to_owned()))
+    Ok(IMAGE_KEYS.map(|(key, _)| values[key].to_owned()))
 }
 
 /// Read the installed environment only as an admitted private record; `Ok(None)` when it is absent.
@@ -157,15 +151,10 @@ fn parse_installed(
     profile: HostProfile,
 ) -> Result<Installed, String> {
     let values = parse_environment(document)?;
-    validate_environment(&values, paths, profile)?;
+    let port = validate_environment(&values, paths, profile)?;
     let space_id = values["SHIMPZ_SPACE_ID"];
     let release_ref = values["SHIMPZ_LOCAL_RELEASE_IMAGE"];
     let ordinal = positive_u64(values["SHIMPZ_LOCAL_RELEASE_ORDINAL"], "release ordinal")?;
-    let port = values["SHIMPZ_PORT"]
-        .parse::<u16>()
-        .ok()
-        .filter(|value| *value >= 1024)
-        .ok_or_else(|| "the installed Admin port is invalid".to_owned())?;
     Ok(Installed {
         space_id: space_id.into(),
         release_ref: release_ref.into(),
@@ -191,11 +180,20 @@ fn parse_environment(document: &str) -> Result<BTreeMap<&str, &str>, String> {
     )
 }
 
+/// The environment keys of the Admin, Team, Brain, and egress images, in that order, with the package each pins.
+const IMAGE_KEYS: [(&str, release::Package); 4] = [
+    ("SHIMPZ_ADMIN_IMAGE", release::ADMIN),
+    ("SHIMPZ_TEAM_IMAGE", release::TEAM),
+    ("SHIMPZ_BRAIN_IMAGE", release::BRAIN),
+    ("SHIMPZ_EGRESS_IMAGE", release::EGRESS),
+];
+
+/// Checks every field of the installed environment and returns the Admin port it pins.
 fn validate_environment(
     values: &BTreeMap<&str, &str>,
     paths: &Paths,
     profile: HostProfile,
-) -> Result<(), String> {
+) -> Result<u16, String> {
     let required = [
         "SHIMPZ_ADMIN_IMAGE",
         "SHIMPZ_TEAM_IMAGE",
@@ -249,12 +247,7 @@ fn validate_environment(
     {
         return Err("the installed Local host profile is invalid".into());
     }
-    for (key, package) in [
-        ("SHIMPZ_ADMIN_IMAGE", release::ADMIN),
-        ("SHIMPZ_TEAM_IMAGE", release::TEAM),
-        ("SHIMPZ_BRAIN_IMAGE", release::BRAIN),
-        ("SHIMPZ_EGRESS_IMAGE", release::EGRESS),
-    ] {
+    for (key, package) in IMAGE_KEYS {
         // Only a developer release may run a member from this host's image store.
         let admitted = if developer {
             package.admits(values[key])
@@ -283,7 +276,7 @@ fn validate_environment(
     {
         return Err("the installed encrypted volume root is invalid".into());
     }
-    Ok(())
+    Ok(port)
 }
 
 pub(crate) struct Environment<'a> {
