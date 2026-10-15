@@ -53,13 +53,8 @@ services:
     environment:
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       SHIMPZ_BRAIN_RUNTIME_URL: http://brain:8080
-      SHIMPZ_BRAIN_RUNTIME_TOKEN_FILE: /run/shimpz-brain-runtime/token
-      SHIMPZ_LOCAL_ACTION_JOURNAL_PATH: /var/lib/shimpz-local/action-journal/journal.sqlite3
-      SHIMPZ_LOCAL_CHAT_CONTINUATIONS_STATE_PATH: /var/lib/shimpz-local/chat-continuations/state/continuations.json
-      SHIMPZ_LOCAL_CHAT_CONTINUATIONS_KEY_PATH: /var/lib/shimpz-local/chat-continuations/key/aes256.key
       SHIMPZ_OAUTH_BROKER_PROXY_HOST: shimpz-account-egress
       SHIMPZ_OAUTH_BROKER_PROXY_CAPABILITY_FILE: /run/shimpz-account-egress/token
-      SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /var/lib/shimpz-local/assistant-egress
     volumes:
       - type: bind
         source: ${SHIMPZ_DOCKER_SOCKET:?CLI must bind the platform Docker socket}
@@ -219,7 +214,6 @@ services:
       com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
       com.shimpz.local.kind: assistant-egress
     environment:
-      SHIMPZ_ASSISTANT_EGRESS_PORT: "8889"
       SHIMPZ_ASSISTANT_EGRESS_POLICY_DIR: /policy
       SHIMPZ_ASSISTANT_EGRESS_AUDIT_LOG: /var/log/assistant-egress/audit.jsonl
       SHIMPZ_ASSISTANT_EGRESS_MAX_CONCURRENCY: "64"
