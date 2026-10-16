@@ -389,7 +389,7 @@ fn managed_runtime_files(paths: &Paths) -> [PathBuf; 23] {
         paths.release_poll.with_extension("tmp"),
         paths.failed_release.with_extension("tmp"),
         paths.stopped.with_extension("tmp"),
-        paths.home.join("release.env.tmp"),
+        paths.release_copy.clone(),
         paths.marker.with_extension("tmp"),
         paths.marker.clone(),
     ]
@@ -620,7 +620,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
-        let temporary = paths.home.join("release.env.tmp");
+        let temporary = paths.release_copy.clone();
         fs::write(&temporary, "metadata").unwrap();
         state::write_stopped(&paths).unwrap();
 

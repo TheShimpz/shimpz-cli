@@ -461,7 +461,9 @@ impl Context {
     /// Resolve the `stable` channel or one exact release. A developer release is admitted only from this host's
     /// image store and only on the amd64 Linux profiles.
     fn resolve(&self, exact: Option<&str>) -> Result<ResolvedRelease, String> {
-        let release = self.engine.resolve_release(exact, &self.paths.home)?;
+        let release = self
+            .engine
+            .resolve_release(exact, &self.paths.release_copy)?;
         if release::valid_developer_release_ref(&release.reference)
             && self.profile == HostProfile::MacOs
         {
@@ -1599,7 +1601,7 @@ mod tests {
             error,
             "the Local release metadata could not be extracted cleanly"
         );
-        assert!(!context.paths.home.join("release.env.tmp").exists());
+        assert!(!context.paths.release_copy.exists());
     }
 
     #[cfg(unix)]
@@ -1674,7 +1676,7 @@ mod tests {
                 panic!("admitted the copy made by {replacement}");
             };
             assert_eq!(error, refusal, "{replacement}");
-            assert!(!context.paths.home.join("release.env.tmp").exists());
+            assert!(!context.paths.release_copy.exists());
         }
         assert_eq!(
             fs::read_to_string(&document).unwrap(),

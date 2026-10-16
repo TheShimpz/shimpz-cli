@@ -78,7 +78,7 @@ impl Engine {
     pub(crate) fn resolve_release(
         &self,
         exact: Option<&str>,
-        temporary: &Path,
+        metadata_path: &Path,
     ) -> Result<ResolvedRelease, String> {
         let selector = match exact {
             Some(reference) if release::valid_release_ref(reference) => reference.to_owned(),
@@ -100,20 +100,19 @@ impl Engine {
         if !release::valid_release_ref(&reference) {
             return Err("Docker resolved an invalid Local release digest".into());
         }
-        let metadata_path = temporary.join("release.env.tmp");
         let MemberCopy { copied, removed } = self.copy_member(
             &reference,
             "/release.env",
-            &metadata_path,
+            metadata_path,
             "Docker release metadata copy",
         )?;
         // The temporary metadata is read, if it was copied, and removed whatever else failed, so no exit leaves it.
         let copied = copied.map(|status| status.success());
         let document = match copied {
-            Ok(true) => Some(read_metadata(&metadata_path)),
+            Ok(true) => Some(read_metadata(metadata_path)),
             _ => None,
         };
-        let cleaned = match fs::remove_file(&metadata_path) {
+        let cleaned = match fs::remove_file(metadata_path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
                 "could not remove temporary release metadata: {error}"
             )),

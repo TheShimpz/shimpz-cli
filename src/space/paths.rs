@@ -26,6 +26,8 @@ pub(crate) struct Paths {
     pub(crate) deploy_request: PathBuf,
     pub(crate) deploy_result: PathBuf,
     pub(crate) state_epoch: PathBuf,
+    /// The temporary copy of a resolved release set's metadata, removed whatever else fails.
+    pub(crate) release_copy: PathBuf,
     pub(crate) managed_cli: PathBuf,
     pub(crate) security: PathBuf,
     pub(crate) storage_marker: PathBuf,
@@ -82,6 +84,7 @@ impl Paths {
             deploy_request: home.join("deploy-request"),
             deploy_result: home.join("deploy-result"),
             state_epoch: home.join("state-epoch"),
+            release_copy: home.join("release.env.tmp"),
             managed_cli: home.join("bin/shimpz"),
             storage_marker: security.join(".shimpz-storage"),
             pool_image: security.join("local-data.luks"),

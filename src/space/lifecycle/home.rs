@@ -98,7 +98,7 @@ pub(super) fn validate_existing_install_home(paths: &Paths) -> Result<(), String
 pub(super) fn adopt_unmarked_home(paths: &Paths) -> Result<(), String> {
     state::clear_stopped(paths)?;
     for temporary in [
-        paths.home.join("release.env.tmp"),
+        paths.release_copy.clone(),
         paths.marker.with_extension("tmp"),
     ] {
         remove_regular_if_present(&temporary)?;
@@ -172,7 +172,7 @@ mod tests {
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
         fs::set_permissions(&paths.home, fs::Permissions::from_mode(0o700)).unwrap();
-        let release_temporary = paths.home.join("release.env.tmp");
+        let release_temporary = paths.release_copy.clone();
         let marker_temporary = paths.marker.with_extension("tmp");
         fs::write(&release_temporary, "metadata").unwrap();
         fs::write(&marker_temporary, "marker").unwrap();
