@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::help::Topic;
 use crate::identifier;
+use crate::space::graph::StorageProfile;
 use crate::space::release::valid_release_ref;
 
 const TOP_LEVEL_COMMANDS: [&str; 9] = [
@@ -44,14 +45,8 @@ pub(crate) enum Command {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct SpaceInstall {
     pub(crate) release: Option<String>,
-    pub(crate) print_graph: Option<GraphProfile>,
+    pub(crate) print_graph: Option<StorageProfile>,
     pub(crate) candidate: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GraphProfile {
-    LinuxLuks,
-    ManagedDisk,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -152,11 +147,10 @@ fn parse_space_install(arguments: &[String]) -> Result<Invocation, String> {
             return Ok(Invocation::Help(Topic::Install));
         }
         [option, profile] if option == "--print-graph" => {
-            let print_graph = match profile.as_str() {
-                "linux-luks" => GraphProfile::LinuxLuks,
-                "managed-disk" => GraphProfile::ManagedDisk,
-                _ => return Err("--print-graph requires linux-luks or managed-disk".into()),
-            };
+            let print_graph = [StorageProfile::LinuxLuks, StorageProfile::ManagedDisk]
+                .into_iter()
+                .find(|storage| storage.name() == profile)
+                .ok_or_else(|| "--print-graph requires linux-luks or managed-disk".to_owned())?;
             return Ok(Invocation::Execute(Command::Install(SpaceInstall {
                 release: None,
                 print_graph: Some(print_graph),

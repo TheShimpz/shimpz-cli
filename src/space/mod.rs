@@ -17,14 +17,13 @@ pub(crate) mod lifecycle;
 pub(crate) mod lifecycle {
     //! Native Windows retains Creator operations; Local Space runs inside WSL2.
 
-    use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
+    use crate::args::{SpaceInstall, SpaceReset, SpaceStart};
 
-    use super::graph::{self, StorageProfile};
+    use super::graph;
 
     pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
         match options.print_graph {
-            Some(GraphProfile::LinuxLuks) => Ok(graph::render(StorageProfile::LinuxLuks)),
-            Some(GraphProfile::ManagedDisk) => Ok(graph::render(StorageProfile::ManagedDisk)),
+            Some(profile) => Ok(graph::render(profile)),
             None => unsupported(),
         }
     }

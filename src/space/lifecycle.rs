@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::args::{GraphProfile, SpaceInstall, SpaceReset, SpaceStart};
+use crate::args::{SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
 use crate::private_file;
 
 use super::deploy;
 use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
-use super::graph::{self, StorageProfile};
+use super::graph;
 use super::host::{self, HostProfile};
 use super::members;
 use super::paths::Paths;
@@ -60,10 +60,7 @@ const STOP_PROGRESS: [&str; 3] = [
 
 pub(crate) fn install(options: &SpaceInstall) -> Result<String, String> {
     if let Some(profile) = options.print_graph {
-        return Ok(graph::render(match profile {
-            GraphProfile::LinuxLuks => StorageProfile::LinuxLuks,
-            GraphProfile::ManagedDisk => StorageProfile::ManagedDisk,
-        }));
+        return Ok(graph::render(profile));
     }
     let context = Context::open(false)?;
     let _lock = (!options.candidate)
@@ -1953,7 +1950,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
-        fs::write(&paths.compose, graph::render(StorageProfile::ManagedDisk)).unwrap();
+        fs::write(
+            &paths.compose,
+            graph::render(graph::StorageProfile::ManagedDisk),
+        )
+        .unwrap();
         fs::set_permissions(
             &paths.compose,
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
@@ -1968,7 +1969,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(backup.compose).unwrap(),
-            graph::render(StorageProfile::ManagedDisk)
+            graph::render(graph::StorageProfile::ManagedDisk)
         );
         assert_eq!(
             fs::read_to_string(backup.environment).unwrap(),
