@@ -67,14 +67,7 @@ pub(super) fn validate_managed_bin(paths: &Paths) -> Result<(), String> {
                 path.display()
             ));
         }
-        if metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(format!(
-                "the managed CLI artifact ownership or permissions are invalid: {}",
-                path.display()
-            ));
-        }
+        validate_private_cli(&path)?;
     }
     Ok(())
 }
