@@ -469,7 +469,6 @@ impl Publication {
                 Some("dependency_resolution_failed") => "publication dependency resolution failed",
                 Some("security_scan_failed") => "publication security scan failed",
                 Some("signing_failed") => "publication signing failed",
-                Some("non_reproducible_build") => "publication build was not reproducible",
                 Some("assistant_tests_failed") => "publication Assistant tests failed",
                 Some("artifact_not_public") => {
                     "publication artifacts are not publicly readable, so Teams cannot verify them; publish again"
@@ -551,7 +550,6 @@ fn valid_build_error(value: &str) -> bool {
             | "build_failed"
             | "security_scan_failed"
             | "signing_failed"
-            | "non_reproducible_build"
             | "assistant_tests_failed"
             | "artifact_not_public"
             | "translation_failed"
