@@ -476,6 +476,9 @@ impl Publication {
                 Some("translation_failed") => {
                     "publication messages could not be translated; review the shimpz.text copy, then publish again"
                 }
+                Some("translation_delayed") => {
+                    "publication translation was delayed; publish again to retry"
+                }
                 _ => "publication build failed",
             };
             let run = self
@@ -553,6 +556,7 @@ fn valid_build_error(value: &str) -> bool {
             | "assistant_tests_failed"
             | "artifact_not_public"
             | "translation_failed"
+            | "translation_delayed"
     )
 }
 
@@ -726,6 +730,7 @@ mod tests {
         for (code, expected) in [
             ("artifact_not_public", "not publicly readable"),
             ("translation_failed", "could not be translated"),
+            ("translation_delayed", "publish again to retry"),
             ("assistant_tests_failed", "Assistant tests failed"),
         ] {
             let mut failed = publication("build_failed");
