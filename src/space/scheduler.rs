@@ -12,13 +12,12 @@ use crate::{output, private_file};
 use super::command::{self, Tool};
 use super::confirm;
 use super::host::HostProfile;
-use super::paths::Paths;
+use super::paths::{LAUNCHD_LABEL, Paths, SYSTEMD_SERVICE, SYSTEMD_TIMER};
 
 const MARKER: &str = "shimpz-local-update-v2";
 const MAX_SCHEDULER_BYTES: u64 = 16 * 1024;
-const SYSTEMD_TIMER: &str = "shimpz-update.timer";
-const SYSTEMD_SERVICE: &str = "shimpz-update.service";
-const LAUNCHD_LABEL: &str = "com.shimpz.update";
+/// The systemd user-manager call that stops the update timer and disables it.
+const DISABLE_TIMER: [&str; 4] = ["--user", "disable", "--now", SYSTEMD_TIMER];
 /// `launchctl print` exit status when the domain has no service with the requested label.
 const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
 
@@ -296,7 +295,7 @@ where
             let mut systemctl = |arguments: &[&str]| {
                 run(Tool::Systemctl, arguments).map_err(|error| unload_failure(&error, &next))
             };
-            if systemctl(&["--user", "disable", "--now", SYSTEMD_TIMER])?.succeeded() {
+            if systemctl(&DISABLE_TIMER)?.succeeded() {
                 return Ok(());
             }
             let state = systemctl(&[
@@ -315,7 +314,7 @@ where
             }
         }
         HostProfile::MacOs => {
-            let domain = format!("gui/{}", rustix::process::getuid().as_raw());
+            let domain = launchd_domain();
             let service = format!("{domain}/{LAUNCHD_LABEL}");
             let next =
                 format!("run launchctl bootout {service}, then rerun the same shimpz command");
@@ -372,7 +371,7 @@ fn systemd_booted() -> bool {
 
 fn install_systemd(paths: &Paths) -> Result<(), String> {
     write_atomic(&paths.systemd_service, &systemd_service(paths)?)?;
-    write_atomic(&paths.systemd_timer, systemd_timer())?;
+    write_atomic(&paths.systemd_timer, &systemd_timer())?;
     require_tool(
         Tool::Systemctl,
         ["--user", "daemon-reload"],
@@ -387,7 +386,7 @@ fn install_systemd(paths: &Paths) -> Result<(), String> {
 
 fn install_launch_agent(paths: &Paths) -> Result<(), String> {
     write_atomic(&paths.launch_agent, &launch_agent(paths)?)?;
-    let domain = format!("gui/{}", rustix::process::getuid().as_raw());
+    let domain = launchd_domain();
     let _ = command::status(
         Tool::Launchctl,
         ["bootout", &domain, &paths.launch_agent.to_string_lossy()],
@@ -403,17 +402,14 @@ fn install_launch_agent(paths: &Paths) -> Result<(), String> {
 fn unload(profile: HostProfile, paths: &Paths) {
     match profile {
         HostProfile::Linux | HostProfile::Wsl => {
-            let _ = command::status(
-                Tool::Systemctl,
-                ["--user", "disable", "--now", SYSTEMD_TIMER],
-            );
+            let _ = command::status(Tool::Systemctl, DISABLE_TIMER);
         }
         HostProfile::MacOs => {
             let _ = command::status(
                 Tool::Launchctl,
                 [
                     "bootout",
-                    &format!("gui/{}", rustix::process::getuid().as_raw()),
+                    &launchd_domain(),
                     &paths.launch_agent.to_string_lossy(),
                 ],
             );
@@ -436,8 +432,15 @@ fn systemd_service(paths: &Paths) -> Result<String, String> {
     ))
 }
 
-fn systemd_timer() -> &'static str {
-    "# shimpz-local-update-v2\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=30s\nOnUnitActiveSec=30s\nRandomizedDelaySec=5s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n"
+/// The launchd domain of this user's GUI session.
+fn launchd_domain() -> String {
+    format!("gui/{}", rustix::process::getuid().as_raw())
+}
+
+fn systemd_timer() -> String {
+    format!(
+        "# {MARKER}\n[Unit]\nDescription=Periodically reconcile Shimpz Local Space\n\n[Timer]\nOnActiveSec=30s\nOnUnitActiveSec=30s\nRandomizedDelaySec=5s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n"
+    )
 }
 
 fn launch_agent(paths: &Paths) -> Result<String, String> {
@@ -462,7 +465,7 @@ fn inspect_entries(profile: HostProfile, paths: &Paths) -> Result<Vec<Entry>, St
             )?,
             inspect_entry(
                 &paths.systemd_timer,
-                systemd_timer(),
+                &systemd_timer(),
                 &format!("# {MARKER}"),
             )?,
         ]),
@@ -1068,7 +1071,7 @@ mod tests {
 
         create_private_directory(paths.systemd_service.parent().unwrap());
         write_private_file(&paths.systemd_service, &systemd_service(&paths).unwrap());
-        write_private_file(&paths.systemd_timer, systemd_timer());
+        write_private_file(&paths.systemd_timer, &systemd_timer());
         let temporary = temporary_path(&paths.systemd_timer).unwrap();
         write_private_file(&temporary, "partial\n");
         let error = remove_with(

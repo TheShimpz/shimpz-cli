@@ -9,6 +9,10 @@ use crate::private_file;
 
 pub(crate) const MARKER: &str = "shimpz-space-managed-v1";
 pub(crate) const STORAGE_MARKER: &str = "shimpz-local-storage-v1";
+/// The systemd user units and the launchd job of the automatic Local update.
+pub(crate) const SYSTEMD_TIMER: &str = "shimpz-update.timer";
+pub(crate) const SYSTEMD_SERVICE: &str = "shimpz-update.service";
+pub(crate) const LAUNCHD_LABEL: &str = "com.shimpz.update";
 /// The largest installed environment this CLI writes or admits.
 pub(crate) const MAX_ENVIRONMENT_BYTES: u64 = 8_192;
 
@@ -90,9 +94,11 @@ impl Paths {
             pool_image: security.join("local-data.luks"),
             pool_uuid: security.join("local-data.uuid"),
             pool_mount: security.join("volumes"),
-            systemd_service: systemd.join("shimpz-update.service"),
-            systemd_timer: systemd.join("shimpz-update.timer"),
-            launch_agent: user_home.join("Library/LaunchAgents/com.shimpz.update.plist"),
+            systemd_service: systemd.join(SYSTEMD_SERVICE),
+            systemd_timer: systemd.join(SYSTEMD_TIMER),
+            launch_agent: user_home
+                .join("Library/LaunchAgents")
+                .join(format!("{LAUNCHD_LABEL}.plist")),
             public_cli: user_home.join(".local/bin/shimpz"),
             security,
             home,
