@@ -137,6 +137,32 @@ const IMAGE_KEYS: [(&str, release::Package); 4] = [
     ("SHIMPZ_EGRESS_IMAGE", release::EGRESS),
 ];
 
+/// The keys every installed environment holds besides its image keys.
+const REQUIRED_KEYS: [&str; 11] = [
+    "SHIMPZ_LOCAL_RELEASE_IMAGE",
+    "SHIMPZ_LOCAL_RELEASE_ORDINAL",
+    "SHIMPZ_SPACE_PLATFORM",
+    "SHIMPZ_PORT",
+    "SHIMPZ_DOCKER_GID",
+    "SHIMPZ_DOCKER_SOCKET",
+    "SHIMPZ_SPACE_ID",
+    "SHIMPZ_CPUSET",
+    "SHIMPZ_PROJECT_NAME",
+    "SHIMPZ_ADMIN_ALLOWED_ORIGINS",
+    "SHIMPZ_STORAGE_PROFILE",
+];
+/// The key only a Linux Space's environment holds: the mounted root of its encrypted volumes.
+const SECURE_VOLUME_ROOT_KEY: &str = "SHIMPZ_SECURE_VOLUME_ROOT";
+
+/// Every key an installed environment can hold; [`validate_environment`] refuses any other.
+pub(crate) fn environment_keys() -> impl Iterator<Item = &'static str> {
+    IMAGE_KEYS
+        .into_iter()
+        .map(|(key, _)| key)
+        .chain(REQUIRED_KEYS)
+        .chain([SECURE_VOLUME_ROOT_KEY])
+}
+
 /// Checks every field of the installed environment and returns the Admin port it pins.
 fn validate_environment(
     values: &BTreeMap<&str, &str>,
@@ -144,31 +170,18 @@ fn validate_environment(
     profile: HostProfile,
 ) -> Result<u16, String> {
     let images = IMAGE_KEYS.map(|(key, _)| key);
-    let required = [
-        "SHIMPZ_LOCAL_RELEASE_IMAGE",
-        "SHIMPZ_LOCAL_RELEASE_ORDINAL",
-        "SHIMPZ_SPACE_PLATFORM",
-        "SHIMPZ_PORT",
-        "SHIMPZ_DOCKER_GID",
-        "SHIMPZ_DOCKER_SOCKET",
-        "SHIMPZ_SPACE_ID",
-        "SHIMPZ_CPUSET",
-        "SHIMPZ_PROJECT_NAME",
-        "SHIMPZ_ADMIN_ALLOWED_ORIGINS",
-        "SHIMPZ_STORAGE_PROFILE",
-    ];
     let expected_storage = profile.storage().name();
     let linux = profile == HostProfile::Linux;
     let developer = values
         .get("SHIMPZ_LOCAL_RELEASE_IMAGE")
         .is_some_and(|value| release::valid_developer_release_ref(value));
-    let expected = images.len() + required.len() + usize::from(linux);
+    let expected = images.len() + REQUIRED_KEYS.len() + usize::from(linux);
     if values.len() != expected
         || images
             .iter()
-            .chain(&required)
+            .chain(&REQUIRED_KEYS)
             .any(|key| !values.contains_key(key))
-        || (linux && !values.contains_key("SHIMPZ_SECURE_VOLUME_ROOT"))
+        || (linux && !values.contains_key(SECURE_VOLUME_ROOT_KEY))
     {
         return Err("the installed Local environment has unknown or missing fields".into());
     }
@@ -212,8 +225,7 @@ fn validate_environment(
         return Err("the installed Local Docker socket is invalid".into());
     }
     if linux
-        && values.get("SHIMPZ_SECURE_VOLUME_ROOT")
-            != Some(&paths.pool_mount.to_string_lossy().as_ref())
+        && values.get(SECURE_VOLUME_ROOT_KEY) != Some(&paths.pool_mount.to_string_lossy().as_ref())
     {
         return Err("the installed encrypted volume root is invalid".into());
     }
@@ -614,6 +626,12 @@ mod tests {
         assert_eq!(installed.release_ref, release.reference);
         assert_eq!(installed.ordinal, 1);
         assert_eq!(installed.port, 7777);
+        let document = fs::read_to_string(&paths.environment).unwrap();
+        let written: std::collections::BTreeSet<_> = document
+            .lines()
+            .map(|line| line.split_once('=').unwrap().0)
+            .collect();
+        assert_eq!(written, environment_keys().collect());
     }
 
     #[test]

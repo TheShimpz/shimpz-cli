@@ -175,8 +175,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    command_output(Command::new(program).args(arguments))
+}
+
+/// The bounded standard output of the prepared Docker `command`, which must succeed.
+pub(super) fn command_output(command: &mut Command) -> Result<String, String> {
     let result = capture::bounded_within(
-        Command::new(program).args(arguments),
+        command,
         MAX_DOCKER_OUTPUT_BYTES,
         MAX_DOCKER_OUTPUT_BYTES,
         DOCKER_QUICK,

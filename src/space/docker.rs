@@ -18,6 +18,7 @@ use super::poll::{self, TeamActivity};
 use super::release::{
     ADMIN, EGRESS, Release, STATE_EPOCH_LABEL, TEAM, parse_state_epoch, valid_release_ref,
 };
+use super::state;
 use crate::capture;
 use crate::digest;
 
@@ -26,7 +27,7 @@ mod helper;
 mod release;
 
 use exec::{
-    BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC,
+    BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC, command_output,
     execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, spawn_docker,
     wait_failure,
 };
@@ -83,18 +84,6 @@ const RUNTIME_STATE_OWNER: &str = "10001:10001";
 const RUNTIME_STATE_OWNER_UID: u32 = 10001;
 /// Admin's runtime identity: its helpers run as it, so they own exactly what Admin itself writes and reads.
 const ADMIN_IDENTITY: &str = "1000:1000";
-
-/// The Compose options that select this Space's project directory, environment, and graph.
-fn compose_project(paths: &Paths) -> [&OsStr; 6] {
-    [
-        OsStr::new("--project-directory"),
-        paths.home.as_os_str(),
-        OsStr::new("--env-file"),
-        paths.environment.as_os_str(),
-        OsStr::new("--file"),
-        paths.compose.as_os_str(),
-    ]
-}
 
 /// First proves every volume root below `root` and every entry below it belongs to `owner`, never following a link; a
 /// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
@@ -478,11 +467,9 @@ impl Engine {
         let started = Instant::now();
         let deadline = started + DOCKER_COMPOSE;
         let mut child = spawn_docker(
-            Command::new(&self.docker)
-                .arg("compose")
+            self.compose_command(paths)
                 .arg("--progress")
                 .arg("plain")
-                .args(compose_project(paths))
                 .args(COMPOSE_UP)
                 .args(if selection.is_empty() {
                     &[][..]
@@ -492,7 +479,6 @@ impl Engine {
                 .args(selection)
                 // Progress must reach the stream read below, whatever the caller's environment selects.
                 .env("COMPOSE_STATUS_STDOUT", "0")
-                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped()),
         )?;
@@ -537,12 +523,11 @@ impl Engine {
         ]) else {
             return false;
         };
-        let Ok(configuration) = self.run_output(
-            [OsStr::new("compose")]
-                .into_iter()
-                .chain(compose_project(paths))
-                .chain(["config", "--hash", graph::ACCOUNT_EGRESS_INIT].map(OsStr::new)),
-        ) else {
+        let Ok(configuration) = command_output(self.compose_command(paths).args([
+            "config",
+            "--hash",
+            graph::ACCOUNT_EGRESS_INIT,
+        ])) else {
             return false;
         };
         completed_init_matches(&records, &configuration) && self.account_capability_reads()
@@ -580,13 +565,36 @@ impl Engine {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        quiet_status(
+            self.compose_command(paths).args(arguments),
+            "Docker Compose",
+            DOCKER_COMPOSE,
+        )
+    }
+
+    /// `docker compose` on this Space's project directory, installed environment, and graph. Compose prefers the
+    /// caller's environment over the environment file and over the graph's project name, and reads its own settings
+    /// from it, so every key the CLI pins in that file and every inherited Compose setting is removed first.
+    fn compose_command(&self, paths: &Paths) -> Command {
         let mut command = Command::new(&self.docker);
         command
             .arg("compose")
-            .args(compose_project(paths))
-            .args(arguments)
+            .arg("--project-directory")
+            .arg(&paths.home)
+            .arg("--env-file")
+            .arg(&paths.environment)
+            .arg("--file")
+            .arg(&paths.compose)
             .stdin(Stdio::null());
-        quiet_status(&mut command, "Docker Compose", DOCKER_COMPOSE)
+        for key in state::environment_keys() {
+            command.env_remove(key);
+        }
+        for (key, _) in std::env::vars_os() {
+            if key.as_encoded_bytes().starts_with(b"COMPOSE_") {
+                command.env_remove(key);
+            }
+        }
+        command
     }
 
     #[cfg(test)]
@@ -1405,6 +1413,82 @@ mod tests {
                 .unwrap();
             assert_eq!(up.ends_with(services), selected, "{capability}: {up}");
             assert_eq!(up.ends_with("--remove-orphans"), !selected, "{up}");
+        }
+    }
+
+    /// Compose prefers the caller's environment over the installed environment file, so a value the caller exports
+    /// would replace a pinned image, socket, port, or project. The test reruns itself alone with such values exported;
+    /// the rerun drives every Compose call against a fake Docker that records the environment it receives.
+    #[cfg(unix)]
+    #[test]
+    fn every_compose_call_drops_the_pinned_keys_and_compose_settings_the_caller_exports() {
+        const RECORDS: &str = "SHIMPZ_TEST_COMPOSE_ENVIRONMENT_RECORDS";
+        if let Some(records) = std::env::var_os(RECORDS) {
+            let records = PathBuf::from(records);
+            let command = records.join("docker");
+            let hash = "e".repeat(64);
+            let inspected = init_records(&hash).replace('\n', "\\n");
+            let directory = records.display();
+            crate::fake_tool::write(
+                &command,
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in\n  inspect*) printf '{inspected}' ;;\n  *' config --hash '*) env > '{directory}/config'; printf 'shimpz-account-egress-init {hash}\\n' ;;\n  *' up -d '*) env > '{directory}/up' ;;\n  compose*) env > '{directory}/ps' ;;\n  *) exit 1 ;;\nesac\n"
+                ),
+            );
+            let paths = Paths::under(&records).unwrap();
+            let engine = Engine::with_docker(command);
+            let (status, _) = engine
+                .compose_up(&paths, engine.completed_init_is_current(&paths))
+                .unwrap();
+            assert!(status.success());
+            assert!(engine.compose(&paths, ["ps"]).unwrap().success());
+            return;
+        }
+        let records = tempfile::tempdir().unwrap();
+        let exported: Vec<_> = state::environment_keys()
+            .chain([
+                "COMPOSE_PROJECT_NAME",
+                "COMPOSE_IGNORE_ORPHANS",
+                "COMPOSE_STATUS_STDOUT",
+            ])
+            .collect();
+        let name = concat!(
+            module_path!(),
+            "::every_compose_call_drops_the_pinned_keys_and_compose_settings_the_caller_exports"
+        )
+        .split_once("::")
+        .unwrap()
+        .1;
+        let rerun = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1", "--quiet"])
+            .envs(exported.iter().map(|key| (key, "exported")))
+            .env("DOCKER_HOST", "unix:///exported.sock")
+            .env(RECORDS, records.path())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(rerun.success());
+        for call in ["up", "config", "ps"] {
+            let received = fs::read_to_string(records.path().join(call)).unwrap();
+            let received: Vec<_> = received.lines().collect();
+            for line in &received {
+                let key = line.split_once('=').map_or(*line, |(key, _)| key);
+                assert!(
+                    !exported.contains(&key)
+                        || (call == "up" && *line == "COMPOSE_STATUS_STDOUT=0"),
+                    "{call}: {line}"
+                );
+            }
+            assert_eq!(
+                received.contains(&"COMPOSE_STATUS_STDOUT=0"),
+                call == "up",
+                "{call}"
+            );
+            // Docker's own daemon selection still reaches Compose, as it reaches every other Docker call.
+            assert!(
+                received.contains(&"DOCKER_HOST=unix:///exported.sock"),
+                "{call}"
+            );
         }
     }
 

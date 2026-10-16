@@ -2565,7 +2565,7 @@ mod tests {
         }));
         assert!(!calls.lines().any(|line| line.starts_with("run ")));
         assert!(calls.lines().any(|line| {
-            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+            line.starts_with("compose ") && line.contains(" --progress plain up -d ")
         }));
     }
 
@@ -2645,13 +2645,15 @@ mod tests {
         let calls = fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = calls.lines().collect();
         let candidate_up = lines.iter().position(|line| {
-            line.starts_with("compose --progress plain ") && line.contains(" up -d ")
+            line.starts_with("compose ") && line.contains(" --progress plain up -d ")
         });
         let rollback_down = lines.iter().position(|line| {
             line.starts_with("compose ") && line.ends_with(" down --remove-orphans")
         });
         let restoration_up = lines.iter().rposition(|line| {
-            line.starts_with("compose --project-directory ") && line.contains(" up -d ")
+            line.starts_with("compose ")
+                && line.contains(" up -d ")
+                && !line.contains(" --progress plain ")
         });
         assert!(
             matches!(
