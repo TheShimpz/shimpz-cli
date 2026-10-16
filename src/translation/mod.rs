@@ -45,10 +45,13 @@ pub(crate) enum Language {
 }
 
 impl Language {
-    pub(crate) const fn describe(self) -> &'static str {
+    pub(crate) fn describe(self) -> String {
         match self {
-            Self::Translated => "translated through OpenAI (gpt-6-luna) from this workstation",
-            Self::SourceText => "English source text in every interface language",
+            Self::Translated => format!(
+                "translated through OpenAI ({}) from this workstation",
+                provider::MODEL
+            ),
+            Self::SourceText => "English source text in every interface language".into(),
         }
     }
 }
