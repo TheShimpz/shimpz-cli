@@ -108,32 +108,31 @@ pub(super) enum BoundedOutput {
 }
 
 /// Run a short Docker helper call within `timeout`, retaining at most `limit` bytes of its stdout; more marks the
-/// output truncated.
+/// output truncated. A failure to read it names it `output`.
 pub(super) fn execute_bounded_stdout(
     command: &mut Command,
     timeout: Duration,
     limit: usize,
+    output: &str,
 ) -> Result<BoundedOutput, String> {
     let deadline = Instant::now() + timeout;
+    let unreadable = format!("{output} could not be read");
     let mut child = capture::spawn(command.stdout(Stdio::piped()))
         .map_err(|error| format!("could not execute Docker: {error}"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Docker helper output is unavailable".to_owned())?;
+        .ok_or_else(|| format!("{output} is unavailable"))?;
+    let drained = unreadable.clone();
     let reader = capture::Reader::start(&child, stdout, move |stdout| {
-        capture::drain(stdout, limit)
-            .map_err(|_| "Docker helper output could not be read".to_owned())
+        capture::drain(stdout, limit).map_err(|_| drained)
     });
     let status = match capture::wait(&mut child, deadline) {
         Ok(status) => status,
         Err(capture::Failure::TimedOut { stopped: true }) => return Ok(BoundedOutput::TimedOut),
         Err(failure) => return Err(wait_failure(timeout, failure)),
     };
-    let captured = reader.finish(
-        Instant::now() + STREAM_GRACE,
-        "Docker helper output could not be read",
-    )?;
+    let captured = reader.finish(Instant::now() + STREAM_GRACE, &unreadable)?;
     Ok(BoundedOutput::Completed {
         status,
         bytes: captured.bytes,

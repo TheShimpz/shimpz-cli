@@ -290,6 +290,7 @@ impl Engine {
                 .stderr(Stdio::null()),
             timeout,
             TEAM_ACTIVITY_OUTPUT_BYTES,
+            "Docker Team activity output",
         ) {
             Ok(BoundedOutput::Completed {
                 status,
@@ -329,6 +330,7 @@ impl Engine {
                     .stderr(Stdio::null()),
                 ADMIN_AUTHENTICATION_TIMEOUT,
                 ADMIN_AUTHENTICATION_OUTPUT_BYTES,
+                "Docker authentication-state output",
             )? {
                 BoundedOutput::Completed {
                     status,
@@ -563,6 +565,7 @@ impl Engine {
                     .stderr(Stdio::null()),
                 ACCOUNT_CAPABILITY_TIMEOUT,
                 0,
+                "Docker Account capability check output",
             ),
             Ok(BoundedOutput::Completed {
                 status,
@@ -1801,6 +1804,7 @@ mod tests {
                 .stderr(Stdio::null()),
             Duration::from_millis(50),
             ADMIN_AUTHENTICATION_OUTPUT_BYTES,
+            "Docker probe output",
         )
         .unwrap();
 
