@@ -144,31 +144,34 @@ fn admin_authentication_state_response(
     {
         return Err(invalid());
     }
-    match (
-        object
-            .get("authentication_state")
-            .and_then(serde_json::Value::as_str),
-        object["initialized"].as_bool(),
-    ) {
-        (Some("uninitialized"), Some(false)) => Ok(AdminAuthenticationState::Uninitialized),
-        (Some("enrollment-required"), Some(true)) => {
-            Ok(AdminAuthenticationState::EnrollmentRequired)
-        }
-        (Some("configured"), Some(true)) => Ok(AdminAuthenticationState::Configured),
-        (Some("recovery-required"), Some(true)) => Ok(AdminAuthenticationState::RecoveryRequired),
-        _ => Err(invalid()),
+    let state = object
+        .get("authentication_state")
+        .and_then(serde_json::Value::as_str)
+        .and_then(authentication_state)
+        .ok_or_else(invalid)?;
+    // Admin reports itself initialized in every state but the uninitialized one.
+    if object["initialized"].as_bool() == Some(state == AdminAuthenticationState::Uninitialized) {
+        return Err(invalid());
     }
+    Ok(state)
 }
 
 pub(super) fn admin_authentication_state_probe_response(
     response: &str,
 ) -> Result<AdminAuthenticationState, String> {
-    match response {
-        "uninitialized" => Ok(AdminAuthenticationState::Uninitialized),
-        "enrollment-required" => Ok(AdminAuthenticationState::EnrollmentRequired),
-        "configured" => Ok(AdminAuthenticationState::Configured),
-        "recovery-required" => Ok(AdminAuthenticationState::RecoveryRequired),
-        _ => Err("the selected Admin returned an invalid authentication-state contract".into()),
+    authentication_state(response).ok_or_else(|| {
+        "the selected Admin returned an invalid authentication-state contract".into()
+    })
+}
+
+/// The Local authentication state Admin names `value`.
+fn authentication_state(value: &str) -> Option<AdminAuthenticationState> {
+    match value {
+        "uninitialized" => Some(AdminAuthenticationState::Uninitialized),
+        "enrollment-required" => Some(AdminAuthenticationState::EnrollmentRequired),
+        "configured" => Some(AdminAuthenticationState::Configured),
+        "recovery-required" => Some(AdminAuthenticationState::RecoveryRequired),
+        _ => None,
     }
 }
 
@@ -514,6 +517,7 @@ mod tests {
         for (status, body) in [
             (503, local_session("configured", true)),
             (200, local_session("configured", false)),
+            (200, local_session("uninitialized", true)),
             (200, local_session("unknown", true)),
             (
                 200,
