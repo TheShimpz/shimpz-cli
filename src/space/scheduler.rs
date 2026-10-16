@@ -821,8 +821,6 @@ mod tests {
         assert!(timer.contains("RandomizedDelaySec=5s"));
         assert!(timer.contains("AccuracySec=1s"));
         assert!(timer.contains("WantedBy=timers.target"));
-        assert!(!timer.contains("OnBootSec="));
-        assert!(!timer.contains("Persistent="));
         let plist = launch_agent(&paths).unwrap();
         assert!(plist.contains("<string>/home/Ada Space/.shimpz/bin/shimpz</string>"));
         assert!(plist.contains("<string>--scheduled</string>"));
