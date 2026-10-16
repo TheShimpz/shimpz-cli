@@ -289,9 +289,7 @@ fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Resul
         .filter(|current| current.build_digest == expected.build_digest)
     {
         output::progress("Reusing the current Local Assistant snapshot...");
-        validate_image(docker, &current.image_id, expected)?;
-        verify_language_files(docker, &current.image_id, expected)?;
-        require_current(docker, reference, &current.image_id)?;
+        admit_staged(docker, &current.image_id, expected)?;
         return Ok(current.image_id.clone());
     }
     output::progress("Building the Local Assistant snapshot...");
@@ -302,9 +300,7 @@ fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Resul
     let nonce = stage_nonce();
     build_image(docker, context, expected, &nonce)
         .and_then(|image_id| {
-            validate_image(docker, &image_id, expected)?;
-            verify_language_files(docker, &image_id, expected)?;
-            require_current(docker, reference, &image_id)?;
+            admit_staged(docker, &image_id, expected)?;
             Ok(image_id)
         })
         .map_err(|error| {
@@ -600,6 +596,13 @@ fn exported_file(
         ));
     }
     Ok(file.bytes)
+}
+
+/// Prove `image_id` is the expected snapshot, with the expected language files, and the Assistant's current one.
+fn admit_staged(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
+    validate_image(docker, image_id, expected)?;
+    verify_language_files(docker, image_id, expected)?;
+    require_current(docker, expected.reference, image_id)
 }
 
 fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
