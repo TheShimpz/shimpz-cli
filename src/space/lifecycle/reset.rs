@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::output;
 use crate::space::confirm::{self, Answer};
@@ -255,10 +255,7 @@ impl Context {
             .start_container_if_present(graph::TEAM.container)
             .is_err()
         {
-            output::info(
-                "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
-            );
-            return Ok(AdminAttestation::Stopped);
+            return Ok(admin_unavailable_for_recovery());
         }
         if attestation == AdminAttestation::Stopped {
             let started = self
@@ -269,10 +266,7 @@ impl Context {
                 )
                 .is_ok_and(|status| status.success());
             if !started {
-                output::info(
-                    "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
-                );
-                return Ok(AdminAttestation::Stopped);
+                return Ok(admin_unavailable_for_recovery());
             }
             attestation = self.admin_attestation()?;
         }
@@ -282,10 +276,7 @@ impl Context {
             && !members::detached_services(&self.engine, &inventory.project_containers, port)?
                 .is_empty()
         {
-            output::info(
-                "Admin could not be started; confirmed recovery will use owned-resource cleanup.",
-            );
-            return Ok(AdminAttestation::Stopped);
+            return Ok(admin_unavailable_for_recovery());
         }
         Ok(attestation)
     }
@@ -318,19 +309,35 @@ impl Context {
         remove_runtime_files(&self.paths)?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("candidate"))?;
         remove_regular_if_present(&self.paths.managed_cli.with_extension("previous"))?;
-        let mut preserved = PathReport::default();
-        if self.paths.home.exists() {
-            for entry in fs::read_dir(&self.paths.home).map_err(io_error)? {
-                let path = entry.map_err(io_error)?.path();
-                if path == self.paths.managed_bin() {
-                    record_retained_bin_entries(&self.paths, &mut preserved)?;
-                } else {
-                    preserved.record(path);
-                }
+        preserved_home_entries(&self.paths, |_| false)
+    }
+}
+
+/// Recovery falls back to owned-resource cleanup when Admin cannot be started as declared.
+fn admin_unavailable_for_recovery() -> AdminAttestation {
+    output::info("Admin could not be started; confirmed recovery will use owned-resource cleanup.");
+    AdminAttestation::Stopped
+}
+
+/// Every entry of the Local home a reset leaves in place, except those `owned` claims: the retained CLI entries of
+/// the managed bin directory, and any other entry as unrecognized content.
+fn preserved_home_entries(
+    paths: &Paths,
+    owned: impl Fn(&Path) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut preserved = PathReport::default();
+    if paths.home.exists() {
+        let bin = paths.managed_bin();
+        for entry in fs::read_dir(&paths.home).map_err(io_error)? {
+            let path = entry.map_err(io_error)?.path();
+            if path == bin {
+                record_retained_bin_entries(paths, &mut preserved)?;
+            } else if !owned(&path) {
+                preserved.record(path);
             }
         }
-        Ok(preserved.into_strings())
     }
+    Ok(preserved.into_strings())
 }
 
 /// A fresh installation may follow corrupt recovery only once owned scheduler entries are gone: later failures would
@@ -393,19 +400,9 @@ fn preflight_remove_files(paths: &Paths, protected_storage: bool) -> Result<Vec<
     for path in &managed {
         validate_regular_if_present(path)?;
     }
-    let mut preserved = PathReport::default();
-    if paths.home.exists() {
-        let bin = paths.managed_bin();
-        for entry in fs::read_dir(&paths.home).map_err(io_error)? {
-            let path = entry.map_err(io_error)?.path();
-            if path == bin {
-                record_retained_bin_entries(paths, &mut preserved)?;
-            } else if !(managed.contains(&path) || protected_storage && path == paths.security) {
-                preserved.record(path);
-            }
-        }
-    }
-    Ok(preserved.into_strings())
+    preserved_home_entries(paths, |path| {
+        managed.iter().any(|managed| managed == path) || protected_storage && path == paths.security
+    })
 }
 
 fn record_retained_bin_entries(paths: &Paths, preserved: &mut PathReport) -> Result<(), String> {
