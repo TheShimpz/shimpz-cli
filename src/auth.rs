@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::{Agent, Body, http::Response};
 
 use crate::{
-    credentials::{self, Credentials},
+    credentials::{self, Credentials, IDENTITY_SCOPE, SCOPES},
     developers_client::{self, unavailable},
     digest, output,
 };
@@ -23,9 +23,6 @@ const SESSION_URL: &str = "https://developers.shimpz.com/api/v1/auth/session";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
-const IDENTITY_SCOPE: &str = "identity:read";
-pub(crate) const ASSISTANT_PUBLISH_SCOPE: &str = "assistant:publish";
-const AVAILABLE_SCOPES: [&str; 2] = [IDENTITY_SCOPE, ASSISTANT_PUBLISH_SCOPE];
 
 pub(crate) fn login() -> Result<String, String> {
     let credential_lock = credentials::lock()?;
@@ -42,7 +39,7 @@ pub(crate) fn login() -> Result<String, String> {
 }
 
 pub(crate) fn ensure_authenticated(required_scope: &str) -> Result<Credentials, String> {
-    if !AVAILABLE_SCOPES.contains(&required_scope) {
+    if !SCOPES.contains(&required_scope) {
         return Err("CLI requested an unknown permission".into());
     }
     let credential_lock = credentials::lock()?;
@@ -91,7 +88,7 @@ fn interactive_login(
 }
 
 fn cumulative_scopes(existing: &[String], required: &str) -> Vec<&'static str> {
-    AVAILABLE_SCOPES
+    SCOPES
         .into_iter()
         .filter(|scope| {
             *scope == IDENTITY_SCOPE
@@ -402,11 +399,11 @@ impl AuthSession {
         if !self.authenticated
             || !digest::is_lower_hex(&self.account_id, 32)
             || self.scopes.is_empty()
-            || self.scopes.len() > AVAILABLE_SCOPES.len()
+            || self.scopes.len() > SCOPES.len()
             || self
                 .scopes
                 .iter()
-                .any(|scope| !AVAILABLE_SCOPES.contains(&scope.as_str()))
+                .any(|scope| !SCOPES.contains(&scope.as_str()))
         {
             return Err("Developers returned an invalid session response".into());
         }
@@ -419,13 +416,7 @@ impl AuthSession {
 }
 
 fn valid_handle(value: &str) -> bool {
-    value.len() == 22 && base64url(value)
-}
-
-fn base64url(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    value.len() == 22 && credentials::base64url(value)
 }
 
 fn valid_user_code(value: &str) -> bool {
@@ -442,9 +433,10 @@ fn valid_user_code(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASSISTANT_PUBLISH_SCOPE, AuthSession, DeviceAuthorization, SecretInput, TokenResponse,
-        cumulative_scopes, valid_user_code,
+        AuthSession, DeviceAuthorization, SecretInput, TokenResponse, cumulative_scopes,
+        valid_user_code,
     };
+    use crate::credentials::ASSISTANT_PUBLISH_SCOPE;
 
     #[test]
     fn validates_only_the_production_browser_url() {

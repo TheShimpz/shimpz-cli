@@ -21,7 +21,12 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const CREDENTIALS_LOCK_FILE: &str = "credentials.lock";
 const MAX_CREDENTIALS_BYTES: u64 = 16 * 1024;
 const FORMAT_VERSION: u8 = 1;
-const VALID_SCOPES: [&str; 2] = ["identity:read", "assistant:publish"];
+/// The Developers permission a CLI credential always holds.
+pub(crate) const IDENTITY_SCOPE: &str = "identity:read";
+/// The Developers permission to publish an Assistant.
+pub(crate) const ASSISTANT_PUBLISH_SCOPE: &str = "assistant:publish";
+/// Every scope a CLI credential may hold, in its canonical order.
+pub(crate) const SCOPES: [&str; 2] = [IDENTITY_SCOPE, ASSISTANT_PUBLISH_SCOPE];
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -226,19 +231,23 @@ fn configure_atomic_secure_open(options: &mut AtomicOpenOptions) {
 
 /// A 256-bit Developers credential in unpadded base64url: exactly 43 URL-safe characters.
 pub(crate) fn valid_token(value: &str) -> bool {
-    value.len() == 43
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    value.len() == 43 && base64url(value)
+}
+
+/// Only unpadded base64url characters.
+pub(crate) fn base64url(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn valid_scopes(scopes: &[String]) -> bool {
     !scopes.is_empty()
-        && scopes.len() <= VALID_SCOPES.len()
+        && scopes.len() <= SCOPES.len()
         && scopes
             .iter()
             .try_fold(None, |previous, scope| {
-                let index = VALID_SCOPES.iter().position(|valid| valid == scope)?;
+                let index = SCOPES.iter().position(|valid| valid == scope)?;
                 previous
                     .is_none_or(|previous| previous < index)
                     .then_some(Some(index))

@@ -27,7 +27,7 @@ pub(crate) fn run(project: &Path) -> Result<String, String> {
     let package = source_package::build(project)?;
     python::Assistant::open(project)?.contract()?;
     let identity = manifest::PublicationIdentity::parse(&package.manifest)?;
-    let credentials = auth::ensure_authenticated(auth::ASSISTANT_PUBLISH_SCOPE)?;
+    let credentials = auth::ensure_authenticated(crate::credentials::ASSISTANT_PUBLISH_SCOPE)?;
     let api = Api::new();
     output::info("Recording exact Creator consent.");
     output::detail(
