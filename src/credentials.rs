@@ -359,8 +359,13 @@ mod tests {
     fn refuses_a_private_record_with_invalid_content_naming_the_file() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("credentials.json");
+        let unknown_field = format!(
+            r#"{{"version":1,"access_token":"{}","refresh_token":"{}","scopes":["identity:read"],"unknown":1}}"#,
+            "a".repeat(43),
+            "b".repeat(43)
+        );
         let oversized = vec![b' '; 16 * 1024 + 1];
-        for content in [b"not json".as_slice(), b"{}", &oversized] {
+        for content in [unknown_field.as_bytes(), b"not json", b"{}", &oversized] {
             fs::write(&path, content).unwrap();
             #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
