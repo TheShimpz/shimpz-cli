@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::{output, private_file};
+use crate::output;
+use crate::private_file::{self, ReadFailure};
 
 use super::command::{self, Tool};
 use super::confirm;
@@ -547,17 +548,16 @@ fn classify_entry(
     }
 }
 
+/// The contents of the regular file at `path`, or nothing when it is no longer a regular file or exceeds the bound.
 fn read_bounded_regular(path: &Path) -> Result<Vec<u8>, String> {
-    let file = private_file::open_read(path).map_err(io_error)?;
-    let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() || metadata.len() > MAX_SCHEDULER_BYTES {
-        return Ok(Vec::new());
+    match private_file::read_admitted(path, MAX_SCHEDULER_BYTES, private_file::regular) {
+        Ok(mut contents) => Ok(std::mem::take(&mut *contents)),
+        Err(ReadFailure::NotAdmitted(_) | ReadFailure::Oversized) => Ok(Vec::new()),
+        Err(ReadFailure::Link) => Err(io_error(std::io::Error::from_raw_os_error(libc::ELOOP))),
+        Err(ReadFailure::Open(error) | ReadFailure::Inspect(error) | ReadFailure::Read(error)) => {
+            Err(io_error(error))
+        }
     }
-    let mut contents = Vec::new();
-    file.take(MAX_SCHEDULER_BYTES + 1)
-        .read_to_end(&mut contents)
-        .map_err(io_error)?;
-    Ok(contents)
 }
 
 fn confirm_replace(paths: &[PathBuf]) -> Result<bool, String> {
