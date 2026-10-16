@@ -143,17 +143,11 @@ impl Inventory {
     }
 
     pub(crate) fn container_names(&self, engine: &Engine) -> Result<Vec<String>, String> {
-        let names: BTreeSet<_> = inspect_records(
-            engine,
-            &["inspect", "--type=container"],
-            Identity::Id,
-            "{{.Name}}",
-            &self.container_ids(),
-            "container name",
-        )?
-        .into_iter()
-        .map(|name| name.trim_start_matches('/').to_owned())
-        .collect();
+        let names: BTreeSet<_> =
+            inspect_containers(engine, &self.container_ids(), "{{.Name}}", "container name")?
+                .into_iter()
+                .map(|name| name.trim_start_matches('/').to_owned())
+                .collect();
         Ok(names.into_iter().collect())
     }
 
@@ -168,12 +162,10 @@ impl Inventory {
     }
 
     pub(crate) fn team_container_id(&self, engine: &Engine) -> Result<Option<String>, String> {
-        let names = inspect_records(
+        let names = inspect_containers(
             engine,
-            &["inspect", "--type=container"],
-            Identity::Id,
-            "{{.Name}}",
             &self.project_containers,
+            "{{.Name}}",
             "container name",
         )?;
         Ok(self
@@ -221,19 +213,26 @@ impl Inventory {
 
 /// A reserved container name is free or held by this project; any other occupant refuses the inventory.
 fn reserved_occupant(engine: &Engine, name: &str) -> Result<(), String> {
-    let record = engine.run_output([
-        "inspect",
-        "--type=container",
-        "--format",
-        "{{index .Config.Labels \"com.docker.compose.project\"}}",
-        name,
-    ]);
-    match record {
-        Ok(value) if value.trim() != graph::PROJECT => {
+    match compose_project_of(engine, name) {
+        Some(project) if project != graph::PROJECT => {
             Err(format!("another Docker container is already named {name}"))
         }
-        Ok(_) | Err(_) => Ok(()),
+        _ => Ok(()),
     }
+}
+
+/// The Compose project label of the container named `name`, or `None` when no such container can be inspected.
+fn compose_project_of(engine: &Engine, name: &str) -> Option<String> {
+    engine
+        .run_output([
+            "inspect",
+            "--type=container",
+            "--format",
+            "{{index .Config.Labels \"com.docker.compose.project\"}}",
+            name,
+        ])
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 /// The answer of one concurrent observation; a worker that panicked observed nothing and refuses the inventory.
@@ -244,19 +243,12 @@ fn joined<T>(handle: thread::ScopedJoinHandle<'_, Result<T, String>>) -> Result<
 }
 
 fn controller_space_id(engine: &Engine) -> Result<Option<String>, String> {
-    let project = engine.run_output([
-        "inspect",
-        "--type=container",
-        "--format",
-        "{{index .Config.Labels \"com.docker.compose.project\"}}",
-        graph::TEAM.container,
-    ]);
-    match project {
-        Err(_) => Ok(None),
-        Ok(value) if value.trim() != graph::PROJECT => {
+    match compose_project_of(engine, graph::TEAM.container) {
+        None => Ok(None),
+        Some(project) if project != graph::PROJECT => {
             Err("the reserved controller belongs to another project".into())
         }
-        Ok(_) => {
+        Some(_) => {
             let environment = engine.run_output([
                 "inspect",
                 "--type=container",
@@ -367,12 +359,10 @@ pub(crate) fn inspect_containers(
 
 fn validate_project_containers(engine: &Engine, identifiers: &[String]) -> Result<(), String> {
     let mut services = BTreeSet::new();
-    for record in inspect_records(
+    for record in inspect_containers(
         engine,
-        &["inspect", "--type=container"],
-        Identity::Id,
-        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.Config.Image}}",
         identifiers,
+        "{{.Name}}|{{index .Config.Labels \"com.docker.compose.service\"}}|{{.Config.Image}}",
         "Compose container",
     )? {
         let fields: Vec<_> = record.split('|').collect();
@@ -455,12 +445,10 @@ fn validate_dynamic_containers(
     identifiers: &[String],
 ) -> Result<(), String> {
     let mut unique = BTreeSet::new();
-    for record in inspect_records(
+    for record in inspect_containers(
         engine,
-        &["inspect", "--type=container"],
-        Identity::Id,
-        "{{.Name}}|{{index .Config.Labels \"com.shimpz.local.managed\"}}|{{index .Config.Labels \"com.shimpz.local.profile\"}}|{{index .Config.Labels \"com.shimpz.local.space-id\"}}|{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{index .Config.Labels \"com.shimpz.local.team-id\"}}|{{index .Config.Labels \"com.shimpz.local.assistant-id\"}}",
         identifiers,
+        "{{.Name}}|{{index .Config.Labels \"com.shimpz.local.managed\"}}|{{index .Config.Labels \"com.shimpz.local.profile\"}}|{{index .Config.Labels \"com.shimpz.local.space-id\"}}|{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{index .Config.Labels \"com.shimpz.local.team-id\"}}|{{index .Config.Labels \"com.shimpz.local.assistant-id\"}}",
         "managed container",
     )? {
         let fields: Vec<_> = record.split('|').collect();
