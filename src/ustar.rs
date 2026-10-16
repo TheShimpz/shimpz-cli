@@ -2,12 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::source_package::{EntryKind, Error, InputEntry, reject, validate_icon};
+use crate::source_package::{EntryKind, Error, InputEntry, MAX_ICON_BYTES, reject, validate_icon};
 
 const BLOCK: usize = 512;
 const MAX_FILES: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_ICON_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 struct Record<'a> {

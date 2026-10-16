@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::ustar;
 
 const MAX_COLLECTED_FILES: usize = 10_000;
-const MAX_ICON_BYTES: u64 = 1_048_576;
+pub(crate) const MAX_ICON_BYTES: u64 = 1_048_576;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
