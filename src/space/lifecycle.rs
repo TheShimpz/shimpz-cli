@@ -52,6 +52,9 @@ use rollback::{Backup, backup_current, remove_backup};
 
 const UPDATE_PROGRESS: &str = "Checking for Shimpz Space updates...";
 const TEAM_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
+const NOT_INSTALLED: &str = "Shimpz Space is not installed; run shimpz install";
+const INSTALLED_BY_RELEASE_CLI: &str = "The release-bound CLI completed the installation.";
+const UNUSABLE_AUTHENTICATION_RECORD: &str = "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install";
 const STOP_PROGRESS: [&str; 3] = [
     "Checking the Shimpz Space...",
     "Stopping the Shimpz Space...",
@@ -407,7 +410,7 @@ impl Context {
             if release::valid_developer_release_ref(&release.reference)
                 && self.handoff_if_needed(&release, installed.as_ref(), false)?
             {
-                return Ok("The release-bound CLI completed the installation.".into());
+                return Ok(INSTALLED_BY_RELEASE_CLI.into());
             }
             // The acquisition bootstrap runs its verified CLI from outside the Space; that CLI becomes the managed
             // executable only here, under the lifecycle lock and after admission. Apply then retains it.
@@ -421,7 +424,7 @@ impl Context {
         } else if exact_release.is_none()
             && self.handoff_if_needed(&release, installed.as_ref(), false)?
         {
-            return Ok("The release-bound CLI completed the installation.".into());
+            return Ok(INSTALLED_BY_RELEASE_CLI.into());
         }
         if let Some(recommendation) = self
             .profile
@@ -480,7 +483,7 @@ impl Context {
 
     fn start(&self, options: &SpaceStart) -> Result<String, String> {
         if !self.paths.marker_is_current()? {
-            return Err("Shimpz Space is not installed; run shimpz install".into());
+            return Err(NOT_INSTALLED.into());
         }
         let installed = self.installed_state()?;
         // The inventory proof and the release resolution are independent, so the resolution runs beside it, its
@@ -576,7 +579,7 @@ impl Context {
 
     fn update(&self) -> Result<String, String> {
         if !self.paths.marker_is_current()? {
-            return Err("Shimpz Space is not installed; run shimpz install".into());
+            return Err(NOT_INSTALLED.into());
         }
         let installed = self.validate_installation_storage(self.installed_state()?)?;
         Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
@@ -605,7 +608,7 @@ impl Context {
 
     fn stop(&self) -> Result<String, String> {
         if !self.paths.marker_is_current()? {
-            return Err("Shimpz Space is not installed; run shimpz install".into());
+            return Err(NOT_INSTALLED.into());
         }
         let installed = state::read_installed(&self.paths, self.profile)?;
         state::stopped(&self.paths)?;
@@ -849,10 +852,9 @@ impl Context {
             .map_err(Some)?;
         output::progress("Verifying the Supervisor authentication record...");
         let authentication_error = match admin_authentication_state(candidate.port) {
-            Ok(AdminAuthenticationState::RecoveryRequired) if candidate.installed.is_some() => Some(
-                "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install"
-                    .to_owned(),
-            ),
+            Ok(AdminAuthenticationState::RecoveryRequired) if candidate.installed.is_some() => {
+                Some(UNUSABLE_AUTHENTICATION_RECORD.to_owned())
+            }
             Ok(AdminAuthenticationState::RecoveryRequired) => Some(
                 "the fresh release returned an invalid Supervisor authentication state".to_owned(),
             ),
@@ -969,9 +971,7 @@ impl Context {
             )
             .map_err(|error| candidate_admission_error(&error))?;
             if authentication_state == AdminAuthenticationState::RecoveryRequired {
-                return Err(candidate_admission_error(
-                    "the selected release cannot use the existing Supervisor authentication record; run shimpz reset --hard, then shimpz install",
-                ));
+                return Err(candidate_admission_error(UNUSABLE_AUTHENTICATION_RECORD));
             }
         }
         for download in downloads {
@@ -1538,10 +1538,7 @@ mod tests {
     fn a_fresh_developer_install_hands_off_to_the_cli_of_its_set_from_the_local_store() {
         let home = tempfile::tempdir().unwrap();
         let (context, target, outcome) = fresh_developer_install(home.path(), true);
-        assert_eq!(
-            outcome,
-            Ok("The release-bound CLI completed the installation.".into())
-        );
+        assert_eq!(outcome, Ok(INSTALLED_BY_RELEASE_CLI.into()));
         assert_eq!(
             fs::read_to_string(home.path().join("fixture/child-arguments")).unwrap(),
             format!("install {} --candidate\n", target.reference)
