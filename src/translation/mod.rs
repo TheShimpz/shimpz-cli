@@ -388,9 +388,9 @@ fn translate_message(
 ) -> Outcome {
     let mut reason = None;
     // The most characters the template's translation may have as written, which the provider is asked to fit.
-    let budget = catalog
-        .template_budget(id)
-        .unwrap_or_else(|| template.chars().count());
+    let Some(budget) = catalog.template_budget(id) else {
+        return Outcome::Refused(explain("pack_incomplete"));
+    };
     let floor = catalog.placeholder_characters(id);
     // A text admitted for a locale is kept, so a retry only has to bring the locales still refused within bounds.
     let mut admitted = Texts::new();

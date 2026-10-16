@@ -102,12 +102,8 @@ impl Catalog {
     /// The most characters a translation of message `id` may have as written: its bound, less every parameter's
     /// rendering budget, plus the characters of each `{placeholder}` the text keeps.
     pub(crate) fn template_budget(&self, id: &str) -> Option<usize> {
-        let message = self.entries.iter().find(|message| message.id == id)?;
-        let fields = message
-            .params
-            .iter()
-            .map(|param| param.name.len() + 2)
-            .sum::<usize>();
+        let message = self.message(id)?;
+        let fields = message.placeholder_characters();
         let parameters = message
             .params
             .iter()
@@ -122,26 +118,18 @@ impl Catalog {
 
     /// The characters every translation of message `id` keeps unchanged: its written placeholders.
     pub(crate) fn placeholder_characters(&self, id: &str) -> usize {
-        self.entries
-            .iter()
-            .find(|message| message.id == id)
-            .map_or(0, |message| {
-                message
-                    .params
-                    .iter()
-                    .map(|param| param.name.len() + 2)
-                    .sum()
-            })
+        self.message(id).map_or(0, Message::placeholder_characters)
     }
 
     /// The first reason `text` is not an admissible translation of message `id`, mirroring the protocol codes.
     pub(crate) fn translation_error(&self, id: &str, text: &str) -> Option<&'static str> {
-        self.entries
-            .iter()
-            .find(|message| message.id == id)
-            .map_or(Some("pack_incomplete"), |message| {
-                message.template_error(text)
-            })
+        self.message(id).map_or(Some("pack_incomplete"), |message| {
+            message.template_error(text)
+        })
+    }
+
+    fn message(&self, id: &str) -> Option<&Message> {
+        self.entries.iter().find(|message| message.id == id)
     }
 
     /// The canonical pack of this catalog under `policy`, with exactly one admissible text per message and locale.
@@ -172,6 +160,11 @@ impl Catalog {
 }
 
 impl Message {
+    /// The characters of every written `{placeholder}`, which every translation keeps unchanged.
+    fn placeholder_characters(&self) -> usize {
+        self.params.iter().map(|param| param.name.len() + 2).sum()
+    }
+
     fn valid(&self) -> bool {
         let names = self
             .params
