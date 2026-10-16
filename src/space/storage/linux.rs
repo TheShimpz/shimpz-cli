@@ -812,11 +812,10 @@ fn reset_marker(paths: &Paths) -> Result<Option<PathBuf>, String> {
     } else {
         None
     };
-    if let Some(marker) = &marker {
-        exact_regular_file(marker)?;
-        if !storage_marker_is_valid(marker)? {
-            return Err("encrypted Local storage marker is invalid".into());
-        }
+    if let Some(marker) = &marker
+        && !storage_marker_is_valid(marker)?
+    {
+        return Err("encrypted Local storage marker is invalid".into());
     }
     Ok(marker)
 }
@@ -863,7 +862,6 @@ fn reset_incomplete(paths: &Paths) -> Result<(), String> {
     if !paths.storage_marker.exists() {
         return remove_if_empty(&paths.security);
     }
-    exact_regular_file(&paths.storage_marker)?;
     if !storage_marker_is_valid(&paths.storage_marker)? {
         return Err("encrypted Local storage marker is invalid".into());
     }
@@ -940,7 +938,6 @@ fn reconcile_storage_marker(paths: &Paths) -> Result<(), String> {
     if paths.storage_marker.exists() {
         return Err("the encrypted Local storage has an unexpected marker temporary".into());
     }
-    exact_regular_file(&temporary)?;
     if !storage_marker_is_valid(&temporary)? {
         return Err("encrypted Local storage marker temporary is invalid".into());
     }
@@ -1052,9 +1049,7 @@ fn validate_metadata(paths: &Paths) -> Result<(), String> {
 }
 
 fn validate_metadata_with_marker(paths: &Paths, marker: &Path) -> Result<(), String> {
-    exact_regular_file(marker)?;
     exact_regular_file(&paths.pool_image)?;
-    exact_regular_file(&paths.pool_uuid)?;
     if !storage_marker_is_valid(marker)? {
         return Err("encrypted Local storage marker is invalid".into());
     }
