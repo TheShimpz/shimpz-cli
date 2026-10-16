@@ -10,6 +10,12 @@ use zeroize::Zeroizing;
 
 use crate::toolchain;
 
+/// Refusals several Python SDK calls share, so each reads the same wherever it fails.
+const UV_UNAVAILABLE: &str = "managed uv cannot run";
+const EXECUTION_FAILED: &str = "Python SDK execution failed";
+const INPUT_UNSENT: &str = "Action input cannot be sent";
+const FRAME_TOO_LARGE: &str = "Python SDK response frame is larger than 512 KiB";
+const INVALID_OUTPUT: &str = "Python SDK returned invalid output";
 /// The Python version every Action runs on and every dependency set resolves for.
 pub(crate) const PYTHON_VERSION: &str = "3.14";
 /// The exact Shimpz SDK every Action runs with and every new Assistant declares.
@@ -203,13 +209,13 @@ fn conversation(
     answer: &mut dyn FnMut(&Value) -> Zeroizing<Vec<u8>>,
 ) -> Result<String, String> {
     command.stdin(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
+    let mut child = command.spawn().map_err(|_| UV_UNAVAILABLE)?;
     let (Some(destination), Some(source), Some(errors)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("Python SDK execution failed".into());
+        return Err(EXECUTION_FAILED.into());
     };
     let stderr = std::thread::spawn(move || drain(errors, true).1);
     let (lines_out, lines_in) = std::sync::mpsc::channel::<Zeroizing<Vec<u8>>>();
@@ -218,13 +224,13 @@ fn conversation(
     first.push(b'\n');
     let outcome = lines_out
         .send(first)
-        .map_err(|_| "Action input cannot be sent".to_owned())
+        .map_err(|_| INPUT_UNSENT.to_owned())
         .and_then(|()| converse(BufReader::new(source), &lines_out, answer));
     drop(lines_out);
     if outcome.is_err() {
         let _ = child.kill();
     }
-    let status = child.wait().map_err(|_| "Python SDK execution failed")?;
+    let status = child.wait().map_err(|_| EXECUTION_FAILED)?;
     let _ = writer.join();
     let stderr = stderr.join().unwrap_or(1);
     let terminal = match outcome {
@@ -308,9 +314,9 @@ fn read_line(
     source
         .take(limit + 1)
         .read_until(b'\n', &mut line)
-        .map_err(|_| "Python SDK execution failed".to_owned())?;
+        .map_err(|_| EXECUTION_FAILED.to_owned())?;
     if line.len() as u64 > MAX_RESPONSE_BYTES && line.last() != Some(&b'\n') {
-        return Err("Python SDK response frame is larger than 512 KiB".into());
+        return Err(FRAME_TOO_LARGE.into());
     }
     if line.pop() != Some(b'\n') {
         return Err(PRIVATE_BRIDGE_FAILURE.into());
@@ -326,7 +332,7 @@ fn exchange(mut command: Command, input: Option<BridgeInput>) -> Result<String, 
     } else {
         command.stdin(Stdio::null());
     }
-    let mut child = command.spawn().map_err(|_| "managed uv cannot run")?;
+    let mut child = command.spawn().map_err(|_| UV_UNAVAILABLE)?;
     let destination = child.stdin.take();
     let withheld = input.as_ref().and_then(|input| input.withheld);
     std::thread::scope(|scope| {
@@ -337,7 +343,7 @@ fn exchange(mut command: Command, input: Option<BridgeInput>) -> Result<String, 
         let response = finish(child, withheld)?;
         match writer.map(std::thread::ScopedJoinHandle::join) {
             None | Some(Ok(Ok(()))) => Ok(response),
-            Some(_) => Err("Action input cannot be sent".into()),
+            Some(_) => Err(INPUT_UNSENT.into()),
         }
     })
 }
@@ -357,14 +363,14 @@ fn finish(mut child: Child, withheld: Option<&'static str>) -> Result<String, St
     if stdout.len() as u64 > MAX_RESPONSE_BYTES {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("Python SDK response frame is larger than 512 KiB".into());
+        return Err(FRAME_TOO_LARGE.into());
     }
-    let status = child.wait().map_err(|_| "Python SDK execution failed")?;
+    let status = child.wait().map_err(|_| EXECUTION_FAILED)?;
     let (stderr, stderr_bytes) = stderr
         .and_then(|reader| reader.join().ok())
         .unwrap_or((Vec::new(), 1));
     if !matches!(read, Some(Ok(_))) {
-        return Err("Python SDK execution failed".into());
+        return Err(EXECUTION_FAILED.into());
     }
     match (status.success(), private && stderr_bytes > 0) {
         (true, false) => decode(stdout),
@@ -408,11 +414,9 @@ fn bridge_failure(
 }
 
 fn decode(stdout: Vec<u8>) -> Result<String, String> {
-    let text =
-        String::from_utf8(stdout).map_err(|_| "Python SDK returned invalid output".to_owned())?;
+    let text = String::from_utf8(stdout).map_err(|_| INVALID_OUTPUT.to_owned())?;
     let trimmed = text.trim_end();
-    serde_json::from_str::<Value>(trimmed)
-        .map_err(|_| "Python SDK returned invalid output".to_owned())?;
+    serde_json::from_str::<Value>(trimmed).map_err(|_| INVALID_OUTPUT.to_owned())?;
     Ok(trimmed.to_owned())
 }
 
@@ -444,7 +448,7 @@ impl Requirements {
             .arg(&requirements.path)
             .args(["--python-version", PYTHON_VERSION, "--quiet", "--no-config"])
             .output()
-            .map_err(|_| "managed uv cannot run")?;
+            .map_err(|_| UV_UNAVAILABLE)?;
         if output.status.success() {
             Ok(requirements)
         } else {
