@@ -89,6 +89,15 @@ impl Package {
     pub(crate) fn admits(self, value: &str) -> bool {
         self.published(value) || self.developer(value)
     }
+
+    /// The form a member of a release set may take: only a developer set may run one from this host's image store.
+    pub(crate) fn admitted(self, value: &str, developer: bool) -> bool {
+        if developer {
+            self.admits(value)
+        } else {
+            self.published(value)
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -235,12 +244,7 @@ pub(crate) fn parse(
         },
     };
     for (key, package, value) in release.members() {
-        let admitted = if developer {
-            package.admits(value)
-        } else {
-            package.published(value)
-        };
-        if !admitted {
+        if !package.admitted(value, developer) {
             return Err(format!("the Local release {key} image is invalid"));
         }
     }

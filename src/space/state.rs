@@ -197,13 +197,7 @@ fn validate_environment(
         return Err("the installed Local host profile is invalid".into());
     }
     for (key, package) in IMAGE_KEYS {
-        // Only a developer release may run a member from this host's image store.
-        let admitted = if developer {
-            package.admits(values[key])
-        } else {
-            package.published(values[key])
-        };
-        if !admitted {
+        if !package.admitted(values[key], developer) {
             return Err("an installed Local component image is invalid".into());
         }
     }
