@@ -5,6 +5,8 @@ use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
+use crate::python::SDK_REQUIREMENT;
+
 const DEFAULT_ICON_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQAAQAAAABXZhYuAAAAlklEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADvBgQeAAEN3jhkAAAAAElFTkSuQmCC";
 
 const GITIGNORE: &str = "\
@@ -129,7 +131,7 @@ version = \"0.1.0\"
 description = \"A Hello World Assistant for Shimpz\"
 requires-python = \">=3.14\"
 dependencies = [
-  \"shimpz==0.7.2\",
+  \"{SDK_REQUIREMENT}\",
 ]
 
 [tool.ruff]

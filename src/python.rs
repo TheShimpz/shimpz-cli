@@ -10,8 +10,12 @@ use zeroize::Zeroizing;
 
 use crate::toolchain;
 
-const PYTHON_VERSION: &str = "3.14";
-const SDK_REQUIREMENT: &str = "shimpz==0.7.2";
+/// The Python version every Action runs on and every dependency set resolves for.
+pub(crate) const PYTHON_VERSION: &str = "3.14";
+/// The exact Shimpz SDK every Action runs with and every new Assistant declares.
+pub(crate) const SDK_REQUIREMENT: &str = "shimpz==0.7.2";
+/// The only package index dependencies resolve from.
+pub(crate) const PACKAGE_INDEX: &str = "https://pypi.org/simple";
 const PRIVATE_BRIDGE_FAILURE: &str = "the Action process ended without a response frame";
 /// The largest response frame Team admits from one Action process.
 const MAX_RESPONSE_BYTES: u64 = 512 * 1_024;
@@ -155,7 +159,7 @@ fn command<const SIZE: usize>(
     command.args([
         "run",
         "--default-index",
-        "https://pypi.org/simple",
+        PACKAGE_INDEX,
         "--isolated",
         "--no-project",
     ]);
@@ -434,12 +438,7 @@ impl Requirements {
         }
         let requirements = Self::temporary()?;
         let output = toolchain::uv()?
-            .args([
-                "pip",
-                "compile",
-                "--default-index",
-                "https://pypi.org/simple",
-            ])
+            .args(["pip", "compile", "--default-index", PACKAGE_INDEX])
             .arg(metadata)
             .args(["--output-file"])
             .arg(&requirements.path)

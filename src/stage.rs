@@ -12,6 +12,7 @@ use toml::Value;
 
 use crate::language_pack::{self, Catalog, Pack};
 use crate::manifest::{self, PublicationIdentity};
+use crate::python::{PACKAGE_INDEX, PYTHON_VERSION};
 use crate::snapshot_docker::{self, STAGE};
 use crate::space::command::Tool;
 use crate::space::{docker, host, paths::Paths};
@@ -20,7 +21,6 @@ use crate::{
     translation,
 };
 
-const PYTHON_VERSION: &str = "3.14";
 pub(crate) const LOCAL_STAGE_LABEL: &str = "org.shimpz.local.stage";
 pub(crate) const LOCAL_STAGE_VALUE: &str = "assistant-v3";
 pub(crate) const ASSISTANT_LABEL: &str = "org.shimpz.assistant.id";
@@ -213,7 +213,7 @@ fn compile_requirements(context: &Path) -> Result<Vec<u8>, String> {
             "pip",
             "compile",
             "--default-index",
-            "https://pypi.org/simple",
+            PACKAGE_INDEX,
             "--generate-hashes",
             "--no-annotate",
             "--no-config",
