@@ -932,7 +932,7 @@ mod tests {
             Err("install accepts only a Local release reference".into())
         );
         let developer = format!("localhost/shimpz-local-release@sha256:{}", "b".repeat(64));
-        // The owner names one exact published set, or a developer set from this host's image store.
+        // The Supervisor names one exact published set, or a developer set from this host's image store.
         for reference in [&release, &developer] {
             for candidate in [false, true] {
                 let mut arguments = vec!["install", reference.as_str()];
