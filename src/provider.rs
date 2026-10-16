@@ -19,7 +19,7 @@ use ureq::http::Request;
 use zeroize::Zeroizing;
 
 use crate::manifest::Placement;
-use crate::route;
+use crate::route::{self, METHODS};
 
 pub(crate) const MAX_CALLS: usize = 16;
 const MAX_URL_CHARACTERS: usize = 8192;
@@ -29,7 +29,6 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 const MAX_TIMEOUT_MS: u64 = 30_000;
-const METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 const FIELDS: [&str; 6] = ["type", "method", "url", "headers", "body", "timeout_ms"];
 /// Fields the broker owns in every call, so neither an Action nor a placement may set one (compared without case).
 pub(crate) const RESERVED_HEADERS: [&str; 12] = [
@@ -287,10 +286,7 @@ fn route_matches(pattern: &str, path: &str) -> bool {
         let Some((id, tail)) = rest.split_at_checked(32) else {
             return false;
         };
-        if !id
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        {
+        if !crate::digest::is_lower_hex(id, 32) {
             return false;
         }
         let Some(tail) = tail.strip_prefix(literal) else {

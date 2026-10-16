@@ -9,7 +9,8 @@
 
 use serde_json::{Map, Value};
 
-const METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+/// The HTTP methods a route, and so a provider call, may use.
+pub(crate) const METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 const MAX_ROUTES: usize = 32;
 const MAX_PATH: usize = 512;
 const MAX_LITERAL: usize = 64;
