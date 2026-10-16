@@ -212,10 +212,15 @@ fn refusal_reason(catalog: &Catalog, id: &str, texts: &BTreeMap<String, String>)
         .filter_map(|(locale, text)| {
             catalog
                 .translation_error(id, text)
-                .map(|code| format!("{locale} {}", explain(code)))
+                .map(|code| refused_locale(locale, code))
         })
         .collect::<Vec<_>>();
     (!refused.is_empty()).then(|| refused.join(", "))
+}
+
+/// One refused locale with its protocol code, never the text.
+fn refused_locale(locale: &str, code: &str) -> String {
+    format!("{locale} {}", explain(code))
 }
 
 /// A protocol refusal code with what it means for the Creator's copy.
@@ -404,16 +409,19 @@ fn translate_message(
         {
             // Every complete answer adds the locales it fits; one already admitted keeps its earlier text.
             Ok(texts) if texts.keys().map(String::as_str).eq(LOCALES) => {
-                let refused = refusal_reason(catalog, id, &texts);
+                let mut refused = Vec::new();
                 for (locale, text) in texts {
-                    if catalog.translation_error(id, &text).is_none() {
-                        admitted.entry(locale).or_insert(text);
+                    match catalog.translation_error(id, &text) {
+                        None => {
+                            admitted.entry(locale).or_insert(text);
+                        }
+                        Some(code) => refused.push(refused_locale(&locale, code)),
                     }
                 }
                 if admitted.keys().map(String::as_str).eq(LOCALES) {
                     return Outcome::Translated(admitted);
                 }
-                refused
+                Some(refused.join(", "))
             }
             Ok(texts) => refusal_reason(catalog, id, &texts),
             Err(ProviderError::Refused) => Some(MALFORMED.to_owned()),
