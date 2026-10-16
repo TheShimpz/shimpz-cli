@@ -16,7 +16,7 @@ use super::evidence::{
     MIN_CRYPTSETUP_VERSION, cryptsetup_version, cryptsetup_version_supported, luks_dump_valid,
     luks_unlock_credentials_valid,
 };
-use crate::private_file;
+use crate::private_file::{self, ReadFailure};
 use crate::space::command::{self, Tool, one_line};
 use crate::space::confirm;
 use crate::space::graph::{VOLUMES, Volume};
@@ -1188,9 +1188,15 @@ const STORAGE_RECORD_BYTES: u64 = 64;
 /// Read a storage marker or pool UUID record, which this CLI writes only through [`write_private`], through its
 /// admitted handle: never a link, a file of another owner or mode, or more than [`STORAGE_RECORD_BYTES`].
 fn read_storage_record(path: &Path) -> Result<String, String> {
-    let name = format!("Local storage file {}", path.display());
-    private_file::read_record(path, STORAGE_RECORD_BYTES, &name)?
-        .ok_or_else(|| format!("invalid Local storage file: {}", path.display()))
+    private_file::read_admitted_text(path, STORAGE_RECORD_BYTES, private_file::admit_record)
+        .map_err(|failure| match failure {
+            ReadFailure::Link | ReadFailure::NotAdmitted(_) | ReadFailure::Oversized => {
+                format!("invalid Local storage file: {}", path.display())
+            }
+            ReadFailure::Open(error) | ReadFailure::Inspect(error) | ReadFailure::Read(error) => {
+                io_error(error)
+            }
+        })
 }
 
 fn storage_marker_is_valid(path: &Path) -> Result<bool, String> {
