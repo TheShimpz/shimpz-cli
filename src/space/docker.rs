@@ -81,6 +81,18 @@ const RUNTIME_STATE_OWNER_UID: u32 = 10001;
 /// Admin's runtime identity: its helpers run as it, so they own exactly what Admin itself writes and reads.
 const ADMIN_IDENTITY: &str = "1000:1000";
 
+/// The Compose options that select this Space's project directory, environment, and graph.
+fn compose_project(paths: &Paths) -> [&OsStr; 6] {
+    [
+        OsStr::new("--project-directory"),
+        paths.home.as_os_str(),
+        OsStr::new("--env-file"),
+        paths.environment.as_os_str(),
+        OsStr::new("--file"),
+        paths.compose.as_os_str(),
+    ]
+}
+
 /// First proves every volume root below `root` and every entry below it belongs to `owner`, never following a link; a
 /// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
 /// and empty its own directories, leaving every file mode unchanged, and delete everything below the volume roots.
@@ -463,12 +475,7 @@ impl Engine {
                 .arg("compose")
                 .arg("--progress")
                 .arg("plain")
-                .arg("--project-directory")
-                .arg(&paths.home)
-                .arg("--env-file")
-                .arg(&paths.environment)
-                .arg("--file")
-                .arg(&paths.compose)
+                .args(compose_project(paths))
                 .args(COMPOSE_UP)
                 .args(if selection.is_empty() {
                     &[][..]
@@ -524,18 +531,12 @@ impl Engine {
         ]) else {
             return false;
         };
-        let Ok(configuration) = self.run_output([
-            OsStr::new("compose"),
-            OsStr::new("--project-directory"),
-            paths.home.as_os_str(),
-            OsStr::new("--env-file"),
-            paths.environment.as_os_str(),
-            OsStr::new("--file"),
-            paths.compose.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("--hash"),
-            OsStr::new(graph::ACCOUNT_EGRESS_INIT),
-        ]) else {
+        let Ok(configuration) = self.run_output(
+            [OsStr::new("compose")]
+                .into_iter()
+                .chain(compose_project(paths))
+                .chain(["config", "--hash", graph::ACCOUNT_EGRESS_INIT].map(OsStr::new)),
+        ) else {
             return false;
         };
         completed_init_matches(&records, &configuration) && self.account_capability_reads()
@@ -574,12 +575,7 @@ impl Engine {
         let mut command = Command::new(&self.docker);
         command
             .arg("compose")
-            .arg("--project-directory")
-            .arg(&paths.home)
-            .arg("--env-file")
-            .arg(&paths.environment)
-            .arg("--file")
-            .arg(&paths.compose)
+            .args(compose_project(paths))
             .args(arguments)
             .stdin(Stdio::null());
         quiet_status(&mut command, "Docker Compose", DOCKER_COMPOSE)
