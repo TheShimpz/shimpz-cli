@@ -605,7 +605,12 @@ fn exported_file(
 
 fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Result<(), String> {
     let identity = expected.identity;
-    let declared_creators = declared_creators(identity);
+    let labels = stage_labels(
+        identity,
+        expected.source_digest,
+        expected.build_digest,
+        expected.discovery,
+    );
     let result = STAGE.output(
         docker,
         [
@@ -621,25 +626,19 @@ fn validate_image(docker: &Path, image_id: &str, expected: &ExpectedImage) -> Re
     let architecture = expected.platform.rsplit_once('/').map(|(_, value)| value);
     let tags = format!("[\"{}\"]", expected.reference);
     let digests = fields.get(2).copied().unwrap_or_default();
+    let image = [
+        image_id,
+        architecture.unwrap_or_default(),
+        digests,
+        tags.as_str(),
+    ];
+    // The labels are compared with exactly the values the build set, in the order the template prints them.
+    let declared = IMAGE_INSPECT_LABELS
+        .iter()
+        .map(|label| labels.get(label).map_or("", String::as_str));
     if !result.status.success()
         || !local_digests_valid(digests, &identity.id, image_id)
-        || fields
-            != [
-                image_id,
-                architecture.unwrap_or_default(),
-                digests,
-                tags.as_str(),
-                LOCAL_STAGE_VALUE,
-                identity.id.as_str(),
-                identity.name.as_str(),
-                identity.summary.as_str(),
-                declared_creators.as_str(),
-                expected.source_digest,
-                identity.version.as_str(),
-                expected.build_digest,
-                expected.discovery.actions.join(",").as_str(),
-                expected.discovery.integrations.join(",").as_str(),
-            ]
+        || !fields.iter().copied().eq(image.into_iter().chain(declared))
     {
         return Err("the staged image does not match its Local snapshot contract".into());
     }
