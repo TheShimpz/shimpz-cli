@@ -357,8 +357,7 @@ fn current_image(
         ],
     )?;
     if !result.status.success() {
-        let detail = String::from_utf8_lossy(&result.stderr);
-        if detail.contains("No such image") || detail.contains("No such object") {
+        if snapshot_docker::image_missing(&result) {
             return Ok(None);
         }
         return Err(docker_failure(

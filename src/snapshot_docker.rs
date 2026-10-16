@@ -70,6 +70,12 @@ impl Calls {
     }
 }
 
+/// Whether Docker refused because the inspected image does not exist.
+pub(crate) fn image_missing(result: &Output) -> bool {
+    let detail = String::from_utf8_lossy(&result.stderr);
+    detail.contains("No such image") || detail.contains("No such object")
+}
+
 /// The last non-blank line Docker wrote to stderr, trimmed.
 pub(crate) fn last_error_line(result: &Output) -> Option<String> {
     String::from_utf8_lossy(&result.stderr)

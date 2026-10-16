@@ -153,11 +153,7 @@ fn image_absent(docker: &Path, image_id: &str) -> Result<bool, String> {
         docker,
         ["image", "inspect", "--format", "{{.Id}}", image_id],
     )?;
-    if result.status.success() {
-        return Ok(false);
-    }
-    let detail = String::from_utf8_lossy(&result.stderr);
-    Ok(detail.contains("No such image") || detail.contains("No such object"))
+    Ok(!result.status.success() && snapshot_docker::image_missing(&result))
 }
 
 fn removal_success(assistant_id: &str, removed: usize) -> String {
