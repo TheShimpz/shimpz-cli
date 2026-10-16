@@ -1243,6 +1243,7 @@ mod tests {
     use super::handoff::admit_before_handoff;
     use super::*;
     use crate::space::release::Release;
+    use crate::space::state::ReleaseOutcome;
 
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -2084,7 +2085,7 @@ mod tests {
         .unwrap();
         state::write_private(
             &paths.status,
-            &state::status_document(&requested, "updated").unwrap(),
+            &state::status_document(&requested, ReleaseOutcome::Updated).unwrap(),
         )
         .unwrap();
         assert!(finish_deploy_request(&paths, profile, &request, || Ok("ready".into())).is_ok());
@@ -2769,12 +2770,18 @@ mod tests {
             ordinal: 2,
             port: 7777,
         };
-        assert_eq!(release_outcome(&current, Some(&installed)), "current");
+        assert_eq!(
+            release_outcome(&current, Some(&installed)),
+            ReleaseOutcome::Current
+        );
         assert_eq!(
             release_outcome(&release(3, 'c'), Some(&installed)),
-            "updated"
+            ReleaseOutcome::Updated
         );
-        assert_eq!(release_outcome(&release(1, 'a'), None), "updated");
+        assert_eq!(
+            release_outcome(&release(1, 'a'), None),
+            ReleaseOutcome::Updated
+        );
     }
 
     #[test]
@@ -2946,7 +2953,7 @@ mod tests {
         let (context, backup) = installed_space(home, docker.clone());
         remove_backup(Some(backup)).unwrap();
         let installed = state::read_installed(&context.paths, HostProfile::MacOs).unwrap();
-        state::write_status(&context.paths, &release(1, 'a'), "current").unwrap();
+        state::write_status(&context.paths, &release(1, 'a'), ReleaseOutcome::Current).unwrap();
         let mut target = release(2, 'b');
         // The committed release-2 environment the child installs when its apply reaches the commit.
         fs::copy(&context.paths.environment, root.join("release-1.env")).unwrap();
@@ -3099,14 +3106,14 @@ mod tests {
 
         // Positive non-commit: no success record, a rollback record, another release, or no environment.
         assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
-        state::write_status(paths, &installed, "rollback-needed").unwrap();
+        state::write_status(paths, &installed, ReleaseOutcome::RollbackNeeded).unwrap();
         assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
-        state::write_status(paths, &release(2, 'b'), "updated").unwrap();
+        state::write_status(paths, &release(2, 'b'), ReleaseOutcome::Updated).unwrap();
         assert_eq!(evidence(&installed), CommitEvidence::NotCommitted);
         assert_eq!(evidence(&release(2, 'b')), CommitEvidence::NotCommitted);
 
         // A success record of the live release proves the commit, even after a backward clock change.
-        state::write_status(paths, &installed, "current").unwrap();
+        state::write_status(paths, &installed, ReleaseOutcome::Current).unwrap();
         assert_eq!(evidence(&installed), CommitEvidence::Committed);
         record(serde_json::json!({
             "release": installed.reference, "ordinal": 1, "checked_at": u64::MAX, "outcome": "updated",
@@ -3146,7 +3153,7 @@ mod tests {
         assert!(unknown(evidence(&installed)));
         fs::remove_file(&paths.status).unwrap();
 
-        state::write_status(paths, &installed, "current").unwrap();
+        state::write_status(paths, &installed, ReleaseOutcome::Current).unwrap();
         assert_eq!(evidence(&installed), CommitEvidence::Committed);
         let environment = fs::read_to_string(&paths.environment).unwrap();
         let refused = |evidence: CommitEvidence| {

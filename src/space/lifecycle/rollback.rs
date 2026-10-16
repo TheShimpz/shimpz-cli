@@ -8,6 +8,7 @@ use crate::space::docker::{COMPOSE_UP, ProjectionFailure, ResolvedRelease};
 use crate::space::host::HostProfile;
 use crate::space::paths::Paths;
 use crate::space::resources::Inventory;
+use crate::space::state::ReleaseOutcome;
 use crate::space::storage::linux;
 use crate::space::{graph, members, scheduler, state};
 
@@ -42,7 +43,7 @@ impl Context {
         match self.ensure_storage(&installed.space_id, false, self.scheduled)? {
             linux::Admission::Verified => {}
             linux::Admission::Locked => {
-                state::write_status(&self.paths, release, "rollback-needed")?;
+                state::write_status(&self.paths, release, ReleaseOutcome::RollbackNeeded)?;
                 if memory_error.is_some() {
                     return Err(format!(
                         "the previous release remained stopped because storage was locked, and {}",
@@ -80,7 +81,7 @@ impl Context {
             }
         };
         // Persist and project independently: a failed local write must not leave Admin reporting the abandoned release.
-        let status = state::status_document(release, "rollback-needed")?;
+        let status = state::status_document(release, ReleaseOutcome::RollbackNeeded)?;
         let persisted = state::write_private(&self.paths.status, &status);
         let unreaped = if restored {
             self.project_rollback_status(release, &status)

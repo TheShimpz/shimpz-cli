@@ -306,25 +306,52 @@ pub(crate) fn write_marker(paths: &Paths) -> Result<(), String> {
     write_private(&paths.marker, &format!("{MARKER}\n"))
 }
 
+/// The closed set of outcomes a Local release status records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReleaseOutcome {
+    /// The installed release was reconciled again.
+    Current,
+    /// Another release was installed.
+    Updated,
+    /// The release failed and the earlier one must be restored.
+    RollbackNeeded,
+}
+
+impl ReleaseOutcome {
+    const ALL: [Self; 3] = [Self::Current, Self::Updated, Self::RollbackNeeded];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Updated => "updated",
+            Self::RollbackNeeded => "rollback-needed",
+        }
+    }
+
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|outcome| outcome.name() == name)
+    }
+}
+
 pub(crate) fn write_status(
     paths: &Paths,
     release: &ResolvedRelease,
-    outcome: &str,
+    outcome: ReleaseOutcome,
 ) -> Result<String, String> {
     let document = status_document(release, outcome)?;
     write_private(&paths.status, &document)?;
     Ok(document)
 }
 
-pub(crate) fn status_document(release: &ResolvedRelease, outcome: &str) -> Result<String, String> {
-    if !matches!(outcome, "current" | "updated" | "rollback-needed") {
-        return Err("the Local release status outcome is invalid".into());
-    }
+pub(crate) fn status_document(
+    release: &ResolvedRelease,
+    outcome: ReleaseOutcome,
+) -> Result<String, String> {
     let document = serde_json::to_string(&serde_json::json!({
         "release": release.reference,
         "ordinal": release.metadata.ordinal,
         "checked_at": unix_timestamp()?,
-        "outcome": outcome,
+        "outcome": outcome.name(),
     }))
     .map_err(|_| "could not serialize Local release status".to_owned())?;
     if document.len() > 1_024 {

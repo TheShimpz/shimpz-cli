@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::paths::Paths;
 use super::release::RELEASE_REPOSITORY;
-use super::state::{self, Installed};
+use super::state::{self, Installed, ReleaseOutcome};
 use crate::{digest, private_file};
 
 /// Full resolution and health repair still runs this often even when the release is unchanged.
@@ -153,22 +153,25 @@ struct Status {
     release: String,
     ordinal: u64,
     checked_at: u64,
-    outcome: String,
+    outcome: ReleaseOutcome,
 }
 
 impl Status {
     fn reconciles(&self, release_ref: &str, ordinal: u64) -> bool {
         self.release == release_ref
             && self.ordinal == ordinal
-            && matches!(self.outcome.as_str(), "current" | "updated")
+            && matches!(
+                self.outcome,
+                ReleaseOutcome::Current | ReleaseOutcome::Updated
+            )
     }
 }
 
 fn parse_status(document: &str) -> Option<Status> {
     let value: Value = serde_json::from_str(document).ok()?;
     let object = value.as_object()?;
-    let outcome = object.get("outcome")?.as_str()?;
-    if object.len() != 4 || !matches!(outcome, "current" | "updated" | "rollback-needed") {
+    let outcome = ReleaseOutcome::parse(object.get("outcome")?.as_str()?)?;
+    if object.len() != 4 {
         return None;
     }
     let release = object.get("release")?.as_str()?;
@@ -180,7 +183,7 @@ fn parse_status(document: &str) -> Option<Status> {
         release: release.to_owned(),
         ordinal,
         checked_at: object.get("checked_at")?.as_u64()?,
-        outcome: outcome.to_owned(),
+        outcome,
     })
 }
 

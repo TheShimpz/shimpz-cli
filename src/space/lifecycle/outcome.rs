@@ -3,7 +3,7 @@
 use crate::space::docker::ResolvedRelease;
 use crate::space::graph;
 use crate::space::scheduler;
-use crate::space::state::Installed;
+use crate::space::state::{Installed, ReleaseOutcome};
 
 pub(super) const SCHEDULED_STOPPED: &str = "Shimpz Space is stopped.\nNext: shimpz start";
 
@@ -16,11 +16,11 @@ pub(super) const STORAGE_LOCKED: &str =
 pub(super) fn release_outcome(
     release: &ResolvedRelease,
     installed: Option<&Installed>,
-) -> &'static str {
+) -> ReleaseOutcome {
     if installed.is_some_and(|current| current.release_ref == release.reference) {
-        "current"
+        ReleaseOutcome::Current
     } else {
-        "updated"
+        ReleaseOutcome::Updated
     }
 }
 
