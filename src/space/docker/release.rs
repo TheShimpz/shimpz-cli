@@ -26,9 +26,6 @@ fn release_key() -> &'static str {
     release::test_signing::public_key()
 }
 
-/// The largest release metadata document a set may carry.
-const MAX_RELEASE_METADATA_BYTES: u64 = 2_048;
-
 /// Whether `path` is itself a regular file, not a link, directory, FIFO, or device.
 fn regular_file(path: &Path) -> bool {
     path.symlink_metadata()
@@ -37,7 +34,7 @@ fn regular_file(path: &Path) -> bool {
 
 /// Read copied release metadata only when it is a regular file of bounded size, admitted through the open handle.
 fn read_metadata(path: &Path) -> Result<String, String> {
-    private_file::read_admitted_text(path, MAX_RELEASE_METADATA_BYTES, private_file::regular)
+    private_file::read_admitted_text(path, release::MAX_METADATA_BYTES, private_file::regular)
         .map_err(|failure| match failure {
             ReadFailure::Link | ReadFailure::NotAdmitted(_) | ReadFailure::Inspect(_) => {
                 "the Local release metadata is not a regular file".to_owned()

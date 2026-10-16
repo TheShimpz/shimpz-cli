@@ -100,6 +100,9 @@ impl Package {
     }
 }
 
+/// The largest release metadata document a set may carry.
+pub(crate) const MAX_METADATA_BYTES: u64 = 2_048;
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Release {
     pub(crate) ordinal: u64,
@@ -194,7 +197,11 @@ pub(crate) fn parse(
     } else {
         return Err("the Local release reference is invalid".into());
     };
-    let values = key_values(document, 2_048, "the Local release metadata is malformed")?;
+    let values = key_values(
+        document,
+        MAX_METADATA_BYTES,
+        "the Local release metadata is malformed",
+    )?;
     let keys = KEYS
         .iter()
         .filter(|key| !developer || !PUBLISHED_ONLY_KEYS.contains(key));
