@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::args::{SpaceInstall, SpaceReset, SpaceStart};
 use crate::output::{self, Withheld};
-use crate::private_file;
+use crate::private_file::{self, ReadFailure};
 
 use super::deploy;
 use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
@@ -204,12 +204,22 @@ pub(crate) fn status() -> Result<String, String> {
 /// release still reads as not current instead of refusing.
 const MAX_GRAPH_BYTES: u64 = 256 * 1024;
 
+/// Whether the installed graph is exactly the one this CLI renders. It is read only as a private lifecycle record.
 fn installed_graph_is_current(paths: &Paths, profile: HostProfile) -> Result<bool, String> {
-    let expected = graph::render(profile.storage());
-    Ok(
-        private_file::read_record(&paths.compose, MAX_GRAPH_BYTES, "the installed Local graph")?
-            .is_some_and(|actual| actual == expected),
-    )
+    match private_file::read_admitted_text(
+        &paths.compose,
+        MAX_GRAPH_BYTES,
+        private_file::admit_record,
+    ) {
+        Ok(actual) => Ok(actual == graph::render(profile.storage())),
+        Err(ReadFailure::Open(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(ReadFailure::Link | ReadFailure::NotAdmitted(_) | ReadFailure::Oversized) => {
+            Err("the installed Local graph is not a private record".into())
+        }
+        Err(ReadFailure::Open(error) | ReadFailure::Inspect(error) | ReadFailure::Read(error)) => {
+            Err(format!("could not read the installed Local graph: {error}"))
+        }
+    }
 }
 
 /// Observes the inventory-proven containers in bounded `docker inspect` batches. A static component the inventory
@@ -1957,7 +1967,10 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .unwrap();
-        assert!(installed_graph_is_current(&paths, HostProfile::MacOs).is_err());
+        assert_eq!(
+            installed_graph_is_current(&paths, HostProfile::MacOs),
+            Err("the installed Local graph is not a private record".into())
+        );
         state::write_private(&paths.compose, "untrusted stale graph").unwrap();
         fs::write(&paths.environment, "current environment").unwrap();
 
