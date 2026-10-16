@@ -82,14 +82,10 @@ pub(super) fn execute_quiet(
 
 /// The diagnostic of a Docker call that outlived its deadline.
 pub(super) fn docker_timed_out(budget: Duration, stopped: bool) -> String {
-    let outcome = if stopped {
-        "it was stopped"
-    } else {
-        "it could not be stopped and may still be running"
-    };
     format!(
-        "Docker did not finish within {} s; {outcome}",
-        budget.as_secs()
+        "Docker did not finish within {} s; {}",
+        budget.as_secs(),
+        capture::deadline_outcome(stopped)
     )
 }
 

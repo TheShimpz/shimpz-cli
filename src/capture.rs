@@ -37,6 +37,15 @@ pub(crate) enum Failure {
     TimedOut { stopped: bool },
 }
 
+/// What became of a child that outlived its deadline, for its diagnostic: `stopped` as [`Failure::TimedOut`] reports.
+pub(crate) const fn deadline_outcome(stopped: bool) -> &'static str {
+    if stopped {
+        "it was stopped"
+    } else {
+        "it could not be stopped and may still be running"
+    }
+}
+
 /// Spawn one host command, in its own process group when [`isolate_process_groups`] asked for that.
 pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
     spawn_in(command, ISOLATED_GROUPS.load(Ordering::SeqCst))

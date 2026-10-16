@@ -258,14 +258,10 @@ fn bounded(program: &Path, command: &mut Command, budget: Duration) -> Result<Ou
 
 /// The diagnostic of a host command that outlived its deadline.
 fn timed_out(program: &Path, budget: Duration, stopped: bool) -> String {
-    let outcome = if stopped {
-        "it was stopped"
-    } else {
-        "it could not be stopped and may still be running"
-    };
     format!(
-        "host command did not finish within {} s; {outcome}: {}",
+        "host command did not finish within {} s; {}: {}",
         budget.as_secs(),
+        capture::deadline_outcome(stopped),
         program.display()
     )
 }
