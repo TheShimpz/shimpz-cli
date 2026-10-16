@@ -27,7 +27,7 @@ const MAX_RESPONSE_BYTES: u64 = 32 * 1024;
 pub(crate) fn login() -> Result<String, String> {
     let credential_lock = credentials::lock()?;
     let api = Api::new();
-    if let Some(mut stored) = credentials::load_replaceable(&credential_lock)? {
+    if let Some(mut stored) = credentials::load(&credential_lock)? {
         if let Some(session) = ensure_session(&api, &credential_lock, &mut stored)? {
             return Ok(format!("Already authenticated as {}.", session.account_id));
         }

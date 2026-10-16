@@ -71,7 +71,7 @@ impl Credentials {
             || !valid_token(&self.refresh_token)
             || !valid_scopes(&self.scopes)
         {
-            return Err(INVALID_CREDENTIALS.into());
+            return Err("CLI credentials are invalid".into());
         }
         Ok(())
     }
@@ -119,13 +119,6 @@ pub(crate) fn load(_lock: &CredentialLock) -> Result<Option<Credentials>, String
     load_from(&credentials_path()?)
 }
 
-/// [`load`] for `shimpz auth`, which stores a fresh record in place of an invalid one: a private record whose
-/// content does not parse or validate counts as absent and stays until that replacement, while a link, ownership,
-/// permission, or I/O refusal still fails closed.
-pub(crate) fn load_replaceable(_lock: &CredentialLock) -> Result<Option<Credentials>, String> {
-    load_replaceable_from(&credentials_path()?)
-}
-
 pub(crate) fn store(_lock: &CredentialLock, credentials: &Credentials) -> Result<(), String> {
     store_at(&credentials_path()?, credentials)
 }
@@ -140,31 +133,15 @@ fn credentials_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "OS configuration directory is unavailable".into())
 }
 
-const INVALID_CREDENTIALS: &str = "stored CLI credentials are invalid; run `shimpz auth` again";
-
-/// A private credential record that was read.
-enum Stored {
-    Valid(Credentials),
-    /// Its content does not parse or validate, or exceeds the size bound.
-    Invalid,
+/// The refusal for a private record whose content does not parse, validate, or fit the size bound.
+fn invalid_credentials(path: &Path) -> String {
+    format!(
+        "stored CLI credentials at {} are invalid; delete that file, then run `shimpz auth`",
+        path.display()
+    )
 }
 
 fn load_from(path: &Path) -> Result<Option<Credentials>, String> {
-    match read_from(path)? {
-        None => Ok(None),
-        Some(Stored::Valid(credentials)) => Ok(Some(credentials)),
-        Some(Stored::Invalid) => Err(INVALID_CREDENTIALS.into()),
-    }
-}
-
-fn load_replaceable_from(path: &Path) -> Result<Option<Credentials>, String> {
-    Ok(match read_from(path)? {
-        Some(Stored::Valid(credentials)) => Some(credentials),
-        None | Some(Stored::Invalid) => None,
-    })
-}
-
-fn read_from(path: &Path) -> Result<Option<Stored>, String> {
     let bytes = match private_file::read_admitted(path, MAX_CREDENTIALS_BYTES, private_file::admit)
     {
         Ok(bytes) => bytes,
@@ -178,15 +155,14 @@ fn read_from(path: &Path) -> Result<Option<Stored>, String> {
             return Err("CLI credential metadata is unavailable".into());
         }
         Err(ReadFailure::NotAdmitted(refusal)) => return Err(secure_file_refusal(refusal)),
-        Err(ReadFailure::Oversized) => return Ok(Some(Stored::Invalid)),
+        Err(ReadFailure::Oversized) => return Err(invalid_credentials(path)),
         Err(ReadFailure::Read(_)) => return Err("CLI credentials cannot be read".into()),
     };
-    Ok(Some(
-        serde_json::from_slice::<Credentials>(&bytes)
-            .ok()
-            .filter(|credentials| credentials.validate().is_ok())
-            .map_or(Stored::Invalid, Stored::Valid),
-    ))
+    serde_json::from_slice::<Credentials>(&bytes)
+        .ok()
+        .filter(|credentials| credentials.validate().is_ok())
+        .map(Some)
+        .ok_or_else(|| invalid_credentials(path))
 }
 
 fn store_at(path: &Path, credentials: &Credentials) -> Result<(), String> {
@@ -295,7 +271,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Credentials, clear_at, load_from, load_replaceable_from, store_at};
+    use super::{Credentials, clear_at, load_from, store_at};
 
     fn credentials() -> Credentials {
         Credentials::new(
@@ -355,7 +331,7 @@ mod tests {
             "CLI credential file ownership or permissions are unsafe"
         );
         #[cfg(not(unix))]
-        assert!(error.contains("stored CLI credentials are invalid"));
+        assert!(error.contains("are invalid; delete that file"));
     }
 
     #[cfg(unix)]
@@ -380,64 +356,25 @@ mod tests {
     }
 
     #[test]
-    fn login_replaces_a_private_record_with_invalid_content() {
+    fn refuses_a_private_record_with_invalid_content_naming_the_file() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("credentials.json");
-        let unknown_field = format!(
-            r#"{{"version":1,"access_token":"{}","refresh_token":"{}","scopes":["identity:read"],"unknown":1}}"#,
-            "a".repeat(43),
-            "b".repeat(43)
-        );
         let oversized = vec![b' '; 16 * 1024 + 1];
-        for content in [unknown_field.as_bytes(), b"not json", b"{}", &oversized] {
+        for content in [b"not json".as_slice(), b"{}", &oversized] {
             fs::write(&path, content).unwrap();
             #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(
-                load_from(&path)
-                    .unwrap_err()
-                    .contains("run `shimpz auth` again")
-            );
-
-            assert!(load_replaceable_from(&path).unwrap().is_none());
-            assert!(path.exists());
-            store_at(&path, &credentials()).unwrap();
 
             assert_eq!(
-                load_from(&path).unwrap().unwrap().access_token(),
-                "a".repeat(43)
+                load_from(&path).unwrap_err(),
+                format!(
+                    "stored CLI credentials at {} are invalid; delete that file, then run `shimpz auth`",
+                    path.display()
+                )
             );
+            assert!(clear_at(&path).is_err());
+            assert!(path.exists());
         }
-        assert_eq!(
-            load_replaceable_from(&path)
-                .unwrap()
-                .unwrap()
-                .refresh_token(),
-            "b".repeat(43)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn login_still_refuses_a_linked_or_shared_record() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let target = directory.path().join("target.json");
-        let symlink_path = directory.path().join("symlink.json");
-        fs::write(&target, b"not json").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
-        symlink(&target, &symlink_path).unwrap();
-        assert_eq!(
-            load_replaceable_from(&symlink_path).unwrap_err(),
-            "CLI credentials cannot be opened"
-        );
-
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(
-            load_replaceable_from(&target).unwrap_err(),
-            "CLI credential file ownership or permissions are unsafe"
-        );
     }
 
     #[test]
