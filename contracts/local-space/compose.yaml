@@ -490,11 +490,6 @@ services:
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must pin Space identity}
     volumes:
       - type: volume
-        source: config
-        target: /repo
-        volume:
-          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
-      - type: volume
         source: data
         target: /data
         volume:

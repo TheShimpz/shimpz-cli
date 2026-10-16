@@ -2169,7 +2169,6 @@ mod tests {
         }
         for kept in [
             "data",
-            "config",
             "supervisor_key",
             "controller_storage",
             "controller_publications",
