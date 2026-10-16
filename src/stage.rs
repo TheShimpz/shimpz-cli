@@ -3,10 +3,8 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
-use std::process::{self, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Output, Stdio};
 
 use toml::Value;
 
@@ -297,7 +295,7 @@ fn stage_image(docker: &Path, context: &Path, expected: &ExpectedImage) -> Resul
     // can never collect it; the previous current snapshot loses the tag in the same step.
     // A failure anywhere after the build may already have moved the tag, so every one reconciles it; the nonce
     // proves which tagged image this attempt produced.
-    let nonce = stage_nonce();
+    let nonce = stage_nonce()?;
     build_image(docker, context, expected, &nonce)
         .and_then(|image_id| {
             admit_staged(docker, &image_id, expected)?;
@@ -506,18 +504,11 @@ fn build_image(
     Ok(image_id)
 }
 
-fn stage_nonce() -> String {
-    let mut hasher = digest::Sha256Hasher::new();
-    hasher.update(&RandomState::new().hash_one(process::id()).to_be_bytes());
-    hasher.update(&process::id().to_be_bytes());
-    hasher.update(
-        &SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_be_bytes(),
-    );
-    hasher.finish_hex()[..32].to_owned()
+/// 128 random bits as 32 lowercase hexadecimal characters, unique to one staging attempt.
+fn stage_nonce() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "the system random source is unavailable")?;
+    Ok(digest::lower_hex(&bytes))
 }
 
 /// Export the final contract and pack from a created, never-started container and compare them on the host with
@@ -1290,10 +1281,9 @@ mod tests {
 
     #[test]
     fn every_stage_carries_a_distinct_nonce() {
-        let first = stage_nonce();
-        assert_eq!(first.len(), 32);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, stage_nonce());
+        let first = stage_nonce().unwrap();
+        assert!(digest::is_lower_hex(&first, 32));
+        assert_ne!(first, stage_nonce().unwrap());
     }
 
     #[test]
@@ -1493,7 +1483,7 @@ mod tests {
             fs::write(context.path().join("json.py"), "def loads(_): return {}\n").unwrap();
             fs::write(context.path().join("shimpz.contract.json"), contract).unwrap();
             fs::write(context.path().join("shimpz.pack.json"), PROOF_PACK).unwrap();
-            let tag = format!("shimpz-verifier-proof:{name}-{}", process::id());
+            let tag = format!("shimpz-verifier-proof:{name}-{}", std::process::id());
             let status = Command::new(&docker)
                 .args(["buildx", "build", "--load", "--quiet", "--tag", &tag])
                 .arg(context.path())
