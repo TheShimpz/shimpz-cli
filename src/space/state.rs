@@ -143,11 +143,8 @@ fn validate_environment(
     paths: &Paths,
     profile: HostProfile,
 ) -> Result<u16, String> {
+    let images = IMAGE_KEYS.map(|(key, _)| key);
     let required = [
-        "SHIMPZ_ADMIN_IMAGE",
-        "SHIMPZ_TEAM_IMAGE",
-        "SHIMPZ_BRAIN_IMAGE",
-        "SHIMPZ_EGRESS_IMAGE",
         "SHIMPZ_LOCAL_RELEASE_IMAGE",
         "SHIMPZ_LOCAL_RELEASE_ORDINAL",
         "SHIMPZ_SPACE_PLATFORM",
@@ -165,9 +162,12 @@ fn validate_environment(
     let developer = values
         .get("SHIMPZ_LOCAL_RELEASE_IMAGE")
         .is_some_and(|value| release::valid_developer_release_ref(value));
-    let expected = required.len() + usize::from(linux);
+    let expected = images.len() + required.len() + usize::from(linux);
     if values.len() != expected
-        || required.iter().any(|key| !values.contains_key(key))
+        || images
+            .iter()
+            .chain(&required)
+            .any(|key| !values.contains_key(key))
         || (linux && !values.contains_key("SHIMPZ_SECURE_VOLUME_ROOT"))
     {
         return Err("the installed Local environment has unknown or missing fields".into());
