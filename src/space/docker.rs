@@ -30,7 +30,7 @@ use exec::{
     execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, wait_failure,
 };
 pub(crate) use helper::{PendingStatus, ProjectionFailure};
-use helper::{helper_failure, helper_labels, python_helper_arguments};
+use helper::{admin_helper_options, helper_failure, helper_labels, python_helper_arguments};
 
 /// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
 /// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in
@@ -924,12 +924,8 @@ fn admin_authentication_probe_arguments(
     admin_image: &str,
     container: &str,
 ) -> Vec<OsString> {
-    let labels = helper_labels(ADMIN_AUTHENTICATION_PROBE);
-    let options: Vec<&str> = ["--name", container]
-        .into_iter()
-        .chain(labels.iter().map(String::as_str))
-        .chain(["--user", ADMIN_IDENTITY])
-        .collect();
+    let options = admin_helper_options(ADMIN_AUTHENTICATION_PROBE, false, container);
+    let options: Vec<&str> = options.iter().map(String::as_str).collect();
     python_helper_arguments(
         platform,
         cpuset,
@@ -2241,14 +2237,14 @@ mod tests {
             "com.shimpz.local.kind=release-status",
         ];
         let admin = [
+            "--user",
+            "1000:1000",
             "--name",
             "c",
             "--label",
             "com.shimpz.local.managed=1",
             "--label",
             "com.shimpz.local.kind=admin-authentication-probe",
-            "--user",
-            "1000:1000",
         ];
         assert_eq!(
             text(admin_authentication_probe_arguments(

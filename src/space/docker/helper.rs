@@ -302,7 +302,7 @@ pub(super) fn reset_capability_arguments(
 }
 
 /// The options of one helper of `kind` named `name` that runs as Admin, reading its standard input when `interactive`.
-fn admin_helper_options(kind: &str, interactive: bool, name: &str) -> Vec<String> {
+pub(super) fn admin_helper_options(kind: &str, interactive: bool, name: &str) -> Vec<String> {
     interactive
         .then_some("--interactive")
         .into_iter()
