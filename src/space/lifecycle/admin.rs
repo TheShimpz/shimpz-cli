@@ -75,9 +75,11 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
         .map_err(|_| "the owned Admin listener binding is malformed".to_owned())?;
     let binding_map = binding_map
         .as_object()
-        .filter(|bindings| bindings.len() == 1 && bindings.contains_key("4600/tcp"))
+        .filter(|bindings| {
+            bindings.len() == 1 && bindings.contains_key(graph::ADMIN_PUBLISHED_PORT)
+        })
         .ok_or_else(|| "the owned Admin listener binding is invalid".to_owned())?;
-    let bindings = binding_map["4600/tcp"]
+    let bindings = binding_map[graph::ADMIN_PUBLISHED_PORT]
         .as_array()
         .filter(|bindings| !bindings.is_empty() && bindings.len() <= 2)
         .ok_or_else(|| "the owned Admin listener binding is invalid".to_owned())?;
@@ -94,18 +96,19 @@ fn parse_admin_attestation(record: &str) -> Result<AdminAttestation, String> {
             .ok_or_else(|| "the owned Admin listener binding is malformed".to_owned())?;
         let host = binding["HostIp"]
             .as_str()
-            .filter(|host| matches!(*host, "127.0.0.1" | "::1"))
+            .filter(|host| [graph::ADMIN_PUBLISHED_HOST, "::1"].contains(host))
             .ok_or_else(|| "the owned Admin listener is not loopback-only".to_owned())?;
         let current = binding["HostPort"]
             .as_str()
             .and_then(|value| value.parse::<u16>().ok())
             .filter(|value| *value >= 1024)
             .ok_or_else(|| "the owned Admin listener port is invalid".to_owned())?;
-        if port.is_some_and(|expected| expected != current) || (host == "127.0.0.1" && ipv4) {
+        let loopback_ipv4 = host == graph::ADMIN_PUBLISHED_HOST;
+        if port.is_some_and(|expected| expected != current) || (loopback_ipv4 && ipv4) {
             return Err("the owned Admin listener binding is ambiguous".into());
         }
         port = Some(current);
-        ipv4 |= host == "127.0.0.1";
+        ipv4 |= loopback_ipv4;
     }
     if !ipv4 {
         return Err("the owned Admin listener has no IPv4 loopback binding".into());
