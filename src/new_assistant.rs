@@ -108,7 +108,7 @@ version = \"0.1.0\"
 name = \"{display_name}\"
 summary = \"A Hello World Assistant for Shimpz.\"
 description = \"Greets people by name after they approve. Replace this with one paragraph that tells people what your Assistant does for them.\"
-creators = [\"@your-github-username\"]
+creators = [\"@your-creator-handle\"]
 github = \"https://github.com/your-github-username/{name}\"
 genesis = \"\"\"
 Use this Assistant to greet people.
