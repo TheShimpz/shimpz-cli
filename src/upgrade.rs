@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::space::paths::Paths;
+
 const MANAGED_SPACE_GUIDANCE: &str =
     "this CLI is managed by Shimpz Space; run shimpz update to check its atomic release";
 const STANDALONE_GUIDANCE: &str = "the Standalone CLI does not replace itself; the CLI was not changed; reinstall it with: cargo install --locked shimpz-cli";
@@ -40,9 +42,14 @@ fn managed_space_verdict(
     Ok(is_managed_space_cli(home, current))
 }
 
+/// Whether `current` is the Space-managed CLI under `home`. A home that holds no Local Space layout, such as a relative
+/// one on Windows, holds no managed CLI.
 fn is_managed_space_cli(home: &Path, current: &Path) -> bool {
-    let managed = home.join(".shimpz/bin/shimpz");
-    let (Ok(current), Ok(managed)) = (current.canonicalize(), managed.canonicalize()) else {
+    let Ok(paths) = Paths::under(home) else {
+        return false;
+    };
+    let (Ok(current), Ok(managed)) = (current.canonicalize(), paths.managed_cli.canonicalize())
+    else {
         return false;
     };
     current == managed
