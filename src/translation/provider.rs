@@ -88,17 +88,14 @@ impl OpenAi {
     }
 
     fn with_endpoint(endpoint: &str, key: &str, https_only: bool) -> Self {
-        let config = Agent::config_builder()
+        let config = crate::http::config(REQUEST_TIMEOUT)
             .https_only(https_only)
-            .max_redirects(0)
-            .http_status_as_error(false)
             .timeout_connect(Some(CONNECT_TIMEOUT))
-            .timeout_global(Some(REQUEST_TIMEOUT))
             .build();
         Self {
             agent: config.into(),
             endpoint: endpoint.to_owned(),
-            authorization: Zeroizing::new(format!("Bearer {key}")),
+            authorization: crate::http::bearer(key),
         }
     }
 

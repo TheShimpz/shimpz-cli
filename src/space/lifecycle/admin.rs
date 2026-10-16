@@ -4,7 +4,6 @@
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ureq::Agent;
 use zeroize::Zeroizing;
 
 use crate::output;
@@ -170,15 +169,14 @@ pub(super) fn admin_authentication_state_probe_response(
     }
 }
 
+/// The Local Admin session endpoint on its published loopback `port`.
+fn admin_session_url(port: u16) -> String {
+    format!("http://{}:{port}/api/session", graph::ADMIN_PUBLISHED_HOST)
+}
+
 pub(super) fn admin_authentication_state(port: u16) -> Result<AdminAuthenticationState, String> {
-    let config = Agent::config_builder()
-        .timeout_global(Some(ADMIN_SESSION_TIMEOUT))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let agent = Agent::new_with_config(config);
-    let mut response = agent
-        .post(format!("http://127.0.0.1:{port}/api/session"))
+    let mut response = crate::http::agent(ADMIN_SESSION_TIMEOUT)
+        .post(admin_session_url(port))
         .send_empty()
         .map_err(|_| "Admin did not provide the Local authentication-state contract".to_owned())?;
     let status = response.status().as_u16();
@@ -192,15 +190,10 @@ pub(super) fn admin_authentication_state(port: u16) -> Result<AdminAuthenticatio
 }
 
 pub(super) fn admin_available(port: u16) -> bool {
-    let config = Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(2)))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let agent = Agent::new_with_config(config);
+    let agent = crate::http::agent(Duration::from_secs(2));
     for _ in 0..30 {
         if agent
-            .post(format!("http://127.0.0.1:{port}/api/session"))
+            .post(admin_session_url(port))
             .send_empty()
             .is_ok_and(|response| response.status().as_u16() == 200)
         {
@@ -268,22 +261,20 @@ fn request_admin_reset(
     capability: &str,
     password: Option<&str>,
 ) -> Result<AdminResetDecision, String> {
-    let config = Agent::config_builder()
-        .timeout_global(Some(ADMIN_RESET_TIMEOUT))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build();
-    let agent = Agent::new_with_config(config);
+    let agent = crate::http::agent(ADMIN_RESET_TIMEOUT);
     let payload = match password {
         Some(password) => serde_json::json!({"capability": capability, "password": password}),
         None => serde_json::json!({"capability": capability}),
     };
     let body = serde_json::to_string(&payload)
         .map_err(|_| "could not encode the authorized Space reset".to_owned())?;
-    let request = ureq::http::Request::delete(format!("http://127.0.0.1:{port}/api/space/host"))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .map_err(|_| "could not build the authorized Space reset".to_owned())?;
+    let request = ureq::http::Request::delete(format!(
+        "http://{}:{port}/api/space/host",
+        graph::ADMIN_PUBLISHED_HOST
+    ))
+    .header("Content-Type", "application/json")
+    .body(body)
+    .map_err(|_| "could not build the authorized Space reset".to_owned())?;
     let mut response = agent
         .run(request)
         .map_err(|_| RESET_INCOMPLETE.to_owned())?;

@@ -9,7 +9,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use ureq::Agent;
 
 use super::paths::Paths;
 use super::release::RELEASE_REPOSITORY;
@@ -336,13 +335,7 @@ pub(crate) fn now() -> u64 {
 
 /// One anonymous token request plus one manifest HEAD for the public `stable` release index.
 pub(crate) fn probe_stable() -> Probe {
-    let agent = Agent::new_with_config(
-        Agent::config_builder()
-            .timeout_global(Some(PROBE_TIMEOUT))
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .build(),
-    );
+    let agent = crate::http::agent(PROBE_TIMEOUT);
     let repository = RELEASE_REPOSITORY.trim_start_matches("ghcr.io/");
     let Ok(mut token_response) = agent
         .get(format!(
@@ -367,7 +360,7 @@ pub(crate) fn probe_stable() -> Probe {
     };
     let Ok(response) = agent
         .head(format!("{REGISTRY}/v2/{repository}/manifests/stable"))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", crate::http::bearer(&token).as_str())
         .header("Accept", INDEX_MEDIA_TYPES)
         .call()
     else {

@@ -12,6 +12,7 @@ mod digest;
 #[cfg(all(test, unix))]
 mod fake_tool;
 mod help;
+mod http;
 mod human_request;
 mod identifier;
 mod invoke;

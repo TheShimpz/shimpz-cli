@@ -134,7 +134,7 @@ struct Api {
 impl Api {
     fn new() -> Self {
         Self {
-            agent: developers_client::agent(REQUEST_TIMEOUT),
+            agent: crate::http::agent(REQUEST_TIMEOUT),
         }
     }
 
@@ -181,7 +181,7 @@ impl Api {
     }
 
     fn session(&self, access_token: &str) -> Result<Option<AuthSession>, String> {
-        let authorization = developers_client::bearer(access_token);
+        let authorization = crate::http::bearer(access_token);
         let mut response = self
             .agent
             .get(SESSION_URL)
@@ -222,7 +222,7 @@ impl Api {
     }
 
     fn revoke(&self, refresh_token: &str) -> Result<(), String> {
-        let authorization = developers_client::bearer(refresh_token);
+        let authorization = crate::http::bearer(refresh_token);
         let mut response = self
             .agent
             .delete(SESSION_URL)

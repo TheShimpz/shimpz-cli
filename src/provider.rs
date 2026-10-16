@@ -248,7 +248,7 @@ impl Broker {
                 missing = true;
                 continue;
             };
-            let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
+            let bearer = crate::http::bearer(token.as_str());
             credentials.push(Credential {
                 header: Some("authorization".into()),
                 query: None,
@@ -486,11 +486,8 @@ fn inject(mut call: Call, credentials: &[Credential]) -> Result<Call, &'static s
 type Received = (u16, Vec<(String, String)>, Vec<u8>);
 
 fn send(call: &Call) -> Result<Received, &'static str> {
-    let agent: Agent = Agent::config_builder()
+    let agent: Agent = crate::http::config(call.timeout)
         .https_only(true)
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .timeout_global(Some(call.timeout))
         .build()
         .into();
     let mut request = Request::builder()

@@ -74,7 +74,7 @@ struct Api {
 impl Api {
     fn new() -> Self {
         Self {
-            agent: developers_client::agent(REQUEST_TIMEOUT),
+            agent: crate::http::agent(REQUEST_TIMEOUT),
         }
     }
 
@@ -84,7 +84,7 @@ impl Api {
         identity: &manifest::PublicationIdentity,
         source_digest: &str,
     ) -> Result<(), String> {
-        let authorization = developers_client::bearer(credentials.access_token());
+        let authorization = crate::http::bearer(credentials.access_token());
         let request = CreatorConsentRequest {
             assistant_id: &identity.id,
             version: &identity.version,
@@ -111,7 +111,7 @@ impl Api {
         credentials: &crate::credentials::Credentials,
         package: &source_package::SourcePackage,
     ) -> Result<Publication, String> {
-        let authorization = developers_client::bearer(credentials.access_token());
+        let authorization = crate::http::bearer(credentials.access_token());
         let mut response = self
             .agent
             .post(PUBLICATIONS_URL)
@@ -133,7 +133,7 @@ impl Api {
         credentials: &crate::credentials::Credentials,
         source_digest: &str,
     ) -> Result<Publication, PublicationStatusError> {
-        let authorization = developers_client::bearer(credentials.access_token());
+        let authorization = crate::http::bearer(credentials.access_token());
         let url = format!("{PUBLICATIONS_URL}/{source_digest}");
         let mut response = self
             .agent

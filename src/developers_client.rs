@@ -1,33 +1,15 @@
-//! The Developers peer client: one connection policy, one bounded JSON read, and one closed error envelope.
+//! The Developers peer client: one bounded JSON read and one closed error envelope, over the shared HTTP policy.
 //!
 //! Only Developers endpoints use this module. Each caller keeps its own request timeout and response bound explicit.
 
-use std::time::Duration;
-
 use serde::{Deserialize, de::DeserializeOwned};
-use ureq::{Agent, Body, http::Response};
-use zeroize::Zeroizing;
+use ureq::{Body, http::Response};
 
 use crate::digest;
 
 const MAX_ERROR_MESSAGE_BYTES: usize = 200;
 const MAX_ERROR_CODE_BYTES: usize = 64;
 const REQUEST_ID_HEX: usize = 32;
-
-/// An agent bounded by `timeout` that never follows a redirect and returns every HTTP status to its caller.
-pub(crate) fn agent(timeout: Duration) -> Agent {
-    Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into()
-}
-
-/// The bearer `Authorization` header value, wiped from memory when dropped.
-pub(crate) fn bearer(token: &str) -> Zeroizing<String> {
-    Zeroizing::new(format!("Bearer {token}"))
-}
 
 /// Decode an exact `application/json` body of at most `limit` bytes; anything else is the `invalid` message.
 pub(crate) fn read_json<T: DeserializeOwned>(
