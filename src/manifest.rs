@@ -128,16 +128,21 @@ fn validate_description(description: Option<&toml::Value>) -> Result<(), String>
     }
 }
 
+/// The manifest table of Stored Input `id`. A Creator's own table key is named only once it is a valid identifier,
+/// so a diagnostic never echoes noise.
+fn stored_input_table(id: &str) -> String {
+    if identifier::declared(id) {
+        format!("[stored_inputs.{id}]")
+    } else {
+        "[stored_inputs]".to_owned()
+    }
+}
+
 /// Every secret a person is asked for says what it is, how to get it, and where: each Stored Input declares a help-text
 /// `description` and the `help_url` of the official page or documentation where the value is made.
 fn validate_stored_input_help(stored_inputs: &BTreeMap<String, toml::Value>) -> Result<(), String> {
     for (id, declaration) in stored_inputs {
-        // A Creator's own table key is named only once it is a valid identifier, so a diagnostic never echoes noise.
-        let name = if identifier::declared(id) {
-            format!("[stored_inputs.{id}]")
-        } else {
-            "[stored_inputs]".to_owned()
-        };
+        let name = stored_input_table(id);
         let field = |key: &str| declaration.get(key).and_then(toml::Value::as_str);
         if !field("description").is_some_and(|text| valid_display_text(text, DESCRIPTION_CHARS)) {
             return Err(format!(
@@ -171,11 +176,7 @@ fn validate_stored_input_routes(
     id: &str,
     routes: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    let name = if identifier::declared(id) {
-        format!("[stored_inputs.{id}]")
-    } else {
-        "[stored_inputs]".to_owned()
-    };
+    let name = stored_input_table(id);
     let Some(routes) = routes else {
         return Err(format!(
             "Assistant manifest is missing {name}.routes: declare each provider endpoint that receives this secret as \
