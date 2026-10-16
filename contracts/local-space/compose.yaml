@@ -484,7 +484,7 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "127.0.0.1:${SHIMPZ_PORT:-7777}:4600"
+      - "127.0.0.1:${SHIMPZ_PORT:?CLI must pin SHIMPZ_PORT}:4600"
     environment:
       SHIMPZ_ADMIN_ALLOWED_ORIGINS: ${SHIMPZ_ADMIN_ALLOWED_ORIGINS:?CLI must pin Admin origins}
       SHIMPZ_SPACE_ID: ${SHIMPZ_SPACE_ID:?CLI must pin Space identity}

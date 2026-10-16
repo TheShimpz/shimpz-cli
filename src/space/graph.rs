@@ -418,7 +418,7 @@ mod tests {
                 });
                 let published = member.publishes_admin.then(|| {
                     vec![format!(
-                        "{ADMIN_PUBLISHED_HOST}:${{SHIMPZ_PORT:-7777}}:{}",
+                        "{ADMIN_PUBLISHED_HOST}:${{SHIMPZ_PORT:?CLI must pin SHIMPZ_PORT}}:{}",
                         ADMIN_PUBLISHED_PORT.strip_suffix("/tcp").unwrap()
                     )]
                 });
