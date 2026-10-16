@@ -47,7 +47,7 @@ impl Inventory {
     ) -> Result<Self, String> {
         let project = project_filter();
         let profile = format!("label={PROFILE_LABEL}={PROFILE}");
-        let managed = format!("label={}=1", graph::MANAGED_LABEL);
+        let managed = graph::managed_filter();
         let local_filter = ["--filter", &managed, "--filter", &profile];
         let (reserved, controller, lists) = thread::scope(|scope| {
             let reserved: Vec<_> = graph::CONTAINERS
@@ -473,7 +473,11 @@ fn validate_dynamic_containers(
         "managed container",
     )? {
         let fields: Vec<_> = record.split('|').collect();
-        if fields.len() != 7 || fields[1] != "1" || fields[2] != PROFILE || fields[3] != space_id {
+        if fields.len() != 7
+            || fields[1] != graph::MANAGED_VALUE
+            || fields[2] != PROFILE
+            || fields[3] != space_id
+        {
             return Err("a managed container has invalid ownership labels".into());
         }
         match fields[4] {
@@ -523,7 +527,7 @@ fn validate_dynamic_networks(
         let fields: Vec<_> = record.split('|').collect();
         if fields.len() != 6
             || !fields[0].starts_with("shimpz-local-")
-            || fields[1] != "1"
+            || fields[1] != graph::MANAGED_VALUE
             || fields[2] != PROFILE
             || fields[3] != space_id
             || fields[4] != "team"

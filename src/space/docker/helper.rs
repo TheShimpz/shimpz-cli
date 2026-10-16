@@ -13,7 +13,7 @@ use super::exec::{
 };
 use super::{ADMIN_IDENTITY, DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
-use crate::space::graph::{self, KIND_LABEL, MANAGED_LABEL};
+use crate::space::graph::{self, KIND_LABEL, MANAGED_LABEL, MANAGED_VALUE};
 use crate::space::release::ADMIN;
 
 /// Distinguishes the one-shot helper containers this process names.
@@ -34,7 +34,7 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
                 "--all",
                 "--quiet",
                 "--filter",
-                &format!("label={MANAGED_LABEL}=1"),
+                &graph::managed_filter(),
                 "--filter",
                 &format!("label={KIND_LABEL}={kind}"),
             ],
@@ -64,7 +64,7 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
 pub(super) fn helper_labels(kind: &str) -> [String; 4] {
     [
         "--label".to_owned(),
-        format!("{MANAGED_LABEL}=1"),
+        format!("{MANAGED_LABEL}={MANAGED_VALUE}"),
         "--label".to_owned(),
         format!("{KIND_LABEL}={kind}"),
     ]

@@ -22,8 +22,16 @@ pub(crate) fn admin_origin(port: u16) -> String {
 pub(crate) fn admin_origins(port: u16) -> String {
     format!("http://localhost:{port},{}", admin_origin(port))
 }
-/// The label key every Space-managed container and network outside the Compose project carries, with the value `1`.
+/// The label key every Space-managed container and network outside the Compose project carries, with the value
+/// [`MANAGED_VALUE`].
 pub(crate) const MANAGED_LABEL: &str = "com.shimpz.local.managed";
+/// The value of [`MANAGED_LABEL`] on every Space-managed container and network.
+pub(crate) const MANAGED_VALUE: &str = "1";
+
+/// The Docker filter that selects every Space-managed container or network.
+pub(crate) fn managed_filter() -> String {
+    format!("label={MANAGED_LABEL}={MANAGED_VALUE}")
+}
 /// The label key naming a Space-managed container's or network's kind.
 pub(crate) const KIND_LABEL: &str = "com.shimpz.local.kind";
 
