@@ -565,9 +565,7 @@ fn valid_printable_ascii(value: &str, max_length: usize) -> bool {
 }
 
 fn valid_trust_reference(value: &str) -> bool {
-    value
-        .strip_prefix("ghcr.io/theshimpz/shimpz-assistant-trust@")
-        .is_some_and(digest::is_sha256)
+    digest::is_pinned(value, "ghcr.io/theshimpz/shimpz-assistant-trust")
 }
 
 #[cfg(test)]
