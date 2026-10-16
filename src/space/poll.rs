@@ -78,10 +78,7 @@ fn backoff_seconds(failures: u32, retry_after: Option<u64>) -> u64 {
 }
 
 pub(crate) fn release_digest(release_ref: &str) -> Option<&str> {
-    release_ref
-        .strip_prefix(RELEASE_REPOSITORY)
-        .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|value| digest::is_sha256(value))
+    digest::pinned_digest(release_ref, RELEASE_REPOSITORY)
 }
 
 /// Read one bounded private record owned by this user; anything else is treated as absent evidence.
@@ -243,18 +240,16 @@ pub(crate) fn scheduled_gate(
         if now < state.probe_retry_at {
             return Ok(Some(RETRY));
         }
-        let digest = match probe() {
-            Probe::Digest(digest) => digest,
-            Probe::Throttled { retry_after } => {
+        let retry_after = match probe() {
+            Probe::Digest(digest) => Ok(digest),
+            Probe::Throttled { retry_after } => Err(retry_after),
+            Probe::Unavailable => Err(None),
+        };
+        let digest = match retry_after {
+            Ok(digest) => digest,
+            Err(retry_after) => {
                 state.probe_retry_at =
                     now.saturating_add(backoff_seconds(state.probe_failures, retry_after));
-                state.probe_failures = state.probe_failures.saturating_add(1);
-                write_state(paths, &state)?;
-                return Ok(Some(RETRY));
-            }
-            Probe::Unavailable => {
-                state.probe_retry_at =
-                    now.saturating_add(backoff_seconds(state.probe_failures, None));
                 state.probe_failures = state.probe_failures.saturating_add(1);
                 write_state(paths, &state)?;
                 return Ok(Some(RETRY));
@@ -289,10 +284,7 @@ pub(crate) fn scheduled_gate(
 }
 
 fn developer_digest(release_ref: &str) -> Option<&str> {
-    release_ref
-        .strip_prefix(super::release::DEVELOPER_RELEASE_REPOSITORY)
-        .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|value| digest::is_sha256(value))
+    digest::pinned_digest(release_ref, super::release::DEVELOPER_RELEASE_REPOSITORY)
 }
 
 /// Decide, before a scheduled update replaces the running graph, whether active Team work defers it. Busy work

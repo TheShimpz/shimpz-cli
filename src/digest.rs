@@ -73,10 +73,15 @@ pub(crate) fn is_sha256(value: &str) -> bool {
 
 /// An immutable `<repository>@sha256:<hex>` reference to exactly this repository.
 pub(crate) fn is_pinned(value: &str, repository: &str) -> bool {
+    pinned_digest(value, repository).is_some()
+}
+
+/// The `sha256:<hex>` digest of an immutable `<repository>@sha256:<hex>` reference to exactly this repository.
+pub(crate) fn pinned_digest<'a>(value: &'a str, repository: &str) -> Option<&'a str> {
     value
         .strip_prefix(repository)
         .and_then(|suffix| suffix.strip_prefix('@'))
-        .is_some_and(is_sha256)
+        .filter(|digest| is_sha256(digest))
 }
 
 #[cfg(test)]
