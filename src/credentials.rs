@@ -383,13 +383,13 @@ mod tests {
     fn login_replaces_a_private_record_with_invalid_content() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("credentials.json");
-        let stale = format!(
-            r#"{{"version":1,"access_token":"{}","refresh_token":"{}","scopes":["identity:read"],"access_expires_at":1}}"#,
+        let unknown_field = format!(
+            r#"{{"version":1,"access_token":"{}","refresh_token":"{}","scopes":["identity:read"],"unknown":1}}"#,
             "a".repeat(43),
             "b".repeat(43)
         );
         let oversized = vec![b' '; 16 * 1024 + 1];
-        for content in [stale.as_bytes(), b"not json", b"{}", &oversized] {
+        for content in [unknown_field.as_bytes(), b"not json", b"{}", &oversized] {
             fs::write(&path, content).unwrap();
             #[cfg(unix)]
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
