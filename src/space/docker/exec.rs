@@ -3,10 +3,10 @@
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
-use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use super::{ADMIN_AUTHENTICATION_OUTPUT_BYTES, DOCKER_QUICK};
+use super::DOCKER_QUICK;
 use crate::capture::{self, Drained};
 
 /// How long a reader may take to deliver a stream after Docker exited, before its output is treated as unavailable.
@@ -107,9 +107,12 @@ pub(super) enum BoundedOutput {
     TimedOut,
 }
 
+/// Run a short Docker helper call within `timeout`, retaining at most `limit` bytes of its stdout; more marks the
+/// output truncated.
 pub(super) fn execute_bounded_stdout(
     command: &mut Command,
     timeout: Duration,
+    limit: usize,
 ) -> Result<BoundedOutput, String> {
     let deadline = Instant::now() + timeout;
     let mut child = capture::spawn(command.stdout(Stdio::piped()))
@@ -117,8 +120,11 @@ pub(super) fn execute_bounded_stdout(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Docker authentication-state output is unavailable".to_owned())?;
-    let reader = capture::Reader::start(&child, stdout, drain_bounded_stdout);
+        .ok_or_else(|| "Docker helper output is unavailable".to_owned())?;
+    let reader = capture::Reader::start(&child, stdout, move |stdout| {
+        capture::drain(stdout, limit)
+            .map_err(|_| "Docker helper output could not be read".to_owned())
+    });
     let status = match capture::wait(&mut child, deadline) {
         Ok(status) => status,
         Err(capture::Failure::TimedOut { stopped: true }) => return Ok(BoundedOutput::TimedOut),
@@ -126,18 +132,13 @@ pub(super) fn execute_bounded_stdout(
     };
     let captured = reader.finish(
         Instant::now() + STREAM_GRACE,
-        "Docker authentication-state output could not be read",
+        "Docker helper output could not be read",
     )?;
     Ok(BoundedOutput::Completed {
         status,
         bytes: captured.bytes,
         truncated: captured.truncated,
     })
-}
-
-fn drain_bounded_stdout(stdout: ChildStdout) -> Result<Drained, String> {
-    capture::drain(stdout, ADMIN_AUTHENTICATION_OUTPUT_BYTES + 1)
-        .map_err(|_| "Docker authentication-state output could not be read".to_owned())
 }
 
 pub(super) fn drain_diagnostic(reader: impl Read) -> Result<Drained, String> {

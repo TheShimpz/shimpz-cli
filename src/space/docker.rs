@@ -49,6 +49,8 @@ const DOCKER_COMPOSE: Duration = Duration::from_mins(10);
 const DOCKER_STATE_RESET: Duration = Duration::from_mins(10);
 const ADMIN_AUTHENTICATION_VOLUME: &str = "data";
 const ADMIN_AUTHENTICATION_OUTPUT_BYTES: usize = 64;
+/// Team reports its activity as one short line.
+const TEAM_ACTIVITY_OUTPUT_BYTES: usize = 64;
 const ADMIN_AUTHENTICATION_ATTEMPTS: usize = 3;
 const ADMIN_AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// The CPU quota of every one-shot helper container, inside the Space cpuset. One CPU bounds a helper as firmly as
@@ -287,6 +289,7 @@ impl Engine {
                 .stdin(Stdio::null())
                 .stderr(Stdio::null()),
             timeout,
+            TEAM_ACTIVITY_OUTPUT_BYTES,
         ) {
             Ok(BoundedOutput::Completed {
                 status,
@@ -325,13 +328,14 @@ impl Engine {
                     .stdin(Stdio::null())
                     .stderr(Stdio::null()),
                 ADMIN_AUTHENTICATION_TIMEOUT,
+                ADMIN_AUTHENTICATION_OUTPUT_BYTES,
             )? {
                 BoundedOutput::Completed {
                     status,
                     bytes,
                     truncated,
                 } if status.success() => {
-                    if truncated || bytes.len() > ADMIN_AUTHENTICATION_OUTPUT_BYTES {
+                    if truncated {
                         return Err(
                             "the selected Admin returned an invalid authentication-state contract"
                                 .into(),
@@ -558,6 +562,7 @@ impl Engine {
                     .stdin(Stdio::null())
                     .stderr(Stdio::null()),
                 ACCOUNT_CAPABILITY_TIMEOUT,
+                0,
             ),
             Ok(BoundedOutput::Completed {
                 status,
@@ -1795,6 +1800,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stderr(Stdio::null()),
             Duration::from_millis(50),
+            ADMIN_AUTHENTICATION_OUTPUT_BYTES,
         )
         .unwrap();
 
