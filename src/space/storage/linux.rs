@@ -18,6 +18,7 @@ use super::evidence::{
 };
 use crate::private_file;
 use crate::space::command::{self, Tool, one_line};
+use crate::space::confirm;
 use crate::space::graph::{VOLUMES, Volume};
 use crate::space::id;
 use crate::space::paths::{self, Paths, STORAGE_MARKER};
@@ -121,11 +122,8 @@ fn termination_signals() -> SigSet {
 
 impl LockedPassphrase {
     fn prompt(label: &str) -> Result<Self, String> {
-        let tty = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .map_err(|_| "encrypted storage requires a terminal".to_owned())?;
+        let tty =
+            confirm::terminal().map_err(|_| "encrypted storage requires a terminal".to_owned())?;
         let signals = SignalMaskRestoration::block()?;
         let original = rustix::termios::tcgetattr(&tty)
             .map_err(|_| "encrypted storage terminal state is unavailable".to_owned())?;
@@ -461,7 +459,12 @@ impl<'a> Pool<'a> {
             Tool::Losetup,
             ["--noheadings", "--output", "BACK-FILE", device],
         )?;
-        let backing = PathBuf::from(one_line(&backing, "loop backing file")?);
+        self.require_pool_backing(&backing)
+    }
+
+    /// The loop device's backing file, a one-line `document`, is exactly this pool's image.
+    fn require_pool_backing(&self, document: &str) -> Result<(), String> {
+        let backing = PathBuf::from(one_line(document, "loop backing file")?);
         if backing.canonicalize().map_err(io_error)?
             != self.paths.pool_image.canonicalize().map_err(io_error)?
         {
@@ -547,13 +550,7 @@ impl<'a> Pool<'a> {
         let backing_document =
             fs::read_to_string(format!("/sys/class/block/{slave}/loop/backing_file"))
                 .map_err(io_error)?;
-        let backing = PathBuf::from(one_line(&backing_document, "loop backing file")?);
-        if backing.canonicalize().map_err(io_error)?
-            != self.paths.pool_image.canonicalize().map_err(io_error)?
-        {
-            return Err("encrypted Local storage mapping has foreign backing".into());
-        }
-        Ok(())
+        self.require_pool_backing(&backing_document)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -695,11 +692,7 @@ impl<'a> Pool<'a> {
     }
 
     fn is_mounted(&self) -> Result<bool, String> {
-        Ok(command::status(
-            Tool::Mountpoint,
-            ["--quiet", &self.paths.pool_mount.to_string_lossy()],
-        )?
-        .success())
+        pool_mounted(self.paths)
     }
 
     fn mapping_name(&self) -> String {
@@ -714,6 +707,15 @@ impl<'a> Pool<'a> {
     fn mapping_path(&self) -> PathBuf {
         Path::new("/dev/mapper").join(self.mapping_name())
     }
+}
+
+/// Whether a filesystem is mounted on the pool's mountpoint.
+fn pool_mounted(paths: &Paths) -> Result<bool, String> {
+    Ok(command::status(
+        Tool::Mountpoint,
+        ["--quiet", &paths.pool_mount.to_string_lossy()],
+    )?
+    .success())
 }
 
 pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<(), String> {
@@ -744,12 +746,7 @@ pub(crate) fn reset(paths: &Paths, expected_space_id: Option<&str>) -> Result<()
         if pool.mapping_path().exists() {
             return Err("the encrypted Local storage mapping remained open".into());
         }
-    } else if command::status(
-        Tool::Mountpoint,
-        ["--quiet", &paths.pool_mount.to_string_lossy()],
-    )?
-    .success()
-    {
+    } else if pool_mounted(paths)? {
         return Err("refusing to unmount Local storage without its owned mapping".into());
     }
     remove_pool_files(paths)
@@ -780,11 +777,7 @@ pub(crate) fn preflight_reset(
     )?;
     let mappings = discover_pool_mappings(paths)?;
     let identity = reset_mapping_identity(expected_space_id, &mappings)?;
-    let mounted = command::status(
-        Tool::Mountpoint,
-        ["--quiet", &paths.pool_mount.to_string_lossy()],
-    )?
-    .success();
+    let mounted = pool_mounted(paths)?;
     if let Some(identity) = identity {
         let pool = Pool::new(paths, &identity)?;
         if mounted {
