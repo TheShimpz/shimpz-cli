@@ -11,6 +11,16 @@ use super::release::Package;
 use crate::{identifier, team_id};
 
 const PROFILE: &str = "local-v1";
+/// The label key naming the Local profile of a Space-managed container or network, with the value [`PROFILE`].
+const PROFILE_LABEL: &str = "com.shimpz.local.profile";
+/// The ownership label keys of a Space-managed container or network, in the order its inspect record lists them.
+const OWNERSHIP_LABELS: [&str; 5] = [
+    graph::MANAGED_LABEL,
+    PROFILE_LABEL,
+    "com.shimpz.local.space-id",
+    graph::KIND_LABEL,
+    "com.shimpz.local.team-id",
+];
 
 /// The Docker filter that selects the members of the Local Compose project.
 pub(crate) fn project_filter() -> String {
@@ -36,8 +46,8 @@ impl Inventory {
         storage: StorageProfile,
     ) -> Result<Self, String> {
         let project = project_filter();
-        let profile = format!("label=com.shimpz.local.profile={PROFILE}");
-        let managed = format!("label={}", graph::MANAGED_LABEL);
+        let profile = format!("label={PROFILE_LABEL}={PROFILE}");
+        let managed = format!("label={}=1", graph::MANAGED_LABEL);
         let local_filter = ["--filter", &managed, "--filter", &profile];
         let (reserved, controller, lists) = thread::scope(|scope| {
             let reserved: Vec<_> = graph::CONTAINERS
@@ -439,6 +449,14 @@ fn validate_project_networks(engine: &Engine, identifiers: &[String]) -> Result<
     Ok(())
 }
 
+/// The inspect template of an object's name followed by the value of each label in `keys`, read from its `labels`
+/// map, all separated by `|`.
+fn labels_template(labels: &str, keys: &[&str]) -> String {
+    keys.iter().fold("{{.Name}}".to_owned(), |template, key| {
+        format!("{template}|{{{{index {labels} \"{key}\"}}}}")
+    })
+}
+
 fn validate_dynamic_containers(
     engine: &Engine,
     space_id: &str,
@@ -448,7 +466,10 @@ fn validate_dynamic_containers(
     for record in inspect_containers(
         engine,
         identifiers,
-        "{{.Name}}|{{index .Config.Labels \"com.shimpz.local.managed\"}}|{{index .Config.Labels \"com.shimpz.local.profile\"}}|{{index .Config.Labels \"com.shimpz.local.space-id\"}}|{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{index .Config.Labels \"com.shimpz.local.team-id\"}}|{{index .Config.Labels \"com.shimpz.local.assistant-id\"}}",
+        &labels_template(
+            ".Config.Labels",
+            &[&OWNERSHIP_LABELS[..], &["com.shimpz.local.assistant-id"]].concat(),
+        ),
         "managed container",
     )? {
         let fields: Vec<_> = record.split('|').collect();
@@ -495,7 +516,7 @@ fn validate_dynamic_networks(
         engine,
         &["network", "inspect"],
         Identity::Id,
-        "{{.Name}}|{{index .Labels \"com.shimpz.local.managed\"}}|{{index .Labels \"com.shimpz.local.profile\"}}|{{index .Labels \"com.shimpz.local.space-id\"}}|{{index .Labels \"com.shimpz.local.kind\"}}|{{index .Labels \"com.shimpz.local.team-id\"}}",
+        &labels_template(".Labels", &OWNERSHIP_LABELS),
         identifiers,
         "managed network",
     )? {
@@ -551,6 +572,14 @@ fn require_removed<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_each_ownership_label_of_a_network_by_its_key() {
+        assert_eq!(
+            labels_template(".Labels", &OWNERSHIP_LABELS),
+            "{{.Name}}|{{index .Labels \"com.shimpz.local.managed\"}}|{{index .Labels \"com.shimpz.local.profile\"}}|{{index .Labels \"com.shimpz.local.space-id\"}}|{{index .Labels \"com.shimpz.local.kind\"}}|{{index .Labels \"com.shimpz.local.team-id\"}}"
+        );
+    }
 
     #[test]
     fn admits_only_a_graph_egress_proxy_under_its_own_kind() {

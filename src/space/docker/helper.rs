@@ -32,7 +32,7 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
                 "--all",
                 "--quiet",
                 "--filter",
-                &format!("label={MANAGED_LABEL}"),
+                &format!("label={MANAGED_LABEL}=1"),
                 "--filter",
                 &format!("label={KIND_LABEL}={kind}"),
             ],
@@ -62,7 +62,7 @@ pub(super) fn sweep_helpers(docker: &Path, kind: &str) -> Result<(), String> {
 pub(super) fn helper_labels(kind: &str) -> [String; 4] {
     [
         "--label".to_owned(),
-        MANAGED_LABEL.to_owned(),
+        format!("{MANAGED_LABEL}=1"),
         "--label".to_owned(),
         format!("{KIND_LABEL}={kind}"),
     ]
