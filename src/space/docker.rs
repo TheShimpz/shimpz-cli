@@ -27,7 +27,8 @@ mod release;
 
 use exec::{
     BoundedOutput, MAX_DOCKER_DIAGNOSTIC_BYTES, STREAM_GRACE, TRUNCATED_DIAGNOSTIC,
-    execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, wait_failure,
+    execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, spawn_docker,
+    wait_failure,
 };
 pub(crate) use helper::{PendingStatus, ProjectionFailure};
 use helper::{admin_helper_options, helper_failure, helper_labels, python_helper_arguments};
@@ -476,7 +477,7 @@ impl Engine {
         };
         let started = Instant::now();
         let deadline = started + DOCKER_COMPOSE;
-        let mut child = capture::spawn(
+        let mut child = spawn_docker(
             Command::new(&self.docker)
                 .arg("compose")
                 .arg("--progress")
@@ -494,8 +495,7 @@ impl Engine {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+        )?;
         let stderr = child
             .stderr
             .take()

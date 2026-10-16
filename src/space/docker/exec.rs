@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use super::DOCKER_QUICK;
@@ -12,19 +12,27 @@ use crate::capture::{self, Drained};
 /// How long a reader may take to deliver a stream after Docker exited, before its output is treated as unavailable.
 pub(super) const STREAM_GRACE: Duration = Duration::from_secs(5);
 
+/// Start one Docker call through [`capture::spawn`], naming a failure to start it.
+pub(super) fn spawn_docker(command: &mut Command) -> Result<Child, String> {
+    capture::spawn(command).map_err(|error| unavailable(&error))
+}
+
+fn unavailable(error: &std::io::Error) -> String {
+    format!("could not execute Docker: {error}")
+}
+
 /// Run one quick Docker call with every stream closed, within its deadline.
 pub(super) fn silent_status<const N: usize>(
     docker: &Path,
     arguments: [&str; N],
 ) -> Result<ExitStatus, String> {
-    let mut child = capture::spawn(
+    let mut child = spawn_docker(
         Command::new(docker)
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
-    )
-    .map_err(|error| format!("could not execute Docker: {error}"))?;
+    )?;
     capture::wait(&mut child, Instant::now() + DOCKER_QUICK)
         .map_err(|failure| wait_failure(DOCKER_QUICK, failure))
 }
@@ -58,13 +66,12 @@ pub(super) fn execute_quiet(
     budget: Duration,
 ) -> Result<(ExitStatus, String), String> {
     let deadline = Instant::now() + budget;
-    let mut child = capture::spawn(
+    let mut child = spawn_docker(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
-    )
-    .map_err(|error| format!("could not execute Docker: {error}"))?;
+    )?;
     let stderr = child
         .stderr
         .take()
@@ -93,7 +100,7 @@ pub(super) fn docker_timed_out(budget: Duration, stopped: bool) -> String {
 pub(super) fn wait_failure(budget: Duration, failure: capture::Failure) -> String {
     match failure {
         capture::Failure::TimedOut { stopped } => docker_timed_out(budget, stopped),
-        capture::Failure::Unavailable(error) => format!("could not execute Docker: {error}"),
+        capture::Failure::Unavailable(error) => unavailable(&error),
         capture::Failure::Excessive => "Docker returned excessive output".to_owned(),
     }
 }
@@ -117,8 +124,7 @@ pub(super) fn execute_bounded_stdout(
 ) -> Result<BoundedOutput, String> {
     let deadline = Instant::now() + timeout;
     let unreadable = format!("{output} could not be read");
-    let mut child = capture::spawn(command.stdout(Stdio::piped()))
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+    let mut child = spawn_docker(command.stdout(Stdio::piped()))?;
     let stdout = child
         .stdout
         .take()

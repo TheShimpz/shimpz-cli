@@ -8,7 +8,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use super::exec::{docker_timed_out, output, quiet_status, silent_status, wait_failure};
+use super::exec::{
+    docker_timed_out, output, quiet_status, silent_status, spawn_docker, wait_failure,
+};
 use super::{ADMIN_IDENTITY, DOCKER_QUICK, Engine, HELPER_CPUS, isolated_container};
 use crate::capture;
 use crate::space::graph::{self, KIND_LABEL, MANAGED_LABEL};
@@ -387,14 +389,13 @@ impl Engine {
         let name = helper_name(RELEASE_STATUS_HELPER);
         let arguments =
             status_projection_arguments(self.platform, &self.cpuset, &mount, admin_image, &name);
-        let child = capture::spawn(
+        let child = spawn_docker(
             Command::new(&self.docker)
                 .args(arguments)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+        )?;
         Ok(Some(PendingStatus {
             child: Some(child),
             docker: self.docker.clone(),
@@ -411,13 +412,12 @@ impl Engine {
             return Err("the Local reset capability projection is invalid".into());
         }
         let (name, arguments) = self.reset_capability_helper(admin_image, true)?;
-        let mut child = capture::spawn(
+        let mut child = spawn_docker(
             Command::new(&self.docker)
                 .args(arguments)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null()),
-        )
-        .map_err(|error| format!("could not execute Docker: {error}"))?;
+        )?;
         let sent = child
             .stdin
             .take()
