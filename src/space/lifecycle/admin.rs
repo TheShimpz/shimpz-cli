@@ -177,7 +177,7 @@ fn authentication_state(value: &str) -> Option<AdminAuthenticationState> {
 
 /// The Local Admin session endpoint on its published loopback `port`.
 fn admin_session_url(port: u16) -> String {
-    format!("http://{}:{port}/api/session", graph::ADMIN_PUBLISHED_HOST)
+    format!("{}/api/session", graph::admin_origin(port))
 }
 
 pub(super) fn admin_authentication_state(port: u16) -> Result<AdminAuthenticationState, String> {
@@ -274,13 +274,11 @@ fn request_admin_reset(
     };
     let body = serde_json::to_string(&payload)
         .map_err(|_| "could not encode the authorized Space reset".to_owned())?;
-    let request = ureq::http::Request::delete(format!(
-        "http://{}:{port}/api/space/host",
-        graph::ADMIN_PUBLISHED_HOST
-    ))
-    .header("Content-Type", "application/json")
-    .body(body)
-    .map_err(|_| "could not build the authorized Space reset".to_owned())?;
+    let request =
+        ureq::http::Request::delete(format!("{}/api/space/host", graph::admin_origin(port)))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .map_err(|_| "could not build the authorized Space reset".to_owned())?;
     let mut response = agent
         .run(request)
         .map_err(|_| RESET_INCOMPLETE.to_owned())?;

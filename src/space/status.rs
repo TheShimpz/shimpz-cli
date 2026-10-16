@@ -294,13 +294,13 @@ pub(crate) fn render(
     let assistant_summary = assistant_summary(running_assistants, assistants.len(), "running");
     if problems.is_empty() {
         return Ok(format!(
-            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:{}\nServices: {healthy} healthy\n{assistant_summary}\nRelease: {}",
-            installed.port,
+            "Shimpz Space is healthy.\nAdmin: {}\nServices: {healthy} healthy\n{assistant_summary}\nRelease: {}",
+            graph::admin_origin(installed.port),
             release_label(installed)
         ));
     }
     let admin = if matches!(observations[0].runtime, Runtime::Running(Health::Healthy)) {
-        format!("http://127.0.0.1:{}", installed.port)
+        graph::admin_origin(installed.port)
     } else {
         "unavailable".into()
     };

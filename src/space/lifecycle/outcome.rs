@@ -1,6 +1,7 @@
 //! The bounded outcome messages lifecycle commands print.
 
 use crate::space::docker::ResolvedRelease;
+use crate::space::graph;
 use crate::space::scheduler;
 use crate::space::state::Installed;
 
@@ -32,7 +33,8 @@ pub(super) fn recreation_notice(release: &ResolvedRelease) -> String {
 
 pub(super) fn ready_outcome(release: &ResolvedRelease, port: u16) -> String {
     format!(
-        "Shimpz Space is ready.\nAdmin: http://127.0.0.1:{port}\nRelease: ordinal {}\nNext: open the Admin address above.",
+        "Shimpz Space is ready.\nAdmin: {}\nRelease: ordinal {}\nNext: open the Admin address above.",
+        graph::admin_origin(port),
         release.metadata.ordinal
     )
 }

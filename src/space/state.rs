@@ -201,9 +201,7 @@ fn validate_environment(
             return Err("an installed Local component image is invalid".into());
         }
     }
-    if values["SHIMPZ_ADMIN_ALLOWED_ORIGINS"]
-        != format!("http://localhost:{port},http://127.0.0.1:{port}")
-    {
+    if values["SHIMPZ_ADMIN_ALLOWED_ORIGINS"] != graph::admin_origins(port) {
         return Err("the installed Local Admin origins are invalid".into());
     }
     if !valid_cpuset(values["SHIMPZ_CPUSET"]) || values["SHIMPZ_DOCKER_GID"].parse::<u32>().is_err()
@@ -241,7 +239,7 @@ pub(crate) fn write_environment(
     let profile = environment.profile.storage().name();
     let release = &environment.release;
     let mut document = format!(
-        "SHIMPZ_ADMIN_IMAGE={}\nSHIMPZ_TEAM_IMAGE={}\nSHIMPZ_BRAIN_IMAGE={}\nSHIMPZ_EGRESS_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_ORDINAL={}\nSHIMPZ_SPACE_PLATFORM={platform}\nSHIMPZ_PORT={}\nSHIMPZ_DOCKER_GID={}\nSHIMPZ_DOCKER_SOCKET={}\nSHIMPZ_SPACE_ID={}\nSHIMPZ_CPUSET={}\nSHIMPZ_PROJECT_NAME={project}\nSHIMPZ_ADMIN_ALLOWED_ORIGINS=http://localhost:{},http://127.0.0.1:{}\nSHIMPZ_STORAGE_PROFILE={profile}\n",
+        "SHIMPZ_ADMIN_IMAGE={}\nSHIMPZ_TEAM_IMAGE={}\nSHIMPZ_BRAIN_IMAGE={}\nSHIMPZ_EGRESS_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_IMAGE={}\nSHIMPZ_LOCAL_RELEASE_ORDINAL={}\nSHIMPZ_SPACE_PLATFORM={platform}\nSHIMPZ_PORT={}\nSHIMPZ_DOCKER_GID={}\nSHIMPZ_DOCKER_SOCKET={}\nSHIMPZ_SPACE_ID={}\nSHIMPZ_CPUSET={}\nSHIMPZ_PROJECT_NAME={project}\nSHIMPZ_ADMIN_ALLOWED_ORIGINS={}\nSHIMPZ_STORAGE_PROFILE={profile}\n",
         release.metadata.admin,
         release.metadata.team,
         release.metadata.brain,
@@ -253,8 +251,7 @@ pub(crate) fn write_environment(
         environment.docker_socket.display(),
         environment.space_id,
         environment.cpuset,
-        environment.port,
-        environment.port,
+        graph::admin_origins(environment.port),
         project = graph::PROJECT,
     );
     if environment.profile == HostProfile::Linux {

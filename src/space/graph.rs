@@ -12,6 +12,16 @@ pub(crate) const PROJECT: &str = "shimpz-space";
 pub(crate) const ADMIN_PUBLISHED_PORT: &str = "4600/tcp";
 /// The only host address Admin's published port binds.
 pub(crate) const ADMIN_PUBLISHED_HOST: &str = "127.0.0.1";
+
+/// Admin's address on its published loopback `port`.
+pub(crate) fn admin_origin(port: u16) -> String {
+    format!("http://{ADMIN_PUBLISHED_HOST}:{port}")
+}
+
+/// The browser origins Admin admits on its published `port`, as its environment lists them.
+pub(crate) fn admin_origins(port: u16) -> String {
+    format!("http://localhost:{port},{}", admin_origin(port))
+}
 /// The label key every Space-managed container and network outside the Compose project carries, with the value `1`.
 pub(crate) const MANAGED_LABEL: &str = "com.shimpz.local.managed";
 /// The label key naming a Space-managed container's or network's kind.
