@@ -197,6 +197,7 @@ pub(crate) fn status() -> Result<String, String> {
         stopped,
         &components,
         &snapshot.assistants,
+        &snapshot.browsers,
     )
 }
 
@@ -255,23 +256,25 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
         .into_iter()
         .map(str::to_owned)
         .collect();
-    // A Team Browser is a dynamic container too, but it is never an Assistant (ADR-0117).
-    let assistants = resources::inspect_containers(
+    // A Team Browser is a dynamic container too: it counts toward the stop proof but never as an Assistant
+    // (ADR-0117).
+    let (mut assistants, mut browsers) = (Vec::new(), Vec::new());
+    for record in resources::inspect_containers(
         engine,
         &assistant_ids,
         "{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{.State.Status}}|{{.State.ExitCode}}",
         "Assistant runtime state",
-    )?
-    .iter()
-    .filter_map(|record| match record.split_once('|') {
-        Some(("browser", _)) => None,
-        Some(("assistant", state)) => Some(status_report::observe_assistant(state)),
-        _ => Some(Err(inconsistent())),
-    })
-    .collect::<Result<Vec<_>, String>>()?;
+    )? {
+        match record.split_once('|') {
+            Some(("assistant", state)) => assistants.push(status_report::observe_assistant(state)?),
+            Some(("browser", state)) => browsers.push(status_report::observe_assistant(state)?),
+            _ => return Err(inconsistent()),
+        }
+    }
     Ok(RuntimeSnapshot {
         components,
         assistants,
+        browsers,
     })
 }
 
@@ -324,6 +327,7 @@ type ControllerSocket = Result<(PathBuf, u32), String>;
 struct RuntimeSnapshot {
     components: Vec<status_report::Observation>,
     assistants: Vec<status_report::AssistantObservation>,
+    browsers: Vec<status_report::AssistantObservation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -635,7 +639,11 @@ impl Context {
         let stopped_inventory =
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped_inventory)?;
-        if !status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
+        if !status_report::fully_stopped(
+            &snapshot.components,
+            &snapshot.assistants,
+            &snapshot.browsers,
+        )? {
             return Err(status_report::incomplete_stop_error(
                 &snapshot.components,
                 &snapshot.assistants,
@@ -647,6 +655,7 @@ impl Context {
             true,
             &snapshot.components,
             &snapshot.assistants,
+            &snapshot.browsers,
         )
     }
 
@@ -3766,6 +3775,10 @@ mod tests {
                 status_report::observe_assistant("running|0").unwrap(),
                 status_report::observe_assistant("exited|137").unwrap(),
             ]
+        );
+        assert_eq!(
+            snapshot.browsers,
+            [status_report::observe_assistant("running|0").unwrap()]
         );
 
         let (temporary, engine) = inspecting_docker("");

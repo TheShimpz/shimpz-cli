@@ -155,7 +155,11 @@ impl Context {
         self.stop_owned_containers(&inventory)?;
         let stopped = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped)?;
-        if status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
+        if status_report::fully_stopped(
+            &snapshot.components,
+            &snapshot.assistants,
+            &snapshot.browsers,
+        )? {
             Ok(())
         } else {
             Err("the Space stop is incomplete; re-run shimpz stop".into())
