@@ -485,10 +485,16 @@ fn validate_dynamic_containers(
                 if fields[0].starts_with("/shimpz-local-")
                     && team_id::valid(fields[5])
                     && identifier::assistant_id(fields[6]) => {}
+            // A Team Browser, created by Team for one task on the static Browser network (ADR-0117).
+            "browser"
+                if fields[0].starts_with("/shimpz-local-")
+                    && fields[0].ends_with("-browser")
+                    && team_id::valid(fields[5])
+                    && fields[6].is_empty() => {}
             kind if managed_proxy(kind, fields[0]) => {}
             _ => return Err("a managed container has invalid kind or name".into()),
         }
-        if fields[4] != "assistant" && !unique.insert(fields[4].to_owned()) {
+        if !matches!(fields[4], "assistant" | "browser") && !unique.insert(fields[4].to_owned()) {
             return Err("duplicate managed proxy identity".into());
         }
     }
@@ -500,6 +506,7 @@ fn validate_dynamic_containers(
 fn managed_proxy(kind: &str, name: &str) -> bool {
     [
         graph::ASSISTANT_EGRESS,
+        graph::BROWSER_EGRESS,
         graph::ASSISTANT_RELEASE,
         graph::BRAIN_EGRESS,
         graph::ACCOUNT_EGRESS,
@@ -589,6 +596,7 @@ mod tests {
     fn admits_only_a_graph_egress_proxy_under_its_own_kind() {
         for (kind, name) in [
             ("assistant-egress", "/shimpz-assistant-egress"),
+            ("browser-egress", "/shimpz-browser-egress"),
             ("assistant-release", "/shimpz-assistant-release"),
             ("brain-egress", "/shimpz-brain-egress"),
             ("account-egress", "/shimpz-account-egress"),
@@ -762,6 +770,38 @@ mod tests {
             &"a".repeat(41),
         ] {
             assert!(validate(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_containers_are_team_owned_and_carry_no_assistant_id() {
+        let space = "space-1";
+        let validate = |name: &str, team: &str, assistant: &str| {
+            let (_temporary, engine) = fake_docker(&format!(
+                "{:0<64}|{name}|1|{PROFILE}|{space}|browser|{team}|{assistant}\n",
+                "c001"
+            ));
+            validate_dynamic_containers(&engine, space, &["c001".to_owned()])
+        };
+        assert_eq!(
+            validate("/shimpz-local-space-team_1-browser", "team_1", ""),
+            Ok(())
+        );
+        for (name, team, assistant) in [
+            (
+                "/shimpz-local-space-team_1-browser",
+                "team_1",
+                "dns-manager",
+            ),
+            ("/shimpz-local-space-team_1-browser", "", ""),
+            ("/shimpz-browser", "team_1", ""),
+            ("/shimpz-local-space-team_1-browsers", "team_1", ""),
+        ] {
+            assert!(
+                validate(name, team, assistant).is_err(),
+                "{name} {team} {assistant}"
+            );
         }
     }
 

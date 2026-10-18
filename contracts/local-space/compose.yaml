@@ -247,6 +247,59 @@ services:
       - assistant_egress
       - assistant_egress_out
 
+  shimpz-browser-egress:
+    container_name: shimpz-browser-egress
+    image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
+    platform: ${SHIMPZ_SPACE_PLATFORM:?CLI must pin SHIMPZ_SPACE_PLATFORM}
+    pull_policy: never
+    restart: on-failure
+    user: "10032:10032"
+    command: ["browser"]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.shimpz.local.managed: "1"
+      com.shimpz.local.profile: local-v1
+      com.shimpz.local.space-id: ${SHIMPZ_SPACE_ID:?CLI must preserve SHIMPZ_SPACE_ID}
+      com.shimpz.local.kind: browser-egress
+    volumes:
+      - type: volume
+        source: browser_egress_audit
+        target: /var/log/browser-egress
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    # The proxy never forwards packets between the Browser network and its outbound network (ADR-0117).
+    sysctls:
+      net.ipv4.ip_forward: "0"
+    healthcheck:
+      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "browser"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+    cpuset: "${SHIMPZ_CPUSET:?CLI must limit local CPUs}"
+    cpus: "0.5"
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 512
+        hard: 512
+    # Team restarts this proxy between Browser tasks; it exits on SIGTERM at once.
+    stop_grace_period: 5s
+    logging:
+      driver: none
+    networks:
+      - browser
+      - browser_egress_out
+
   shimpz-assistant-release:
     container_name: shimpz-assistant-release
     image: ${SHIMPZ_EGRESS_IMAGE:?CLI must pin SHIMPZ_EGRESS_IMAGE}
@@ -576,6 +629,17 @@ networks:
     internal: true
   assistant_release_out:
     name: shimpz-space-assistant-release-out
+    driver: bridge
+  # At most one Team Browser at a time beside its egress (ADR-0117): no route out, no host gateway, no IPv6.
+  browser:
+    name: shimpz-space-browser
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+  browser_egress_out:
+    name: shimpz-space-browser-egress-out
     driver: bridge
   account_egress:
     name: shimpz-space-account-egress

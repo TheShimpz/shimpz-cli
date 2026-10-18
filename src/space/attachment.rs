@@ -174,7 +174,7 @@ mod tests {
     }
 
     fn admin() -> &'static Member {
-        &graph::MEMBERS[6]
+        &graph::ADMIN
     }
 
     #[test]

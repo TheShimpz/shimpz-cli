@@ -21,7 +21,7 @@ pub(crate) struct Component {
 }
 
 /// Every container of the graph, in the order status reports them.
-pub(crate) const COMPONENTS: [Component; 8] = [
+pub(crate) const COMPONENTS: [Component; 9] = [
     Component {
         docker_name: graph::ADMIN.container,
         service: graph::ADMIN.service,
@@ -69,6 +69,12 @@ pub(crate) const COMPONENTS: [Component; 8] = [
         service: ACCOUNT_EGRESS_INIT,
         label: "Account setup",
         expectation: Expectation::Init,
+    },
+    Component {
+        docker_name: graph::BROWSER_EGRESS.container,
+        service: graph::BROWSER_EGRESS.service,
+        label: "Browser network boundary",
+        expectation: Expectation::Service,
     },
 ];
 
@@ -502,7 +508,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:7777\nServices: 7 healthy\nAssistants: 0 installed\nRelease: ordinal 42"
+            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:7777\nServices: 8 healthy\nAssistants: 0 installed\nRelease: ordinal 42"
         );
         assert!(!rendered.contains("sha256:"));
         assert!(!rendered.contains("space-"));
@@ -531,7 +537,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "Shimpz Space is stopped.\nServices: 7 stopped\nAssistants: 2 stopped\nRelease: ordinal 42\nConfiguration: will reconcile on start\nNext: shimpz start"
+            "Shimpz Space is stopped.\nServices: 8 stopped\nAssistants: 2 stopped\nRelease: ordinal 42\nConfiguration: will reconcile on start\nNext: shimpz start"
         );
         assert!(fully_stopped(&stopped_observations(), &[assistant("exited|137")]).unwrap());
 
@@ -554,7 +560,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "Shimpz Space needs attention.\nServices: 6 of 7 stopped\nAssistants: 1 of 2 stopped\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
+            "Shimpz Space needs attention.\nServices: 7 of 8 stopped\nAssistants: 1 of 2 stopped\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
         );
         assert!(!fully_stopped(&observations, &[]).unwrap());
         assert_eq!(
@@ -621,7 +627,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "Shimpz Space needs attention.\nAdmin: unavailable\nServices: 4 of 7 healthy\nAssistants: 0 of 1 running\nRelease: ordinal 42\nProblems:\n  - Local configuration needs reconciliation.\n  - Admin stopped with exit code 0.\n  - Team stopped with exit code 7.\n  - Assistant release boundary is unhealthy.\n  - Account setup is missing.\n  - 1 Assistant is not running.\nNext: shimpz start"
+            "Shimpz Space needs attention.\nAdmin: unavailable\nServices: 5 of 8 healthy\nAssistants: 0 of 1 running\nRelease: ordinal 42\nProblems:\n  - Local configuration needs reconciliation.\n  - Admin stopped with exit code 0.\n  - Team stopped with exit code 7.\n  - Assistant release boundary is unhealthy.\n  - Account setup is missing.\n  - 1 Assistant is not running.\nNext: shimpz start"
         );
 
         let plural = render(

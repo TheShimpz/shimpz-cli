@@ -255,14 +255,19 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
         .into_iter()
         .map(str::to_owned)
         .collect();
+    // A Team Browser is a dynamic container too, but it is never an Assistant (ADR-0117).
     let assistants = resources::inspect_containers(
         engine,
         &assistant_ids,
-        "{{.State.Status}}|{{.State.ExitCode}}",
+        "{{index .Config.Labels \"com.shimpz.local.kind\"}}|{{.State.Status}}|{{.State.ExitCode}}",
         "Assistant runtime state",
     )?
     .iter()
-    .map(|record| status_report::observe_assistant(record))
+    .filter_map(|record| match record.split_once('|') {
+        Some(("browser", _)) => None,
+        Some(("assistant", state)) => Some(status_report::observe_assistant(state)),
+        _ => Some(Err(inconsistent())),
+    })
     .collect::<Result<Vec<_>, String>>()?;
     Ok(RuntimeSnapshot {
         components,
@@ -3729,12 +3734,13 @@ mod tests {
             "{:0<64}|/shimpz-admin|admin|running|healthy|0\n\
              {:0<64}|/shimpz-team|team|exited||7\n\
              {:0<64}|/shimpz-account-egress-init|shimpz-account-egress-init|exited||0\n\
-             {:0<64}|running|0\n{:0<64}|exited|137\n",
-            "c001", "c002", "c003", "a001", "a002"
+             {:0<64}|assistant|running|0\n{:0<64}|assistant|exited|137\n{:0<64}|browser|running|0\n",
+            "c001", "c002", "c003", "a001", "a002", "b001"
         );
+        // A running Team Browser is a dynamic container that the Assistant count never includes.
         let inventory = Inventory {
             project_containers: vec!["c001".into(), "c002".into(), "c003".into()],
-            dynamic_containers: vec!["c002".into(), "a001".into(), "a002".into()],
+            dynamic_containers: vec!["c002".into(), "a001".into(), "a002".into(), "b001".into()],
             ..Inventory::default()
         };
         let (temporary, engine) = inspecting_docker(&map);
