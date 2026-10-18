@@ -735,9 +735,7 @@ impl Context {
         }
         let port = state::selected_port(installed)?;
         let (docker_socket, docker_gid) = controller_socket.release()?;
-        let previous = installed
-            .map(|_| backup_current(&self.paths, self.profile))
-            .transpose()?;
+        let previous = installed.map(|_| backup_current(&self.paths)).transpose()?;
         let candidate = Candidate {
             release,
             installed,
@@ -1968,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_backup_replaces_a_stale_graph_with_the_current_contract() {
+    fn rollback_backup_keeps_the_previous_releases_exact_graph() {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::under(home.path()).unwrap();
         fs::create_dir(&paths.home).unwrap();
@@ -1989,12 +1987,21 @@ mod tests {
         state::write_private(&paths.compose, "untrusted stale graph").unwrap();
         fs::write(&paths.environment, "current environment").unwrap();
 
+        // A graph that is not a private record is never kept for a rollback.
+        fs::set_permissions(
+            &paths.compose,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(backup_current(&paths).is_err());
+        state::write_private(&paths.compose, "the previous release's own graph").unwrap();
         assert!(!installed_graph_is_current(&paths, HostProfile::MacOs).unwrap());
-        let backup = backup_current(&paths, HostProfile::MacOs).unwrap();
+        let backup = backup_current(&paths).unwrap();
 
+        // The previous release runs on the graph its own CLI rendered, never on this CLI's newer one.
         assert_eq!(
             fs::read_to_string(backup.compose).unwrap(),
-            graph::render(graph::StorageProfile::ManagedDisk)
+            "the previous release's own graph"
         );
         assert_eq!(
             fs::read_to_string(backup.environment).unwrap(),
@@ -2022,7 +2029,8 @@ mod tests {
             },
         )
         .unwrap();
-        let backup = backup_current(&paths, HostProfile::MacOs).unwrap();
+        state::write_private(&paths.compose, &graph::render(HostProfile::MacOs.storage())).unwrap();
+        let backup = backup_current(&paths).unwrap();
         state::write_state_epoch(&paths, 1).unwrap();
         let context = Context {
             paths,

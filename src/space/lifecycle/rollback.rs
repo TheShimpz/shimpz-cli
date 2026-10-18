@@ -4,15 +4,16 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::output;
+use crate::private_file;
 use crate::space::docker::{COMPOSE_UP, ProjectionFailure, ResolvedRelease};
 use crate::space::host::HostProfile;
 use crate::space::paths::Paths;
 use crate::space::resources::Inventory;
 use crate::space::state::ReleaseOutcome;
 use crate::space::storage::linux;
-use crate::space::{graph, members, scheduler, state};
+use crate::space::{members, scheduler, state};
 
-use super::{Context, io_error, remove_runtime_files};
+use super::{Context, MAX_GRAPH_BYTES, io_error, remove_runtime_files};
 
 impl Context {
     pub(super) fn rollback(
@@ -171,10 +172,19 @@ pub(super) struct Backup {
     pub(super) environment: PathBuf,
 }
 
-pub(super) fn backup_current(paths: &Paths, profile: HostProfile) -> Result<Backup, String> {
+/// Keeps the installed release's exact graph and environment for its rollback. The graph is the one the previous
+/// release's own CLI rendered: a newer CLI's graph may run services the previous images cannot, so a rollback never
+/// renders it. It is read only as an admitted private lifecycle record, like the environment beside it.
+pub(super) fn backup_current(paths: &Paths) -> Result<Backup, String> {
     let compose = paths.compose.with_extension("previous");
     let environment = paths.environment.with_extension("previous");
-    state::write_private(&compose, &graph::render(profile.storage()))?;
+    let previous = private_file::read_admitted_text(
+        &paths.compose,
+        MAX_GRAPH_BYTES,
+        private_file::admit_record,
+    )
+    .map_err(|_| "the installed Local graph is not a readable private record".to_owned())?;
+    state::write_private(&compose, &previous)?;
     fs::copy(&paths.environment, &environment).map_err(io_error)?;
     Ok(Backup {
         compose,
