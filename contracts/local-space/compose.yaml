@@ -134,6 +134,17 @@ services:
         target: /var/lib/shimpz-local/routines/key
         volume:
           nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      # A Team's Sign-ins (ADR-0117): its sealed Chrome profiles and the key that seals them, kept apart.
+      - type: volume
+        source: controller_browser_sign_in_state
+        target: /var/lib/shimpz-local/browser-sign-ins/state
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
+      - type: volume
+        source: controller_browser_sign_in_key
+        target: /var/lib/shimpz-local/browser-sign-ins/key
+        volume:
+          nocopy: {{SHIMPZ_VOLUME_NOCOPY}}
       - type: volume
         source: assistant_egress_policy
         target: /var/lib/shimpz-local/assistant-egress

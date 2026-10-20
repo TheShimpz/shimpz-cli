@@ -187,7 +187,7 @@ const fn volume(name: &'static str, uid: u32, gid: u32, mode: u32) -> Volume {
     }
 }
 
-pub(crate) const VOLUMES: [Volume; 28] = [
+pub(crate) const VOLUMES: [Volume; 30] = [
     volume("data", 1000, 1000, 0o700),
     volume("controller_token", 10001, 10010, 0o2750),
     volume("controller_audit", 10001, 10001, 0o700),
@@ -214,6 +214,8 @@ pub(crate) const VOLUMES: [Volume; 28] = [
     volume("controller_assistant_stored_input_key", 10001, 10001, 0o700),
     volume("controller_routine_state", 10001, 10001, 0o700),
     volume("controller_routine_key", 10001, 10001, 0o700),
+    volume("controller_browser_sign_in_state", 10001, 10001, 0o700),
+    volume("controller_browser_sign_in_key", 10001, 10001, 0o700),
     volume("supervisor_key", 0, 10021, 0o2770),
     volume("release_status", 1000, 1000, 0o700),
     volume("reset_capability", 1000, 1000, 0o700),
@@ -228,8 +230,8 @@ pub(crate) const VOLUMES: [Volume; 28] = [
     volume("brain_runtime_state", 10001, 10001, 0o700),
 ];
 
-pub(crate) const VOLUME_NAMES: [&str; 28] = {
-    let mut names = [""; 28];
+pub(crate) const VOLUME_NAMES: [&str; 30] = {
+    let mut names = [""; 30];
     let mut index = 0;
     while index < VOLUMES.len() {
         names[index] = VOLUMES[index].name;
@@ -449,8 +451,8 @@ mod tests {
         );
         assert!(!managed.contains("      o: bind"));
         assert!(!managed.contains("SHIMPZ_SECURE_VOLUME_ROOT"));
-        assert_eq!(linux.matches("        nocopy: true").count(), 34);
-        assert_eq!(managed.matches("        nocopy: false").count(), 34);
+        assert_eq!(linux.matches("        nocopy: true").count(), 36);
+        assert_eq!(managed.matches("        nocopy: false").count(), 36);
         assert!(!linux.contains("        nocopy: false"));
         assert!(!managed.contains("        nocopy: true"));
     }
@@ -482,7 +484,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(mount_count, 34);
+            assert_eq!(mount_count, 36);
             assert_eq!(socket_count, 1);
             assert_eq!(sources, VOLUME_NAMES.into_iter().collect::<BTreeSet<_>>());
         }
