@@ -236,7 +236,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     healthcheck:
-      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "assistant"]
+      test: ["CMD", "/app/shimpz-egress", "healthcheck", "assistant"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -288,7 +288,7 @@ services:
     sysctls:
       net.ipv4.ip_forward: "0"
     healthcheck:
-      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "browser"]
+      test: ["CMD", "/app/shimpz-egress", "healthcheck", "browser"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -340,7 +340,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=8m
     healthcheck:
-      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "release"]
+      test: ["CMD", "/app/shimpz-egress", "healthcheck", "release"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -415,7 +415,7 @@ services:
       - account_egress
       - account_egress_out
     healthcheck:
-      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "account"]
+      test: ["CMD", "/app/shimpz-egress", "healthcheck", "account"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -464,7 +464,7 @@ services:
       - brain_egress
       - brain_egress_out
     healthcheck:
-      test: ["CMD", "python3", "/app/entrypoint.py", "healthcheck", "brain"]
+      test: ["CMD", "/app/shimpz-egress", "healthcheck", "brain"]
       interval: 30s
       timeout: 4s
       retries: 3

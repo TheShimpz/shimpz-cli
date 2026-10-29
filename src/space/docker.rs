@@ -542,9 +542,9 @@ impl Engine {
                     .args([
                         "exec",
                         ACCOUNT_EGRESS,
-                        "python3",
-                        "-c",
-                        "import sys; sys.path.insert(0, '/app/account'); import capability; capability.read_capability()",
+                        "/app/shimpz-egress",
+                        "account-capability",
+                        "check",
                     ])
                     .stdin(Stdio::null())
                     .stderr(Stdio::null()),
