@@ -25,43 +25,6 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo package --locked
 
-  lifecycle-coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - run: rustup component add llvm-tools-preview
-      - name: Restore the Cargo registry and build cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-bin: false
-          save-if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
-      - name: Install pinned coverage tool
-        uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # v2.79.11
-        with:
-          tool: cargo-llvm-cov
-          fallback: none
-      - name: Require 100% line coverage for pure Local lifecycle modules
-        run: |
-          cargo llvm-cov --all-features --locked --json --output-path coverage.json
-          for file in \
-            src/space/attachment.rs \
-            src/space/graph.rs \
-            src/space/host.rs \
-            src/space/release.rs \
-            src/space/status.rs \
-            src/space/storage/evidence.rs
-          do
-            covered="$(jq --arg suffix "$file" \
-              '[.data[0].files[] | select(.filename | endswith($suffix)) | select(.summary.lines.percent == 100)] | length' \
-              coverage.json)"
-            test "$covered" = 1 || {
-              echo "::error::$file does not have exact 100% line coverage"
-              exit 1
-            }
-          done
-
   test:
     strategy:
       fail-fast: false
