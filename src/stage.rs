@@ -129,11 +129,12 @@ COPY <<'EOF' /check/libraries.py
 usage: python3 -I -S -B libraries.py DIRECTORY...
 
 The image build runs this with the official interpreter and standard library alone (`-I -S`, never the venv) on each
-platform it builds. It finds the load roots below each DIRECTORY by ELF magic: every executable and every extension
-module the import system would load. It asks the image's own dynamic loader to list each one's libraries in that
-loading context, so inherited search paths resolve exactly as they do at run time. A root whose listing fails, names a
-library or symbol version as not found, or writes anything to stderr, and a directory that cannot be read, fail the
-build. This is a correctness aid for the Creator, not a security boundary.
+platform it builds. It finds the candidates below each DIRECTORY by ELF magic: every executable and every file with
+an extension-module suffix, which includes unversioned support libraries. The image's own dynamic loader lists each
+candidate's libraries; a candidate that a cleanly listed candidate loads is a dependency, checked where it loads, so
+inherited search paths resolve exactly as they do at run time. Every remaining candidate is a load root, and a root
+whose listing fails, names a library or symbol version as not found, or writes anything to stderr, and a directory
+that cannot be read, fail the build. This is a correctness aid for the Creator, not a security boundary.
 """
 
 import importlib.machinery
@@ -150,8 +151,8 @@ def _raise(error: OSError) -> None:
     raise error
 
 
-def load_roots(directories: list[str]) -> list[str]:
-    """Every regular ELF file below the directories that is an executable or an extension module."""
+def candidates(directories: list[str]) -> list[str]:
+    """Every regular ELF file below the directories that is an executable or has an extension-module suffix."""
     roots = set()
     for top in directories:
         for directory, _, names in os.walk(top, onerror=_raise):
@@ -167,22 +168,29 @@ def load_roots(directories: list[str]) -> list[str]:
     return sorted(roots)
 
 
-def failures(loader: str, roots: list[str]) -> list[str]:
-    """Each load root whose listing is not clean, with what the loader reported."""
-    found = []
-    for path in roots:
+def failures(loader: str, paths: list[str]) -> tuple[list[str], list[str]]:
+    """The load roots, and each one whose listing is not clean, with what the loader reported."""
+    reports, loaded = {}, set()
+    for path in paths:
         listing = subprocess.run([loader, "--list", path], capture_output=True, text=True, check=False)
         report = f"{listing.stdout}{listing.stderr}"
-        if listing.returncode != 0 or "not found" in report or listing.stderr.strip():
-            found.append(f"{path}:\n{report.strip()}")
-    return found
+        clean = listing.returncode == 0 and "not found" not in report and not listing.stderr.strip()
+        reports[path] = None if clean else report.strip()
+        if clean:
+            # Each resolved dependency prints as "name => /path (0x...)".
+            loaded |= {
+                os.path.realpath(line.split("=>", 1)[1].split(" (", 1)[0].strip())
+                for line in listing.stdout.splitlines()
+                if "=> /" in line
+            }
+    roots = [path for path in paths if os.path.realpath(path) not in loaded]
+    return roots, [f"{path}:\n{reports[path]}" for path in roots if reports[path] is not None]
 
 
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit("usage: libraries.py DIRECTORY...")
-    roots = load_roots(sys.argv[1:])
-    found = failures(LOADERS[os.uname().machine], roots)
+    roots, found = failures(LOADERS[os.uname().machine], candidates(sys.argv[1:]))
     if found:
         raise SystemExit("shared libraries do not load:\n" + "\n".join(found))
     print(f"{len(roots)} executables and extension modules load all their shared libraries")
