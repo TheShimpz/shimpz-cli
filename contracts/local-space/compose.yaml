@@ -485,15 +485,6 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    environment:
-      LANGCHAIN_TRACING_V2: "false"
-      LANGSMITH_TRACING: "false"
-      HTTPS_PROXY: http://shimpz-brain-egress:8888
-      HTTP_PROXY: http://shimpz-brain-egress:8888
-      https_proxy: http://shimpz-brain-egress:8888
-      http_proxy: http://shimpz-brain-egress:8888
-      NO_PROXY: localhost,127.0.0.1,::1
-      no_proxy: localhost,127.0.0.1,::1
     volumes:
       - type: volume
         source: brain_runtime_token
