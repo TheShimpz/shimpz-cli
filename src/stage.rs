@@ -82,9 +82,6 @@ if __name__ == "__main__":
     raise SystemExit(main())
 "#;
 
-/// The platform's non-executing ELF library check, byte-identical to the Developers build's.
-const LIBRARY_CHECK: &str = include_str!("library_check.py");
-
 const PACK_MISMATCH: &str = "the staged image's generated catalog does not match the language pack staged for it; pin the CLI's Python SDK in pyproject.toml, then stage again";
 const CONTRACT_PATH: &str = "/opt/shimpz/shimpz.contract.json";
 const PACK_PATH: &str = "/opt/shimpz/shimpz.pack.json";
@@ -125,9 +122,75 @@ RUN --network=none set -eu; \
         cp "/var/lib/dpkg/info/${package}:${architecture}.md5sums" "${root}/var/lib/dpkg/status.d/${package}.md5sums"; \
     done
 
-# The platform's library check (src/library_check.py), run in the runtime stage of each built platform by the official
-# interpreter alone: it reads the final filesystem as data and never runs anything from the image.
-COPY shimpz_library_check.py /check/libraries.py
+# The platform's library check, run in the runtime stage of each built platform (Developers tests/library-check.sh proves it).
+COPY <<'EOF' /check/libraries.py
+"""Prove that every executable and Python extension module of an Assistant image loads all its shared libraries.
+
+usage: python3 -I -S -B libraries.py DIRECTORY...
+
+The image build runs this with the official interpreter and standard library alone (`-I -S`, never the venv) on each
+platform it builds. It finds the load roots below each DIRECTORY by ELF magic: every executable and every extension
+module the import system would load. It asks the image's own dynamic loader to list each one's libraries in that
+loading context, so inherited search paths resolve exactly as they do at run time. A root whose listing fails, names a
+library or symbol version as not found, or writes anything to stderr, and a directory that cannot be read, fail the
+build. This is a correctness aid for the Creator, not a security boundary.
+"""
+
+import importlib.machinery
+import os
+import subprocess
+import sys
+
+EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+# The dynamic loader of each platform the build produces.
+LOADERS = {"x86_64": "/lib64/ld-linux-x86-64.so.2", "aarch64": "/lib/ld-linux-aarch64.so.1"}
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def load_roots(directories: list[str]) -> list[str]:
+    """Every regular ELF file below the directories that is an executable or an extension module."""
+    roots = set()
+    for top in directories:
+        for directory, _, names in os.walk(top, onerror=_raise):
+            for name in names:
+                path = os.path.join(directory, name)
+                if os.path.islink(path):
+                    continue
+                with open(path, "rb") as handle:
+                    if handle.read(4) != b"\x7fELF":
+                        continue
+                if name.endswith(EXTENSION_SUFFIXES) or (".so" not in name and os.access(path, os.X_OK)):
+                    roots.add(path)
+    return sorted(roots)
+
+
+def failures(loader: str, roots: list[str]) -> list[str]:
+    """Each load root whose listing is not clean, with what the loader reported."""
+    found = []
+    for path in roots:
+        listing = subprocess.run([loader, "--list", path], capture_output=True, text=True, check=False)
+        report = f"{listing.stdout}{listing.stderr}"
+        if listing.returncode != 0 or "not found" in report or listing.stderr.strip():
+            found.append(f"{path}:\n{report.strip()}")
+    return found
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: libraries.py DIRECTORY...")
+    roots = load_roots(sys.argv[1:])
+    found = failures(LOADERS[os.uname().machine], roots)
+    if found:
+        raise SystemExit("shared libraries do not load:\n" + "\n".join(found))
+    print(f"{len(roots)} executables and extension modules load all their shared libraries")
+
+
+if __name__ == "__main__":
+    main()
+EOF
 
 FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS build
 
@@ -169,7 +232,7 @@ ENV LANG=C.UTF-8 \
 
 # -I -S: no environment, venv, site directory, or .pth file the Creator's dependencies installed is ever read.
 RUN --network=none --mount=type=bind,from=interpreter,source=/check,target=/check \
-    ["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/"]
+    ["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/usr/local", "/opt/shimpz"]
 
 USER 10001:10001
 
@@ -241,10 +304,6 @@ fn prepare_context(
 ) -> Result<(), String> {
     write(path.join("Dockerfile"), DOCKERFILE.as_bytes())?;
     write(path.join("shimpz_action.py"), ACTION_RUNNER.as_bytes())?;
-    write(
-        path.join("shimpz_library_check.py"),
-        LIBRARY_CHECK.as_bytes(),
-    )?;
     write(path.join("shimpz.pack.json"), pack.bytes())?;
     write(path.join("source.package"), &package.bytes)?;
     write(path.join("pyproject.toml"), &package.pyproject)
@@ -756,7 +815,6 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8])
         platform.as_bytes(),
         DOCKERFILE.as_bytes(),
         ACTION_RUNNER.as_bytes(),
-        LIBRARY_CHECK.as_bytes(),
         source,
         requirements,
         pack,
@@ -1371,11 +1429,10 @@ mod tests {
     }
 
     #[test]
-    fn the_library_check_runs_on_the_official_interpreter_and_never_executes_the_image() {
+    fn the_library_check_runs_on_the_official_interpreter_never_the_venv() {
         assert!(DOCKERFILE.contains(
-            r#"["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/"]"#
+            r#"["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/usr/local", "/opt/shimpz"]"#
         ));
-        assert!(!LIBRARY_CHECK.contains("subprocess") && !LIBRARY_CHECK.contains("--list"));
     }
 
     #[cfg(unix)]
