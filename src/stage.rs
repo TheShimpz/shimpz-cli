@@ -82,6 +82,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 "#;
 
+/// The platform's non-executing ELF library check, byte-identical to the Developers build's.
+const LIBRARY_CHECK: &str = include_str!("library_check.py");
+
 const PACK_MISMATCH: &str = "the staged image's generated catalog does not match the language pack staged for it; pin the CLI's Python SDK in pyproject.toml, then stage again";
 const CONTRACT_PATH: &str = "/opt/shimpz/shimpz.contract.json";
 const PACK_PATH: &str = "/opt/shimpz/shimpz.pack.json";
@@ -122,35 +125,9 @@ RUN --network=none set -eu; \
         cp "/var/lib/dpkg/info/${package}:${architecture}.md5sums" "${root}/var/lib/dpkg/status.d/${package}.md5sums"; \
     done
 
-# Run in the runtime stage of each built platform: every ELF file of the interpreter, its extension modules, and the
-# installed wheels must resolve all its shared libraries in the final filesystem. The dynamic loader lists them
-# without running any library code.
-COPY <<'EOF' /check/libraries.py
-import os
-import subprocess
-import sys
-import sysconfig
-
-LOADERS = ("/usr/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1")
-loader = next(path for path in LOADERS if os.path.exists(path))
-tops = (sysconfig.get_config_var("LIBDIR"), sysconfig.get_path("platlib"))
-files = {os.path.realpath(sys.executable)}
-for top in tops:
-    for directory, _, names in os.walk(top):
-        files |= {os.path.join(directory, name) for name in names if ".so" in name}
-unresolved = []
-for path in sorted(files):
-    if os.path.islink(path):
-        continue
-    with open(path, "rb") as handle:
-        if handle.read(4) != b"\x7fELF":
-            continue
-    listing = subprocess.run([loader, "--list", path], capture_output=True, text=True, check=False)
-    if listing.returncode != 0 or "not found" in listing.stdout:
-        unresolved.append(f"{path}: {listing.stdout.strip()} {listing.stderr.strip()}")
-if unresolved:
-    sys.exit("unresolved shared libraries:\n" + "\n".join(unresolved))
-EOF
+# The platform's library check (src/library_check.py), run in the runtime stage of each built platform by the official
+# interpreter alone: it reads the final filesystem as data and never runs anything from the image.
+COPY shimpz_library_check.py /check/libraries.py
 
 FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS build
 
@@ -190,8 +167,9 @@ ENV LANG=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# -I -S: no environment, venv, site directory, or .pth file the Creator's dependencies installed is ever read.
 RUN --network=none --mount=type=bind,from=interpreter,source=/check,target=/check \
-    ["/opt/shimpz/runtime/bin/python3", "-I", "-B", "/check/libraries.py"]
+    ["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/"]
 
 USER 10001:10001
 
@@ -263,6 +241,10 @@ fn prepare_context(
 ) -> Result<(), String> {
     write(path.join("Dockerfile"), DOCKERFILE.as_bytes())?;
     write(path.join("shimpz_action.py"), ACTION_RUNNER.as_bytes())?;
+    write(
+        path.join("shimpz_library_check.py"),
+        LIBRARY_CHECK.as_bytes(),
+    )?;
     write(path.join("shimpz.pack.json"), pack.bytes())?;
     write(path.join("source.package"), &package.bytes)?;
     write(path.join("pyproject.toml"), &package.pyproject)
@@ -774,6 +756,7 @@ fn build_digest(source: &[u8], requirements: &[u8], platform: &str, pack: &[u8])
         platform.as_bytes(),
         DOCKERFILE.as_bytes(),
         ACTION_RUNNER.as_bytes(),
+        LIBRARY_CHECK.as_bytes(),
         source,
         requirements,
         pack,
@@ -1385,6 +1368,14 @@ mod tests {
         assert!(last.contains("COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json"));
         assert_eq!(last.matches("COPY ").count(), 1);
         assert!(!last.contains("RUN "));
+    }
+
+    #[test]
+    fn the_library_check_runs_on_the_official_interpreter_and_never_executes_the_image() {
+        assert!(DOCKERFILE.contains(
+            r#"["/usr/local/bin/python3.15", "-I", "-S", "-B", "/check/libraries.py", "/"]"#
+        ));
+        assert!(!LIBRARY_CHECK.contains("subprocess") && !LIBRARY_CHECK.contains("--list"));
     }
 
     #[cfg(unix)]
