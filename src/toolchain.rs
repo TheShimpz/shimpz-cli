@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use crate::output;
 
-const UV_VERSION: &str = "0.11.32";
+const UV_VERSION: &str = "0.13.1";
 
 pub(crate) fn uv() -> Result<Command, String> {
     let executable = match std::env::var_os("SHIMPZ_UV") {

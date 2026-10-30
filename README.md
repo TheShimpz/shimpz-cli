@@ -1,7 +1,7 @@
 # Shimpz CLI
 
 `shimpz` owns resource-first Assistant development and the native Local Space lifecycle. Assistant checks and
-Action runs work locally without Docker: the CLI installs a pinned `uv` in its private cache, manages Python 3.14,
+Action runs work locally without Docker: the CLI installs a pinned `uv` in its private cache, manages Python 3.15,
 and runs the public `shimpz` Python SDK from the Assistant's `pyproject.toml`. Space lifecycle commands use Docker
 to apply one atomic, digest-pinned release.
 

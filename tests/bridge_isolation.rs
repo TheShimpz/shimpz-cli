@@ -94,7 +94,7 @@ fn an_excluded_shimpz_root_never_runs_in_place_of_the_sdk_bridge() {
     fake_tool::write(
         &uv,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'uv 0.11.32'; exit 0; fi\n\
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'uv 0.13.1'; exit 0; fi\n\
              while [ \"$#\" -gt 0 ] && [ \"$1\" != python ]; do shift; done\n\
              [ \"$#\" -gt 0 ] || exit 1\nshift\nexec '{}' \"$@\"\n",
             python.display()

@@ -79,7 +79,7 @@ impl Workspace {
         let script = format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> '{log}'\n\
-             if [ \"$1\" = --version ]; then echo 'uv 0.11.32'; exit 0; fi\n\
+             if [ \"$1\" = --version ]; then echo 'uv 0.13.1'; exit 0; fi\n\
              if [ \"$1\" = run ]; then for argument in \"$@\"; do\n\
                if [ \"$argument\" = catalog ]; then printf '%s\\n' '{catalog}'; exit 0; fi\n\
                if [ \"$argument\" = verify-pack ]; then {verify}; fi\n\

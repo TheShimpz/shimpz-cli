@@ -17,9 +17,9 @@ const INPUT_UNSENT: &str = "Action input cannot be sent";
 const FRAME_TOO_LARGE: &str = "Python SDK response frame is larger than 512 KiB";
 const INVALID_OUTPUT: &str = "Python SDK returned invalid output";
 /// The Python version every Action runs on and every dependency set resolves for.
-pub(crate) const PYTHON_VERSION: &str = "3.14";
+pub(crate) const PYTHON_VERSION: &str = "3.15";
 /// The exact Shimpz SDK every Action runs with and every new Assistant declares.
-pub(crate) const SDK_REQUIREMENT: &str = "shimpz==0.7.2";
+pub(crate) const SDK_REQUIREMENT: &str = "shimpz==0.8.0";
 /// The only package index dependencies resolve from.
 pub(crate) const PACKAGE_INDEX: &str = "https://pypi.org/simple";
 const PRIVATE_BRIDGE_FAILURE: &str = "the Action process ended without a response frame";

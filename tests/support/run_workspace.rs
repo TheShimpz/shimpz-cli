@@ -29,7 +29,7 @@ impl Workspace {
         let script = format!(
             r#"#!/bin/sh
 ROOT='{root}'
-if [ "$1" = "--version" ]; then echo "uv 0.11.32"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "uv 0.13.1"; exit 0; fi
 if [ "$1" = "pip" ] && [ "$2" = "compile" ]; then exit 0; fi
 if [ "$1" = "run" ]; then
   for argument in "$@"; do

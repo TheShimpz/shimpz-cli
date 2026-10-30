@@ -129,13 +129,13 @@ fn pyproject(name: &str) -> String {
 name = \"{name}\"
 version = \"0.1.0\"
 description = \"A Hello World Assistant for Shimpz\"
-requires-python = \">=3.14\"
+requires-python = \">=3.15\"
 dependencies = [
   \"{SDK_REQUIREMENT}\",
 ]
 
 [tool.ruff]
-target-version = \"py314\"
+target-version = \"py315\"
 line-length = 120
 
 [tool.ruff.lint]
@@ -268,7 +268,7 @@ mod tests {
         assert!(
             fs::read_to_string(root.join("pyproject.toml"))
                 .unwrap()
-                .contains("\"shimpz==0.7.2\"")
+                .contains("\"shimpz==0.8.0\"")
         );
         assert!(
             fs::read_to_string(root.join("actions/hello_world.py"))
