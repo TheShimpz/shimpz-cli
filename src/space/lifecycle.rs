@@ -2270,7 +2270,7 @@ mod tests {
         assert!(
             !fs::read_to_string(&log)
                 .unwrap()
-                .contains("authentication_state")
+                .contains("authentication-state")
         );
         let changed = Installed {
             admin_image: format!("ghcr.io/theshimpz/shimpz-admin@sha256:{}", "f".repeat(64)),
@@ -2284,7 +2284,7 @@ mod tests {
         assert!(
             fs::read_to_string(&log)
                 .unwrap()
-                .contains("authentication_state")
+                .contains("authentication-state")
         );
     }
 

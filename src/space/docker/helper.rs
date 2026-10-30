@@ -217,11 +217,22 @@ impl Drop for PendingStatus {
     }
 }
 
-/// One-shot Python helper container: removed on exit, never pulled, offline, with a read-only root, no capabilities,
-/// and no privilege gain, inside the Space cpuset with one CPU, `memory` without swap, 32 processes, a
-/// non-executable `/tmp`, and exactly one `mount`. `options` holds only the helper's own name, labels, stdin, and
-/// identity.
-pub(super) fn python_helper_arguments(
+/// The Team image's interpreter, which runs Team's helpers.
+pub(super) const TEAM_HELPER_ENTRYPOINT: &str = "/opt/venv/bin/python";
+/// The Admin binary, whose closed subcommands are Admin's helpers.
+pub(super) const ADMIN_HELPER_ENTRYPOINT: &str = "/usr/local/bin/shimpz-admin";
+/// The Admin helper that writes the release status document on its input.
+const RELEASE_STATUS_WRITE: [&str; 2] = ["release-status", "write"];
+/// The Admin helper that writes the host reset capability document on its input.
+pub(super) const RESET_CAPABILITY_WRITE: [&str; 2] = ["reset-capability", "write"];
+/// The Admin helper that removes the host reset capability.
+pub(super) const RESET_CAPABILITY_CLEAR: [&str; 2] = ["reset-capability", "clear"];
+
+/// One-shot helper container: removed on exit, never pulled, offline, with a read-only root, no capabilities, and no
+/// privilege gain, inside the Space cpuset with one CPU, `memory` without swap, 32 processes, a non-executable `/tmp`,
+/// and exactly one `mount`. `command` is the image's entrypoint the helper runs, then its arguments. `options` holds
+/// only the helper's own name, labels, stdin, and identity.
+pub(super) fn helper_arguments(
     platform: &str,
     cpuset: &str,
     memory: &str,
@@ -230,6 +241,11 @@ pub(super) fn python_helper_arguments(
     image: &str,
     command: &[&str],
 ) -> Vec<OsString> {
+    let (entrypoint, arguments) = command
+        .split_first()
+        .map_or(("", &[][..]), |(entrypoint, arguments)| {
+            (*entrypoint, arguments)
+        });
     ["run", "--rm"]
         .into_iter()
         .chain(options.iter().copied())
@@ -250,10 +266,10 @@ pub(super) fn python_helper_arguments(
             "--mount",
             mount,
             "--entrypoint",
-            "/opt/venv/bin/python",
+            entrypoint,
             image,
         ])
-        .chain(command.iter().copied())
+        .chain(arguments.iter().copied())
         .map(OsString::from)
         .collect()
 }
@@ -265,23 +281,14 @@ pub(super) fn status_projection_arguments(
     admin_image: &str,
     name: &str,
 ) -> Vec<OsString> {
-    let script = "import json,os,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert len(raw)<=1024 and set(document)=={'release','ordinal','checked_at','outcome'}; target='/run/shimpz-local-release/status.json'; temporary=target+'.tmp'; descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.close(descriptor); os.replace(temporary,target)";
     admin_helper_arguments(
         platform,
         cpuset,
         mount,
         admin_image,
         &admin_helper_options(RELEASE_STATUS_HELPER, true, name),
-        script,
+        &RELEASE_STATUS_WRITE,
     )
-}
-
-pub(super) fn reset_capability_write_script() -> &'static str {
-    "import json,os,stat,sys; raw=sys.stdin.buffer.read(1025); document=json.loads(raw); assert 0<len(raw)<=1024 and set(document)=={'version','purpose','space_id','created_at','expires_at','capability_sha256'}; target='/run/shimpz-local-reset/capability.json'; temporary=target+'.tmp'; flags=os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0); descriptor=os.open(temporary,flags,0o600); record=os.fstat(descriptor); assert stat.S_ISREG(record.st_mode) and record.st_nlink==1 and record.st_uid==1000 and record.st_gid==1000; assert os.write(descriptor,raw)==len(raw); os.fchmod(descriptor,0o600); os.fsync(descriptor); os.close(descriptor); os.replace(temporary,target)"
-}
-
-pub(super) fn reset_capability_clear_script() -> &'static str {
-    "import os; root='/run/shimpz-local-reset'; [(os.unlink(path) if os.path.lexists(path) else None) for path in (root+'/capability.json',root+'/capability.json.tmp')]"
 }
 
 pub(super) fn reset_capability_arguments(
@@ -290,7 +297,7 @@ pub(super) fn reset_capability_arguments(
     mount: &str,
     admin_image: &str,
     interactive: bool,
-    script: &str,
+    command: &[&str],
     name: &str,
 ) -> Vec<OsString> {
     admin_helper_arguments(
@@ -299,7 +306,7 @@ pub(super) fn reset_capability_arguments(
         mount,
         admin_image,
         &admin_helper_options(RESET_CAPABILITY_HELPER, interactive, name),
-        script,
+        command,
     )
 }
 
@@ -314,24 +321,28 @@ pub(super) fn admin_helper_options(kind: &str, interactive: bool, name: &str) ->
         .collect()
 }
 
-/// A bounded helper with `options` that runs `script` with the Admin image.
+/// A bounded helper with `options` that runs one closed Admin subcommand with the Admin image.
 fn admin_helper_arguments(
     platform: &str,
     cpuset: &str,
     mount: &str,
     admin_image: &str,
     options: &[String],
-    script: &str,
+    command: &[&str],
 ) -> Vec<OsString> {
     let options: Vec<&str> = options.iter().map(String::as_str).collect();
-    python_helper_arguments(
+    let command: Vec<&str> = [ADMIN_HELPER_ENTRYPOINT]
+        .into_iter()
+        .chain(command.iter().copied())
+        .collect();
+    helper_arguments(
         platform,
         cpuset,
         "64m",
         &options,
         mount,
         admin_image,
-        &["-c", script],
+        &command,
     )
 }
 
@@ -468,10 +479,10 @@ impl Engine {
             graph::resource_name(RESET_CAPABILITY_VOLUME)
         );
         let name = helper_name(RESET_CAPABILITY_HELPER);
-        let script = if write {
-            reset_capability_write_script()
+        let command: &[&str] = if write {
+            &RESET_CAPABILITY_WRITE
         } else {
-            reset_capability_clear_script()
+            &RESET_CAPABILITY_CLEAR
         };
         let arguments = reset_capability_arguments(
             self.platform,
@@ -479,7 +490,7 @@ impl Engine {
             &mount,
             admin_image,
             write,
-            script,
+            command,
             &name,
         );
         Ok((name, arguments))

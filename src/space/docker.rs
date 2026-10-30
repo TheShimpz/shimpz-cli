@@ -31,8 +31,11 @@ use exec::{
     execute_bounded_stdout, output, quiet_status, render_diagnostic, silent_status, spawn_docker,
     wait_failure,
 };
+use helper::{
+    ADMIN_HELPER_ENTRYPOINT, TEAM_HELPER_ENTRYPOINT, admin_helper_options, helper_arguments,
+    helper_failure, helper_labels,
+};
 pub(crate) use helper::{PendingStatus, ProjectionFailure};
-use helper::{admin_helper_options, helper_failure, helper_labels, python_helper_arguments};
 
 /// How long one Docker metadata call or short one-shot helper may run: inspections, versions, contexts, creates,
 /// copies of the release metadata or CLI, removals, starts, and the kilobyte-sized helper containers. They answer in
@@ -749,14 +752,14 @@ fn socket_probe_arguments(
     if let Some(gid) = gid.as_deref() {
         options.extend(["--group-add", gid]);
     }
-    python_helper_arguments(
+    helper_arguments(
         platform,
         cpuset,
         "64m",
         &options,
         mount,
         team_image,
-        &["-c", script],
+        &[TEAM_HELPER_ENTRYPOINT, "-c", script],
     )
 }
 
@@ -934,14 +937,14 @@ fn admin_authentication_probe_arguments(
 ) -> Vec<OsString> {
     let options = admin_helper_options(ADMIN_AUTHENTICATION_PROBE, false, container);
     let options: Vec<&str> = options.iter().map(String::as_str).collect();
-    python_helper_arguments(
+    helper_arguments(
         platform,
         cpuset,
         "256m",
         &options,
         mount,
         admin_image,
-        &["-m", "authentication_state"],
+        &[ADMIN_HELPER_ENTRYPOINT, "authentication-state"],
     )
 }
 
@@ -1071,9 +1074,9 @@ mod tests {
 
     use super::exec::{MAX_DOCKER_OUTPUT_BYTES, drain_diagnostic, execute_quiet};
     use super::helper::{
-        RELEASE_STATUS_HELPER, RELEASE_STATUS_VOLUME, RESET_CAPABILITY_VOLUME, helper_name,
-        remove_helper, reset_capability_arguments, reset_capability_clear_script,
-        reset_capability_write_script, status_projection_arguments, sweep_helpers,
+        RELEASE_STATUS_HELPER, RELEASE_STATUS_VOLUME, RESET_CAPABILITY_CLEAR,
+        RESET_CAPABILITY_VOLUME, RESET_CAPABILITY_WRITE, helper_name, remove_helper,
+        reset_capability_arguments, status_projection_arguments, sweep_helpers,
     };
     use super::release::image_present;
     use super::*;
@@ -1736,8 +1739,24 @@ mod tests {
             clear_volumes_arguments("linux/amd64", "0", &image, "c", &["brain_runtime_state"]),
             admin_authentication_probe_arguments("linux/amd64", "0", "m", &image, "c"),
             status_projection_arguments("linux/amd64", "0", "m", &image, "c"),
-            reset_capability_arguments("linux/amd64", "0", "m", &image, true, "s", "c"),
-            reset_capability_arguments("linux/amd64", "0", "m", &image, false, "s", "c"),
+            reset_capability_arguments(
+                "linux/amd64",
+                "0",
+                "m",
+                &image,
+                true,
+                &RESET_CAPABILITY_WRITE,
+                "c",
+            ),
+            reset_capability_arguments(
+                "linux/amd64",
+                "0",
+                "m",
+                &image,
+                false,
+                &RESET_CAPABILITY_CLEAR,
+                "c",
+            ),
             socket_probe_arguments("linux/amd64", "0", "m", &image, None, "s"),
             socket_probe_arguments("linux/amd64", "0", "m", &image, Some(989), "s"),
         ];
@@ -1864,9 +1883,9 @@ mod tests {
             "--pids-limit",
             "32",
             mount,
-            "/opt/venv/bin/python",
+            "/usr/local/bin/shimpz-admin",
             image.as_str(),
-            "authentication_state",
+            "authentication-state",
         ] {
             assert!(arguments.iter().any(|argument| argument == required));
         }
@@ -2209,7 +2228,7 @@ mod tests {
             mount,
             &image,
             true,
-            reset_capability_write_script(),
+            &RESET_CAPABILITY_WRITE,
             "shimpz-reset-capability-1-0",
         );
 
@@ -2231,8 +2250,15 @@ mod tests {
             assert!(arguments.iter().any(|argument| argument == required));
         }
         assert!(arguments.iter().all(|argument| argument != "--tty"));
-        assert!(reset_capability_write_script().contains("O_NOFOLLOW"));
-        assert!(reset_capability_write_script().contains("os.fsync"));
+        let arguments = text(arguments);
+        let entrypoint = arguments
+            .iter()
+            .position(|argument| argument == "--entrypoint")
+            .unwrap();
+        assert_eq!(
+            arguments[entrypoint + 1..],
+            [ADMIN, image.as_str(), "reset-capability", "write"]
+        );
     }
 
     #[test]
@@ -2243,24 +2269,24 @@ mod tests {
             "type=volume,src=reset,dst=/run/reset,volume-nocopy",
             &format!("ghcr.io/theshimpz/shimpz-admin@sha256:{DIGEST}"),
             false,
-            reset_capability_clear_script(),
+            &RESET_CAPABILITY_CLEAR,
             "shimpz-reset-capability-1-1",
         );
 
         assert!(arguments.iter().all(|argument| argument != "--interactive"));
         assert!(arguments.iter().all(|argument| argument != "--tty"));
-        assert!(reset_capability_clear_script().contains("capability.json"));
-        assert!(!reset_capability_clear_script().contains("sys.stdin"));
+        assert!(text(arguments).ends_with(&["reset-capability".to_owned(), "clear".to_owned()]));
     }
 
-    /// The exact argument list every Python helper must produce: its own identity, the complete hardening set once,
-    /// and its own command after the image.
+    /// The exact argument list every helper must produce: its own identity, the complete hardening set once, its
+    /// entrypoint (the first of `command`), and the rest of its command after the image.
     fn hardened_helper(
         options: &[&str],
         memory: &str,
         image: &str,
         command: &[&str],
     ) -> Vec<String> {
+        let (entrypoint, command) = command.split_first().unwrap();
         ["run", "--rm"]
             .into_iter()
             .chain(options.iter().copied())
@@ -2291,7 +2317,7 @@ mod tests {
                 "--mount",
                 "m",
                 "--entrypoint",
-                "/opt/venv/bin/python",
+                entrypoint,
                 image,
             ])
             .chain(command.iter().copied())
@@ -2346,27 +2372,47 @@ mod tests {
             text(admin_authentication_probe_arguments(
                 platform, cpuset, "m", &image, "c"
             )),
-            hardened_helper(&admin, "256m", &image, &["-m", "authentication_state"])
+            hardened_helper(&admin, "256m", &image, &[ADMIN, "authentication-state"])
         );
         assert_eq!(
             text(reset_capability_arguments(
-                platform, cpuset, "m", &image, true, "s", "n"
+                platform,
+                cpuset,
+                "m",
+                &image,
+                true,
+                &RESET_CAPABILITY_WRITE,
+                "n"
             )),
-            hardened_helper(&stdin_reset, "64m", &image, &["-c", "s"])
+            hardened_helper(
+                &stdin_reset,
+                "64m",
+                &image,
+                &[ADMIN, "reset-capability", "write"]
+            )
         );
         assert_eq!(
             text(reset_capability_arguments(
-                platform, cpuset, "m", &image, false, "s", "n"
+                platform,
+                cpuset,
+                "m",
+                &image,
+                false,
+                &RESET_CAPABILITY_CLEAR,
+                "n"
             )),
-            hardened_helper(&reset, "64m", &image, &["-c", "s"])
+            hardened_helper(&reset, "64m", &image, &[ADMIN, "reset-capability", "clear"])
         );
-        let status = text(status_projection_arguments(
-            platform, cpuset, "m", &image, "n",
-        ));
-        let script = status.last().unwrap().clone();
         assert_eq!(
-            status,
-            hardened_helper(&stdin_status, "64m", &image, &["-c", &script])
+            text(status_projection_arguments(
+                platform, cpuset, "m", &image, "n",
+            )),
+            hardened_helper(
+                &stdin_status,
+                "64m",
+                &image,
+                &[ADMIN, "release-status", "write"]
+            )
         );
     }
 
@@ -2383,7 +2429,12 @@ mod tests {
                 None,
                 "s"
             )),
-            hardened_helper(&["--user", "10001:10001"], "64m", &image, &["-c", "s"])
+            hardened_helper(
+                &["--user", "10001:10001"],
+                "64m",
+                &image,
+                &[TEAM, "-c", "s"]
+            )
         );
         assert_eq!(
             text(socket_probe_arguments(
@@ -2398,8 +2449,13 @@ mod tests {
                 &["--user", "10001:10001", "--group-add", "7"],
                 "64m",
                 &image,
-                &["-c", "s"]
+                &[TEAM, "-c", "s"]
             )
         );
     }
+
+    /// The Admin binary, whose subcommands are Admin's helpers.
+    const ADMIN: &str = "/usr/local/bin/shimpz-admin";
+    /// The Team image's interpreter.
+    const TEAM: &str = "/opt/venv/bin/python";
 }
