@@ -84,18 +84,8 @@ const ADMIN_AUTHENTICATION_PROBE: &str = "admin-authentication-probe";
 /// Team and Brain, the only writers of the runtime state volumes, both run as this identity, so the reset runs as it
 /// too and needs no capability.
 const RUNTIME_STATE_OWNER: &str = "10001:10001";
-const RUNTIME_STATE_OWNER_UID: u32 = 10001;
 /// Admin's runtime identity: its helpers run as it, so they own exactly what Admin itself writes and reads.
 const ADMIN_IDENTITY: &str = "1000:1000";
-
-/// First proves every volume root below `root` and every entry below it belongs to `owner`, never following a link; a
-/// traversal error or a foreign entry stops the reset before anything changes. Only then does it let the owner enter
-/// and empty its own directories, leaving every file mode unchanged, and delete everything below the volume roots.
-fn runtime_state_reset_script(owner: u32, root: &str) -> String {
-    format!(
-        "set -eu; foreign=$(find {root} -mindepth 1 ! -user {owner} -print -quit); test -z \"$foreign\"; find {root} -mindepth 2 -type d ! -perm -u=rwx -exec chmod u+rwx {{}} +; find {root} -mindepth 2 -delete; sync"
-    )
-}
 
 pub(crate) struct Engine {
     docker: PathBuf,
@@ -272,13 +262,7 @@ impl Engine {
     pub(crate) fn team_activity(&self, container: &str, timeout: Duration) -> TeamActivity {
         match execute_bounded_stdout(
             Command::new(&self.docker)
-                .args([
-                    "exec",
-                    container,
-                    "/opt/venv/bin/python",
-                    "-m",
-                    "local.activity",
-                ])
+                .args(["exec", container, TEAM_HELPER_ENTRYPOINT, "activity"])
                 .stdin(Stdio::null())
                 .stderr(Stdio::null()),
             timeout,
@@ -405,13 +389,13 @@ impl Engine {
             HostProfile::MacOs => {
                 let value = self
                     .run_output(socket_probe_arguments(
-                    self.platform,
-                    &self.cpuset,
-                    &mount,
-                    team_image,
-                    None,
-                    "import os,stat; metadata=os.stat('/var/run/docker.sock'); assert stat.S_ISSOCK(metadata.st_mode); print(metadata.st_gid)",
-                ))
+                        self.platform,
+                        &self.cpuset,
+                        &mount,
+                        team_image,
+                        None,
+                        "gid",
+                    ))
                     .map_err(|error| {
                         format!("the Team controller Docker socket identity probe failed: {error}")
                     })?;
@@ -431,7 +415,6 @@ impl Engine {
                 dedicated_socket_group(path, gid)?
             }
         };
-        let script = "import socket; c=socket.socket(socket.AF_UNIX); c.settimeout(5); c.connect('/var/run/docker.sock'); c.sendall(b'GET /_ping HTTP/1.0\\r\\nHost: docker\\r\\n\\r\\n'); s=c.recv(128).split(b'\\r\\n',1)[0]; c.close(); raise SystemExit(0 if s in {b'HTTP/1.0 200 OK',b'HTTP/1.1 200 OK'} else 1)";
         let status = self.run_quiet_status(
             "Team controller Docker socket access probe",
             socket_probe_arguments(
@@ -440,7 +423,7 @@ impl Engine {
                 &mount,
                 team_image,
                 Some(gid),
-                script,
+                "ping",
             ),
         )?;
         if status.success() {
@@ -744,7 +727,7 @@ fn socket_probe_arguments(
     mount: &str,
     team_image: &str,
     gid: Option<u32>,
-    script: &str,
+    probe: &str,
 ) -> Vec<OsString> {
     let gid = gid.map(|gid| gid.to_string());
     // The probe runs as the Team controller's own identity, so it proves exactly the access Team will have.
@@ -759,7 +742,7 @@ fn socket_probe_arguments(
         &options,
         mount,
         team_image,
-        &[TEAM_HELPER_ENTRYPOINT, "-c", script],
+        &[TEAM_HELPER_ENTRYPOINT, "socket-probe", probe],
     )
 }
 
@@ -919,12 +902,18 @@ fn clear_volumes_arguments(
             .into(),
         );
     }
-    // Depth 1 holds the volume roots themselves, which stay; everything below them is removed, and the deletions
-    // reach the disk where they ran, inside Docker's own machine, before the new epoch is recorded.
-    for value in ["--entrypoint", "/bin/sh", image, "-c"] {
+    // Team's own wipe proves every entry below /state belongs to it, never following a link, before anything changes;
+    // the volume roots themselves stay, everything below them is removed, and the deletions reach the disk where
+    // they ran, inside Docker's own machine, before the new epoch is recorded.
+    for value in [
+        "--entrypoint",
+        TEAM_HELPER_ENTRYPOINT,
+        image,
+        "wipe-runtime-state",
+        "/state",
+    ] {
         arguments.push(value.into());
     }
-    arguments.push(runtime_state_reset_script(RUNTIME_STATE_OWNER_UID, "/state").into());
     arguments
 }
 
@@ -1221,7 +1210,7 @@ mod tests {
         let arguments = fs::read_to_string(calls).unwrap();
         assert_eq!(
             arguments.lines().collect::<Vec<_>>(),
-            ["exec team-id /opt/venv/bin/python -m local.activity"; 4]
+            ["exec team-id /usr/local/bin/shimpz-team activity"; 4]
         );
     }
 
@@ -1234,7 +1223,7 @@ mod tests {
         crate::fake_tool::write(
             &command,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'print(metadata.st_gid)'*) printf '0\\n' ;; esac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'socket-probe gid'*) printf '0\\n' ;; esac\n",
                 calls.display()
             ),
         );
@@ -1577,7 +1566,7 @@ mod tests {
             "type=bind,src=/var/run/docker.sock.raw,dst=/var/run/docker.sock",
             &format!("ghcr.io/theshimpz/shimpz-team-local@sha256:{DIGEST}"),
             Some(0),
-            "pass",
+            "ping",
         );
         let pairs = [
             ("--platform", "linux/arm64"),
@@ -1608,9 +1597,9 @@ mod tests {
                 && pair[1] == "type=bind,src=/var/run/docker.sock.raw,dst=/var/run/docker.sock"
         }));
         assert!(
-            arguments
-                .windows(2)
-                .any(|pair| { pair[0] == "--entrypoint" && pair[1] == "/opt/venv/bin/python" })
+            arguments.windows(2).any(|pair| {
+                pair[0] == "--entrypoint" && pair[1] == "/usr/local/bin/shimpz-team"
+            })
         );
     }
 
@@ -1672,62 +1661,6 @@ mod tests {
         }
         let (timings, _) = read_compose_progress(many.as_slice(), started).unwrap();
         assert_eq!(timings.summary().len(), MAX_COMPOSE_CONTAINERS);
-    }
-
-    /// The reset script itself, run by the host shell on a real tree: it refuses a foreign owner or an untraversable
-    /// directory before changing anything, never follows a link out of the roots, keeps the roots, and changes no
-    /// file mode.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn runtime_state_reset_proves_ownership_before_it_deletes() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
-        let run = |root: &Path, owner: u32| {
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(runtime_state_reset_script(
-                    owner,
-                    &root.display().to_string(),
-                ))
-                .output()
-                .unwrap()
-                .status
-                .success()
-        };
-        let state = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let root = state.path().join("controller_routine_state");
-        let nested = root.join("a/b");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("key"), "test-token").unwrap();
-        fs::set_permissions(nested.join("key"), fs::Permissions::from_mode(0o400)).unwrap();
-        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
-        fs::write(outside.path().join("kept"), "kept").unwrap();
-        symlink(outside.path(), root.join("link")).unwrap();
-        let owner = fs::metadata(state.path()).unwrap().uid();
-
-        // Another owner: every entry is foreign, so nothing changes.
-        assert!(!run(state.path(), owner + 1));
-        assert!(nested.join("key").exists());
-        // An untraversable directory stops the proof before any repair or deletion.
-        let blocked = root.join("blocked");
-        fs::create_dir(&blocked).unwrap();
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
-        assert!(!run(state.path(), owner));
-        assert_eq!(
-            fs::metadata(&nested).unwrap().permissions().mode() & 0o777,
-            0o500
-        );
-        assert!(nested.join("key").exists());
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
-        // The owner's own tree: emptied below the root, the root kept, the link's target untouched.
-        assert!(run(state.path(), owner));
-        assert!(root.is_dir());
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
-        assert_eq!(
-            fs::read_to_string(outside.path().join("kept")).unwrap(),
-            "kept"
-        );
     }
 
     /// Every helper container the CLI starts runs as one explicit non-root identity with every capability dropped.
@@ -1819,15 +1752,14 @@ mod tests {
             .iter()
             .map(|argument| argument.to_str().unwrap())
             .collect();
-        let script = runtime_state_reset_script(10001, "/state");
-        let tail = [image.as_str(), "-c", script.as_str()];
+        let tail = [image.as_str(), "wipe-runtime-state", "/state"];
         assert_eq!(&arguments[arguments.len() - tail.len()..], tail);
         for pair in [
             ["--network", "none"],
             ["--pull", "never"],
             ["--cap-drop", "ALL"],
             ["--user", "10001:10001"],
-            ["--entrypoint", "/bin/sh"],
+            ["--entrypoint", "/usr/local/bin/shimpz-team"],
             [
                 "--mount",
                 "type=volume,src=shimpz-space-controller-routine-state,dst=/state/controller_routine_state,volume-nocopy",
@@ -2433,7 +2365,7 @@ mod tests {
                 &["--user", "10001:10001"],
                 "64m",
                 &image,
-                &[TEAM, "-c", "s"]
+                &[TEAM, "socket-probe", "s"]
             )
         );
         assert_eq!(
@@ -2449,13 +2381,13 @@ mod tests {
                 &["--user", "10001:10001", "--group-add", "7"],
                 "64m",
                 &image,
-                &[TEAM, "-c", "s"]
+                &[TEAM, "socket-probe", "s"]
             )
         );
     }
 
     /// The Admin binary, whose subcommands are Admin's helpers.
     const ADMIN: &str = "/usr/local/bin/shimpz-admin";
-    /// The Team image's interpreter.
-    const TEAM: &str = "/opt/venv/bin/python";
+    /// The Team binary, whose subcommands are Team's helpers.
+    const TEAM: &str = "/usr/local/bin/shimpz-team";
 }

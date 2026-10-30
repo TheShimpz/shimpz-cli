@@ -217,8 +217,8 @@ impl Drop for PendingStatus {
     }
 }
 
-/// The Team image's interpreter, which runs Team's helpers.
-pub(super) const TEAM_HELPER_ENTRYPOINT: &str = "/opt/venv/bin/python";
+/// The Team binary, whose closed subcommands are Team's helpers.
+pub(super) const TEAM_HELPER_ENTRYPOINT: &str = "/usr/local/bin/shimpz-team";
 /// The Admin binary, whose closed subcommands are Admin's helpers.
 pub(super) const ADMIN_HELPER_ENTRYPOINT: &str = "/usr/local/bin/shimpz-admin";
 /// The Admin helper that writes the release status document on its input.
