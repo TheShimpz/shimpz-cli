@@ -62,7 +62,7 @@ struct DiscoveryProjection {
     integrations: Vec<String>,
 }
 
-const ACTION_RUNNER: &str = r#"#!/opt/shimpz/runtime/bin/python3.14
+const ACTION_RUNNER: &str = r#"#!/opt/shimpz/runtime/bin/python3
 from __future__ import annotations
 
 import sys
@@ -90,13 +90,76 @@ const MAX_CONTRACT_BYTES: usize = 524_288;
 const FINAL_FILE_MODE: u32 = 0o444;
 
 const DOCKERFILE: &str = r#"# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
-FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170 AS build
+# The interpreter, its standard library, and the shared libraries they need are assembled here, from the official
+# image and never after Creator code ran. Only GUI, terminal, ndbm/gdbm, and CPython self-test modules are left out.
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS interpreter
+
+# Debian packages the distroless base lacks; it already carries libc6, libgcc-s1, libstdc++6, libssl3t64, zlib1g,
+# libzstd1, ca-certificates, and tzdata.
+RUN --network=none set -eu; \
+    packages="libbz2-1.0 libffi8 liblzma5 libmpdec4 libsqlite3-0 libuuid1"; \
+    root=/interpreter; \
+    stdlib=/usr/local/lib/python3.15; \
+    mkdir -p "${root}/usr/local/bin" "${root}/usr/local/lib" "${root}/var/lib/dpkg/status.d"; \
+    cp -a /usr/local/bin/python3.15 "${root}/usr/local/bin/"; \
+    cp -a /usr/local/lib/libpython3.15.so.1.0 "${root}/usr/local/lib/"; \
+    cp -a "${stdlib}" "${root}/usr/local/lib/"; \
+    cd "${root}${stdlib}"; \
+    rm -rf config-3.15-* ensurepip idlelib site-packages/* tkinter turtle.py turtledemo curses \
+        lib-dynload/_test* lib-dynload/xx* lib-dynload/_ctypes_test.* lib-dynload/_tkinter.* \
+        lib-dynload/_curses* lib-dynload/readline.* lib-dynload/_dbm.* lib-dynload/_gdbm.*; \
+    # The official image ships no bytecode, and the read-only runtime could never cache any: compile it once here,
+    # unchecked, since nothing can change these sources after the build.
+    /usr/local/bin/python3.15 -m compileall -q -j 0 --invalidation-mode unchecked-hash \
+        -s "${root}" -p / "${root}${stdlib}"; \
+    architecture="$(dpkg --print-architecture)"; \
+    for package in ${packages}; do \
+        dpkg-query --listfiles "${package}:${architecture}" | grep -E '\.so(\.[0-9]+)*$' | while read -r path; do \
+            cp -a --parents "${path}" "${root}/"; \
+        done; \
+        cp -a --parents "/usr/share/doc/${package}/copyright" "${root}/"; \
+        dpkg-query --status "${package}:${architecture}" > "${root}/var/lib/dpkg/status.d/${package}"; \
+        cp "/var/lib/dpkg/info/${package}:${architecture}.md5sums" "${root}/var/lib/dpkg/status.d/${package}.md5sums"; \
+    done
+
+# Run in the runtime stage of each built platform: every ELF file of the interpreter, its extension modules, and the
+# installed wheels must resolve all its shared libraries in the final filesystem. The dynamic loader lists them
+# without running any library code.
+COPY <<'EOF' /check/libraries.py
+import os
+import subprocess
+import sys
+import sysconfig
+
+LOADERS = ("/usr/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1")
+loader = next(path for path in LOADERS if os.path.exists(path))
+tops = (sysconfig.get_config_var("LIBDIR"), sysconfig.get_path("platlib"))
+files = {os.path.realpath(sys.executable)}
+for top in tops:
+    for directory, _, names in os.walk(top):
+        files |= {os.path.join(directory, name) for name in names if ".so" in name}
+unresolved = []
+for path in sorted(files):
+    if os.path.islink(path):
+        continue
+    with open(path, "rb") as handle:
+        if handle.read(4) != b"\x7fELF":
+            continue
+    listing = subprocess.run([loader, "--list", path], capture_output=True, text=True, check=False)
+    if listing.returncode != 0 or "not found" in listing.stdout:
+        unresolved.append(f"{path}: {listing.stdout.strip()} {listing.stderr.strip()}")
+if unresolved:
+    sys.exit("unresolved shared libraries:\n" + "\n".join(unresolved))
+EOF
+
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS build
 
 WORKDIR /opt/shimpz
 
+# The runtime holds no installer: the image's own pip installs into a venv created without one.
 COPY --chmod=0444 requirements.lock /tmp/requirements.lock
-RUN python3 -m venv /opt/shimpz/runtime \
-    && PIP_ROOT_USER_ACTION=ignore /opt/shimpz/runtime/bin/python3.14 -m pip install \
+RUN python3.15 -m venv --without-pip /opt/shimpz/runtime \
+    && PIP_ROOT_USER_ACTION=ignore python3.15 -m pip --python /opt/shimpz/runtime/bin/python3.15 install \
         --disable-pip-version-check \
         --no-cache-dir \
         --only-binary=:all: \
@@ -108,7 +171,7 @@ RUN python3 -m venv /opt/shimpz/runtime \
 COPY --chmod=0555 shimpz_action.py /usr/local/bin/shimpz-action
 COPY --chmod=0444 source.package /opt/shimpz/.shimpz/source.package
 ADD --chmod=0444 source.package /opt/shimpz/
-RUN --network=none /opt/shimpz/runtime/bin/python3.14 -m shimpz._bridge contract /opt/shimpz \
+RUN --network=none /opt/shimpz/runtime/bin/python3.15 -m shimpz._bridge contract /opt/shimpz \
         > /tmp/shimpz.contract.json \
     && mv /tmp/shimpz.contract.json /opt/shimpz/shimpz.contract.json \
     && rm -rf /opt/shimpz/tests \
@@ -117,23 +180,28 @@ RUN --network=none /opt/shimpz/runtime/bin/python3.14 -m shimpz._bridge contract
     && find /opt/shimpz -path /opt/shimpz/runtime -prune -o \
         -type f -exec chmod 0444 {} +
 
-FROM gcr.io/distroless/python3-debian13:nonroot@sha256:83aa8d4f74a4d7f7cf2d472054139bef71a927b76c680c0f2e1021d6b1d6d732
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e AS runtime
 
-COPY --from=build /usr/local/bin/python3.14 /usr/local/bin/python3.14
-COPY --from=build /usr/local/bin/python3 /usr/local/bin/python3
-COPY --from=build /usr/local/lib/libpython3.14.so.1.0 /usr/local/lib/libpython3.14.so.1.0
-COPY --from=build /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
+COPY --from=interpreter /interpreter/ /
 COPY --from=build /opt/shimpz/ /opt/shimpz/
 COPY --from=build /usr/local/bin/shimpz-action /usr/local/bin/shimpz-action
-# The language pack enters only here, after the stage that ran Creator code. The CLI verifies the final files from
-# outside the image, because that stage could have changed the interpreter and standard library copied here.
-COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+RUN --network=none --mount=type=bind,from=interpreter,source=/check,target=/check \
+    ["/opt/shimpz/runtime/bin/python3", "-I", "-B", "/check/libraries.py"]
+
 USER 10001:10001
-ENTRYPOINT ["/opt/shimpz/runtime/bin/python3.14","-c","import signal; signal.pause()"]
+
+FROM runtime
+
+# The language pack enters only here, after the stage that ran Creator code. The CLI still verifies the final files
+# from outside the image instead of trusting anything inside it.
+COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json
+
+ENTRYPOINT ["/opt/shimpz/runtime/bin/python3","-c","import signal; signal.pause()"]
 "#;
 
 pub(crate) fn run(project: &Path) -> Result<String, String> {
@@ -1310,14 +1378,12 @@ mod tests {
     #[test]
     fn the_staged_pack_enters_the_final_image_after_creator_code_and_nothing_in_it_verifies() {
         let (build, last) = DOCKERFILE
-            .split_once("\nFROM gcr.io/distroless")
+            .split_once("\nFROM runtime\n")
             .expect("final stage");
         assert!(build.contains("shimpz._bridge contract"));
         assert!(!build.contains("shimpz.pack.json"));
-        let copy = last
-            .find("COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json")
-            .expect("pack copy");
-        assert!(last.rfind("COPY --from=build").unwrap() < copy);
+        assert!(last.contains("COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json"));
+        assert_eq!(last.matches("COPY ").count(), 1);
         assert!(!last.contains("RUN "));
     }
 
