@@ -131,29 +131,62 @@ usage: python3 -I -S -B libraries.py DIRECTORY...
 The image build runs this with the official interpreter and standard library alone (`-I -S`, never the venv) on each
 platform it builds. It finds the candidates below each DIRECTORY by ELF magic: every executable and every file with
 an extension-module suffix, which includes unversioned support libraries. The image's own dynamic loader lists each
-candidate's libraries; a candidate that a cleanly listed candidate loads is a dependency, checked where it loads, so
-inherited search paths resolve exactly as they do at run time. Every remaining candidate is a load root, and a root
+candidate's libraries, except a static executable: one whose well-formed ELF header, for the build's machine, has
+neither a program interpreter nor a dynamic section loads no shared library, and the loader cannot list it. A
+candidate that a cleanly listed candidate loads is a dependency, checked where it loads, so inherited search paths
+resolve exactly as they do at run time. Every remaining candidate is a load root, and a root
 whose listing fails, names a library or symbol version as not found, or writes anything to stderr, and a directory
 that cannot be read, fail the build. This is a correctness aid for the Creator, not a security boundary.
 """
 
 import importlib.machinery
 import os
+import struct
 import subprocess
 import sys
 
 EXTENSION_SUFFIXES = tuple(importlib.machinery.EXTENSION_SUFFIXES)
 # The dynamic loader of each platform the build produces.
 LOADERS = {"x86_64": "/lib64/ld-linux-x86-64.so.2", "aarch64": "/lib/ld-linux-aarch64.so.1"}
+# The ELF e_machine of each such platform; both are 64-bit little-endian.
+MACHINES = {"x86_64": 62, "aarch64": 183}
+ET_EXEC, PT_DYNAMIC, PT_INTERP, HEADER, ENTRY = 2, 2, 3, 64, 56
 
 
 def _raise(error: OSError) -> None:
     raise error
 
 
-def candidates(directories: list[str]) -> list[str]:
-    """Every regular ELF file below the directories that is an executable or has an extension-module suffix."""
-    roots = set()
+def static_executable(path: str, machine: int) -> bool:
+    """Whether the file is a well-formed ELF executable for this machine without an interpreter or dynamic section.
+
+    It is only read. The header must be 64-bit little-endian with an in-file program header table; anything else is
+    not static, so the loader lists it and an invalid file fails.
+    """
+    with open(path, "rb") as handle:
+        header = handle.read(HEADER)
+        if len(header) != HEADER or header[:7] != b"\x7fELF\x02\x01\x01":
+            return False
+        kind, target = struct.unpack_from("<HH", header, 16)
+        (table,) = struct.unpack_from("<Q", header, 32)
+        size, entry, count = struct.unpack_from("<HHH", header, 52)
+        end = table + count * ENTRY
+        if (kind, target, size, entry) != (ET_EXEC, machine, HEADER, ENTRY) or not 0 < count < 0xFFFF:
+            return False
+        if table < HEADER or end > os.fstat(handle.fileno()).st_size:
+            return False
+        handle.seek(table)
+        entries = handle.read(end - table)
+    kinds = {struct.unpack_from("<I", entries, index * ENTRY)[0] for index in range(count)}
+    return PT_INTERP not in kinds and PT_DYNAMIC not in kinds
+
+
+def candidates(directories: list[str], machine: int) -> tuple[list[str], int]:
+    """Every ELF executable or extension module below the directories but the static executables, and their count.
+
+    A file with an extension-module suffix is always a candidate.
+    """
+    roots, statics = set(), 0
     for top in directories:
         for directory, _, names in os.walk(top, onerror=_raise):
             for name in names:
@@ -163,9 +196,14 @@ def candidates(directories: list[str]) -> list[str]:
                 with open(path, "rb") as handle:
                     if handle.read(4) != b"\x7fELF":
                         continue
-                if name.endswith(EXTENSION_SUFFIXES) or (".so" not in name and os.access(path, os.X_OK)):
+                if name.endswith(EXTENSION_SUFFIXES):
                     roots.add(path)
-    return sorted(roots)
+                elif ".so" not in name and os.access(path, os.X_OK):
+                    if static_executable(path, machine):
+                        statics += 1
+                    else:
+                        roots.add(path)
+    return sorted(roots), statics
 
 
 def failures(loader: str, paths: list[str]) -> tuple[list[str], list[str]]:
@@ -190,10 +228,12 @@ def failures(loader: str, paths: list[str]) -> tuple[list[str], list[str]]:
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit("usage: libraries.py DIRECTORY...")
-    roots, found = failures(LOADERS[os.uname().machine], candidates(sys.argv[1:]))
+    platform = os.uname().machine
+    paths, statics = candidates(sys.argv[1:], MACHINES[platform])
+    roots, found = failures(LOADERS[platform], paths)
     if found:
         raise SystemExit("shared libraries do not load:\n" + "\n".join(found))
-    print(f"{len(roots)} executables and extension modules load all their shared libraries")
+    print(f"{len(roots)} executables and extension modules load all their shared libraries; {statics} static")
 
 
 if __name__ == "__main__":
