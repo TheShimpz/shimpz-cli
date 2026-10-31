@@ -1006,7 +1006,7 @@ mod tests {
         }
         assert!(
             validate_dependency_sources(
-                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.7.2\", \"httpx>=0.28\"]\n"
+                b"[project]\nauthors = [{ email = \"creator@example.test\" }]\ndependencies = [\"shimpz==0.8.0\", \"httpx>=0.28\"]\n"
             )
             .is_ok()
         );
@@ -1594,14 +1594,14 @@ mod tests {
             fs::write(
                 context.path().join("Dockerfile"),
                 "FROM scratch\n\
-                 COPY --chmod=0555 python3.14 /usr/local/bin/python3.14\n\
-                 COPY --chmod=0444 json.py /usr/local/lib/python3.14/json/__init__.py\n\
+                 COPY --chmod=0555 python3.15 /usr/local/bin/python3.15\n\
+                 COPY --chmod=0444 json.py /usr/local/lib/python3.15/json/__init__.py\n\
                  COPY --chmod=0444 shimpz.contract.json /opt/shimpz/shimpz.contract.json\n\
                  COPY --chmod=0444 shimpz.pack.json /opt/shimpz/shimpz.pack.json\n\
-                 ENTRYPOINT [\"/usr/local/bin/python3.14\"]\n",
+                 ENTRYPOINT [\"/usr/local/bin/python3.15\"]\n",
             )
             .unwrap();
-            fs::write(context.path().join("python3.14"), "#!/bin/sh\nexit 0\n").unwrap();
+            fs::write(context.path().join("python3.15"), "#!/bin/sh\nexit 0\n").unwrap();
             fs::write(context.path().join("json.py"), "def loads(_): return {}\n").unwrap();
             fs::write(context.path().join("shimpz.contract.json"), contract).unwrap();
             fs::write(context.path().join("shimpz.pack.json"), PROOF_PACK).unwrap();
