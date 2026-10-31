@@ -268,6 +268,8 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
         match record.split_once('|') {
             Some(("assistant", state)) => assistants.push(status_report::observe_assistant(state)?),
             Some(("browser", state)) => browsers.push(status_report::observe_assistant(state)?),
+            // A snapshot reader is never started: neither an Assistant nor anything a stop has to end.
+            Some(("snapshot-reader", _)) => {}
             _ => return Err(inconsistent()),
         }
     }
