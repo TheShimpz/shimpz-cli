@@ -491,10 +491,19 @@ fn validate_dynamic_containers(
                     && fields[0].ends_with("-browser")
                     && team_id::valid(fields[5])
                     && fields[6].is_empty() => {}
+            // A never-started reader Team creates to copy files out of a staged snapshot image; Team removes it once
+            // read, and a restart in the middle of a read can leave it behind for Team's next start to remove.
+            "snapshot-reader"
+                if fields[0].starts_with("/shimpz-local-")
+                    && fields[0].contains("-snapshot-")
+                    && fields[5].is_empty()
+                    && fields[6].is_empty() => {}
             kind if managed_proxy(kind, fields[0]) => {}
             _ => return Err("a managed container has invalid kind or name".into()),
         }
-        if !matches!(fields[4], "assistant" | "browser") && !unique.insert(fields[4].to_owned()) {
+        if !matches!(fields[4], "assistant" | "browser" | "snapshot-reader")
+            && !unique.insert(fields[4].to_owned())
+        {
             return Err("duplicate managed proxy identity".into());
         }
     }
