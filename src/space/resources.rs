@@ -457,6 +457,11 @@ fn labels_template(labels: &str, keys: &[&str]) -> String {
     })
 }
 
+/// Whether an inspected label is unset: Docker's template prints `<no value>` for a missing key.
+fn label_absent(value: &str) -> bool {
+    value.is_empty() || value == "<no value>"
+}
+
 fn validate_dynamic_containers(
     engine: &Engine,
     space_id: &str,
@@ -496,8 +501,8 @@ fn validate_dynamic_containers(
             "snapshot-reader"
                 if fields[0].starts_with("/shimpz-local-")
                     && fields[0].contains("-snapshot-")
-                    && fields[5].is_empty()
-                    && fields[6].is_empty() => {}
+                    && label_absent(fields[5])
+                    && label_absent(fields[6]) => {}
             kind if managed_proxy(kind, fields[0]) => {}
             _ => return Err("a managed container has invalid kind or name".into()),
         }
