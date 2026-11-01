@@ -18,6 +18,10 @@ const FRAME_TOO_LARGE: &str = "Python SDK response frame is larger than 512 KiB"
 const INVALID_OUTPUT: &str = "Python SDK returned invalid output";
 /// The Python version every Action runs on and every dependency set resolves for.
 pub(crate) const PYTHON_VERSION: &str = "3.15";
+/// The exact interpreter an Action runs on: the newest 3.15 release, the one the Assistant images run. uv lets "3.15"
+/// and even ">=3.15.0" select an installed 3.15 pre-release, which cannot load the SDK's `.abi3-<platform>.so`
+/// extension that 3.15.0 introduced; only an exact final excludes it.
+const PYTHON_REQUEST: &str = "3.15.2";
 /// The exact Shimpz SDK every Action runs with and every new Assistant declares.
 pub(crate) const SDK_REQUIREMENT: &str = "shimpz==0.8.0";
 /// The only package index dependencies resolve from.
@@ -177,7 +181,7 @@ fn command<const SIZE: usize>(
         .args([
             "--managed-python",
             "--python",
-            PYTHON_VERSION,
+            PYTHON_REQUEST,
             "--no-env-file",
             "--no-config",
             "--quiet",

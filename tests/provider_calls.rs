@@ -21,7 +21,7 @@ fn fake_uv(url: &str, fail_invocation: bool) -> (TempDir, PathBuf, PathBuf) {
         r#"#!/bin/sh
 SHIMPZ_INVOKE_STDIN='{capture}'
 if [ "$1" = "--version" ]; then
-  echo "uv 0.13.1"
+  echo "uv 0.13.6"
   exit 0
 fi
 if [ "$1" = "pip" ] && [ "$2" = "compile" ]; then

@@ -15,7 +15,7 @@ fn compiles_requirements_once_per_action_run() {
     let shim = directory.path().join("uv");
     let script = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "uv 0.13.1"
+  echo "uv 0.13.6"
   exit 0
 fi
 if [ "$1" = "pip" ] && [ "$2" = "compile" ]; then
