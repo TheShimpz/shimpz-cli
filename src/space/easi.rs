@@ -35,6 +35,7 @@ const LOOPBACK_PORT: u16 = 39443;
 const INSTALL_BUDGET: Duration = Duration::from_mins(30);
 const POLL: Duration = Duration::from_millis(500);
 const DOWNLOAD_BUDGET: Duration = Duration::from_mins(1);
+const NETWORK_SHAPE: &str = "{{.Driver}}|{{.Internal}}|{{.EnableIPv6}}|{{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}";
 
 /// easi.run's settings for a Space's Browser: no local MCP, no direct media path, one session, its own loopback port.
 fn environment() -> String {
@@ -51,7 +52,8 @@ fn compose_override() -> String {
     )
 }
 
-/// Creates the internal network Team and easi.run's admin share; one already there stays.
+/// Creates the internal network Team and easi.run's admin share. One already there must be exactly that: anything with a
+/// route out would give Team one.
 pub(crate) fn ensure_network(engine: &Engine) -> Result<(), String> {
     let network = graph::resource_name("browser");
     if engine
@@ -61,7 +63,20 @@ pub(crate) fn ensure_network(engine: &Engine) -> Result<(), String> {
         )?
         .success()
     {
-        return Ok(());
+        let shape = engine.run_output([
+            "network",
+            "inspect",
+            "--format",
+            NETWORK_SHAPE,
+            network.as_str(),
+        ])?;
+        return if shape.trim() == "bridge|true|false|isolated" {
+            Ok(())
+        } else {
+            Err(format!(
+                "the network {network} has another shape; remove it, then run shimpz again"
+            ))
+        };
     }
     engine.run_output([
         "network",
@@ -263,8 +278,7 @@ fn run_installer(
     }
 }
 
-/// Removes this Space's installation and the shared network; an installation it did not make stays, and so does a
-/// network still in use by one.
+/// Removes this Space's installation; an installation it did not make stays.
 pub(crate) fn uninstall(engine: &Engine, paths: &Paths) -> Result<(), String> {
     let directory = directory(paths);
     if directory.join(".git").exists() {
@@ -294,6 +308,11 @@ pub(crate) fn uninstall(engine: &Engine, paths: &Paths) -> Result<(), String> {
             Err(error) => return Err(format!("{} could not be removed: {error}", path.display())),
         }
     }
+    Ok(())
+}
+
+/// Removes the shared network once nothing of the Space or of easi.run is on it.
+pub(crate) fn remove_network(engine: &Engine) -> Result<(), String> {
     let network = graph::resource_name("browser");
     if engine
         .run_quiet_status(

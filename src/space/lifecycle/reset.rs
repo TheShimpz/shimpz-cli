@@ -62,6 +62,7 @@ impl Context {
         easi::uninstall(&self.engine, &self.paths)?;
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
+        easi::remove_network(&self.engine)?;
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
             let space_id = installed
                 .map(|current| current.space_id)
@@ -125,6 +126,7 @@ impl Context {
                 "owned Docker resources remain after hard reset",
             ));
         }
+        easi::remove_network(&self.engine).map_err(|error| hard_reset_incomplete(&error))?;
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
             linux::reset(&self.paths, inventory.space_id.as_deref())
                 .map_err(|error| hard_reset_incomplete(&error))?;
