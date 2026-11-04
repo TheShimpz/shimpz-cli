@@ -12,7 +12,7 @@ use crate::space::paths::Paths;
 use crate::space::resources::Inventory;
 use crate::space::status as status_report;
 use crate::space::storage::linux;
-use crate::space::{graph, members, scheduler, state};
+use crate::space::{easi, graph, members, scheduler, state};
 
 use super::admin::{AdminAttestation, admin_available, admin_reset};
 use super::cli_binary::{scan_managed_bin, validate_private_cli};
@@ -59,6 +59,7 @@ impl Context {
             admin_reset(&self.engine, current)
                 .map_err(|error| self.reset_failure(error, stopped))?;
         }
+        easi::uninstall(&self.engine, &self.paths)?;
         let remaining = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         remaining.remove(&self.engine)?;
         if self.profile == HostProfile::Linux && self.paths.security.exists() {
@@ -112,6 +113,8 @@ impl Context {
         }
 
         output::progress("Removing the Shimpz Space owned state...");
+        easi::uninstall(&self.engine, &self.paths)
+            .map_err(|error| hard_reset_incomplete(&error))?;
         stopped
             .remove(&self.engine)
             .map_err(|error| hard_reset_incomplete(&error))?;
@@ -155,11 +158,7 @@ impl Context {
         self.stop_owned_containers(&inventory)?;
         let stopped = Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped)?;
-        if status_report::fully_stopped(
-            &snapshot.components,
-            &snapshot.assistants,
-            &snapshot.browsers,
-        )? {
+        if status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
             Ok(())
         } else {
             Err("the Space stop is incomplete; re-run shimpz stop".into())

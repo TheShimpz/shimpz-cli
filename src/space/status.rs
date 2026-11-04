@@ -21,7 +21,7 @@ pub(crate) struct Component {
 }
 
 /// Every container of the graph, in the order status reports them.
-pub(crate) const COMPONENTS: [Component; 9] = [
+pub(crate) const COMPONENTS: [Component; 8] = [
     Component {
         docker_name: graph::ADMIN.container,
         service: graph::ADMIN.service,
@@ -69,12 +69,6 @@ pub(crate) const COMPONENTS: [Component; 9] = [
         service: ACCOUNT_EGRESS_INIT,
         label: "Account setup",
         expectation: Expectation::Init,
-    },
-    Component {
-        docker_name: graph::BROWSER_EGRESS.container,
-        service: graph::BROWSER_EGRESS.service,
-        label: "Browser network boundary",
-        expectation: Expectation::Service,
     },
 ];
 
@@ -210,15 +204,14 @@ fn parse_runtime(value: &str, health: Health, exit_code: i32) -> Option<Runtime>
     })
 }
 
-/// Whether every static service, every Assistant, and every Team Browser (ADR-0117) has stopped. A Browser counts
+/// Whether every static service, and every Assistant has stopped. A Browser counts
 /// toward the stop proof but never toward the Assistants.
 pub(crate) fn fully_stopped(
     observations: &[Observation],
     assistants: &[AssistantObservation],
-    browsers: &[AssistantObservation],
 ) -> Result<bool, String> {
     validate_snapshot(observations)?;
-    Ok(static_stopped(observations) && all_exited(assistants) && all_exited(browsers))
+    Ok(static_stopped(observations) && all_exited(assistants))
 }
 
 fn all_exited(containers: &[AssistantObservation]) -> bool {
@@ -246,7 +239,6 @@ pub(crate) fn render(
     stopped_requested: bool,
     observations: &[Observation],
     assistants: &[AssistantObservation],
-    browsers: &[AssistantObservation],
 ) -> Result<String, String> {
     validate_snapshot(observations)?;
     let stopped_services = stopped_services(observations);
@@ -255,10 +247,7 @@ pub(crate) fn render(
         .filter(|assistant| matches!(assistant.runtime, Runtime::Exited(_)))
         .count();
     if stopped_requested {
-        if static_stopped(observations)
-            && stopped_assistants == assistants.len()
-            && all_exited(browsers)
-        {
+        if static_stopped(observations) && stopped_assistants == assistants.len() {
             let configuration = if graph_current {
                 String::new()
             } else {
@@ -514,12 +503,11 @@ mod tests {
 
     #[test]
     fn renders_only_actionable_healthy_details() {
-        let rendered =
-            render(&installed(), true, false, &healthy_observations(), &[], &[]).unwrap();
+        let rendered = render(&installed(), true, false, &healthy_observations(), &[]).unwrap();
 
         assert_eq!(
             rendered,
-            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:7777\nServices: 8 healthy\nAssistants: 0 installed\nRelease: ordinal 42"
+            "Shimpz Space is healthy.\nAdmin: http://127.0.0.1:7777\nServices: 7 healthy\nAssistants: 0 installed\nRelease: ordinal 42"
         );
         assert!(!rendered.contains("sha256:"));
         assert!(!rendered.contains("space-"));
@@ -530,7 +518,6 @@ mod tests {
             false,
             &healthy_observations(),
             &[assistant("running|0"), assistant("running|0")],
-            &[],
         )
         .unwrap();
         assert!(with_assistants.contains("Assistants: 2 running"));
@@ -544,44 +531,16 @@ mod tests {
             true,
             &stopped_observations(),
             &[assistant("exited|0"), assistant("exited|143")],
-            &[],
         )
         .unwrap();
 
         assert_eq!(
             rendered,
-            "Shimpz Space is stopped.\nServices: 8 stopped\nAssistants: 2 stopped\nRelease: ordinal 42\nConfiguration: will reconcile on start\nNext: shimpz start"
+            "Shimpz Space is stopped.\nServices: 7 stopped\nAssistants: 2 stopped\nRelease: ordinal 42\nConfiguration: will reconcile on start\nNext: shimpz start"
         );
-        assert!(fully_stopped(&stopped_observations(), &[assistant("exited|137")], &[]).unwrap());
-        // A Team Browser that still runs keeps the stop incomplete, and one that stopped is never an Assistant.
-        assert!(!fully_stopped(&stopped_observations(), &[], &[assistant("running|0")]).unwrap());
-        assert!(fully_stopped(&stopped_observations(), &[], &[assistant("exited|0")]).unwrap());
-        assert_eq!(
-            render(
-                &installed(),
-                true,
-                true,
-                &stopped_observations(),
-                &[],
-                &[assistant("running|0")]
-            )
-            .unwrap(),
-            "Shimpz Space needs attention.\nServices: 8 of 8 stopped\nAssistants: 0 installed\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
-        );
-        assert_eq!(
-            render(
-                &installed(),
-                true,
-                true,
-                &stopped_observations(),
-                &[],
-                &[assistant("exited|0")]
-            )
-            .unwrap(),
-            render(&installed(), true, true, &stopped_observations(), &[], &[]).unwrap()
-        );
+        assert!(fully_stopped(&stopped_observations(), &[assistant("exited|137")]).unwrap());
 
-        let current = render(&installed(), true, true, &stopped_observations(), &[], &[]).unwrap();
+        let current = render(&installed(), true, true, &stopped_observations(), &[]).unwrap();
         assert!(!current.contains("Configuration:"));
     }
 
@@ -595,15 +554,14 @@ mod tests {
             true,
             &observations,
             &[assistant("exited|0"), assistant("running|0")],
-            &[],
         )
         .unwrap();
 
         assert_eq!(
             rendered,
-            "Shimpz Space needs attention.\nServices: 7 of 8 stopped\nAssistants: 1 of 2 stopped\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
+            "Shimpz Space needs attention.\nServices: 6 of 7 stopped\nAssistants: 1 of 2 stopped\nRelease: ordinal 42\nProblem: the requested stop is incomplete.\nNext: shimpz stop"
         );
-        assert!(!fully_stopped(&observations, &[], &[]).unwrap());
+        assert!(!fully_stopped(&observations, &[]).unwrap());
         assert_eq!(
             incomplete_stop_error(&observations, &[]).unwrap(),
             "the Space stop is incomplete; re-run shimpz stop"
@@ -616,7 +574,7 @@ mod tests {
         observations[0] = observe(COMPONENTS[0], None).unwrap();
         let assistants = [assistant("dead|2")];
 
-        let rendered = render(&installed(), true, true, &observations, &assistants, &[]).unwrap();
+        let rendered = render(&installed(), true, true, &observations, &assistants).unwrap();
 
         assert!(rendered.ends_with("Next: shimpz install, then shimpz stop"));
         assert_eq!(
@@ -663,13 +621,12 @@ mod tests {
             false,
             &observations,
             &[assistant("exited|0")],
-            &[],
         )
         .unwrap();
 
         assert_eq!(
             rendered,
-            "Shimpz Space needs attention.\nAdmin: unavailable\nServices: 5 of 8 healthy\nAssistants: 0 of 1 running\nRelease: ordinal 42\nProblems:\n  - Local configuration needs reconciliation.\n  - Admin stopped with exit code 0.\n  - Team stopped with exit code 7.\n  - Assistant release boundary is unhealthy.\n  - Account setup is missing.\n  - 1 Assistant is not running.\nNext: shimpz start"
+            "Shimpz Space needs attention.\nAdmin: unavailable\nServices: 4 of 7 healthy\nAssistants: 0 of 1 running\nRelease: ordinal 42\nProblems:\n  - Local configuration needs reconciliation.\n  - Admin stopped with exit code 0.\n  - Team stopped with exit code 7.\n  - Assistant release boundary is unhealthy.\n  - Account setup is missing.\n  - 1 Assistant is not running.\nNext: shimpz start"
         );
 
         let plural = render(
@@ -678,7 +635,6 @@ mod tests {
             false,
             &healthy_observations(),
             &[assistant("exited|0"), assistant("dead|2")],
-            &[],
         )
         .unwrap();
         assert!(plural.contains("2 Assistants are not running."));
@@ -689,7 +645,7 @@ mod tests {
         let mut missing = healthy_observations();
         missing[0] = observe(COMPONENTS[0], None).unwrap();
         assert!(
-            render(&installed(), true, false, &missing, &[], &[])
+            render(&installed(), true, false, &missing, &[])
                 .unwrap()
                 .contains("  - Admin is missing.")
         );
@@ -704,7 +660,7 @@ mod tests {
         ] {
             let mut observations = healthy_observations();
             observations[0] = observe(COMPONENTS[0], Some(record)).unwrap();
-            let rendered = render(&installed(), true, false, &observations, &[], &[]).unwrap();
+            let rendered = render(&installed(), true, false, &observations, &[]).unwrap();
             assert!(rendered.starts_with("Shimpz Space needs attention."));
             assert!(rendered.contains("  - Admin"));
         }
@@ -716,7 +672,7 @@ mod tests {
             let mut observations = healthy_observations();
             observations[7] = observe(COMPONENTS[7], Some(record)).unwrap();
             assert!(
-                render(&installed(), true, false, &observations, &[], &[])
+                render(&installed(), true, false, &observations, &[])
                     .unwrap()
                     .contains("  - Account setup")
             );
@@ -728,7 +684,7 @@ mod tests {
         let mut observations = healthy_observations();
         assert_eq!(observations[0].service(), "admin");
         observations[0] = observations[0].detached();
-        let rendered = render(&installed(), true, false, &observations, &[], &[]).unwrap();
+        let rendered = render(&installed(), true, false, &observations, &[]).unwrap();
         assert!(rendered.starts_with("Shimpz Space needs attention.\nAdmin: unavailable\n"));
         assert!(
             rendered.contains("  - Admin runs without its declared network or published port.")
@@ -780,18 +736,8 @@ mod tests {
             assert!(observe_assistant(record).is_err());
         }
         assert!(observe_assistant(&"x".repeat(MAX_RECORD_BYTES + 1)).is_err());
-        assert!(
-            render(
-                &installed(),
-                true,
-                false,
-                &healthy_observations()[..7],
-                &[],
-                &[]
-            )
-            .is_err()
-        );
-        assert!(fully_stopped(&healthy_observations()[..7], &[], &[]).is_err());
+        assert!(render(&installed(), true, false, &healthy_observations()[..7], &[]).is_err());
+        assert!(fully_stopped(&healthy_observations()[..7], &[]).is_err());
         assert_eq!(observe(component, None).unwrap().runtime, Runtime::Missing);
     }
 

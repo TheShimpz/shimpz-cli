@@ -50,6 +50,7 @@ pub(crate) const TEAM: Member = Member {
     service: "team",
     container: "shimpz-team",
     networks: &[
+        "browser",
         "control",
         "brain_runtime",
         "account_egress",
@@ -63,13 +64,6 @@ pub(crate) const ASSISTANT_EGRESS: Member = Member {
     service: "shimpz-assistant-egress",
     container: "shimpz-assistant-egress",
     networks: &["assistant_egress", "assistant_egress_out"],
-    publishes_admin: false,
-    package: release::EGRESS,
-};
-pub(crate) const BROWSER_EGRESS: Member = Member {
-    service: "shimpz-browser-egress",
-    container: "shimpz-browser-egress",
-    networks: &["browser", "browser_egress_out"],
     publishes_admin: false,
     package: release::EGRESS,
 };
@@ -110,10 +104,9 @@ pub(crate) const ADMIN: Member = Member {
 };
 
 /// Every long-running service of the graph, in the template's order.
-pub(crate) const MEMBERS: [Member; 8] = [
+pub(crate) const MEMBERS: [Member; 7] = [
     TEAM,
     ASSISTANT_EGRESS,
-    BROWSER_EGRESS,
     ASSISTANT_RELEASE,
     ACCOUNT_EGRESS,
     BRAIN_EGRESS,
@@ -126,8 +119,8 @@ pub(crate) const MEMBERS: [Member; 8] = [
 pub(crate) const ACCOUNT_EGRESS_INIT: &str = "shimpz-account-egress-init";
 
 /// The service names of [`MEMBERS`].
-pub(crate) const LONG_RUNNING_SERVICES: [&str; 8] = {
-    let mut services = [""; 8];
+pub(crate) const LONG_RUNNING_SERVICES: [&str; 7] = {
+    let mut services = [""; 7];
     let mut index = 0;
     while index < MEMBERS.len() {
         services[index] = MEMBERS[index].service;
@@ -152,7 +145,7 @@ pub(crate) const CONTAINERS: [&str; 9] = {
 const RESOURCE_PREFIX: &str = "shimpz-space-";
 
 /// The logical keys of every Local network, in the template's order.
-pub(crate) const NETWORK_NAMES: [&str; 13] = [
+pub(crate) const NETWORK_NAMES: [&str; 12] = [
     "control",
     "brain_runtime",
     "brain_egress",
@@ -162,7 +155,6 @@ pub(crate) const NETWORK_NAMES: [&str; 13] = [
     "assistant_release",
     "assistant_release_out",
     "browser",
-    "browser_egress_out",
     "account_egress",
     "account_egress_out",
     "egress",
@@ -187,7 +179,7 @@ const fn volume(name: &'static str, uid: u32, gid: u32, mode: u32) -> Volume {
     }
 }
 
-pub(crate) const VOLUMES: [Volume; 30] = [
+pub(crate) const VOLUMES: [Volume; 29] = [
     volume("data", 1000, 1000, 0o700),
     volume("controller_token", 10001, 10010, 0o2750),
     volume("controller_audit", 10001, 10001, 0o700),
@@ -222,7 +214,6 @@ pub(crate) const VOLUMES: [Volume; 30] = [
     volume("assistant_egress_policy", 10001, 10017, 0o750),
     volume("assistant_egress_audit", 10005, 10005, 0o700),
     volume("assistant_release_audit", 10004, 10004, 0o700),
-    volume("browser_egress_audit", 10032, 10032, 0o700),
     volume("account_egress_capability", 10023, 10022, 0o750),
     volume("account_egress_audit", 10006, 10006, 0o700),
     volume("brain_egress_audit", 10001, 10001, 0o700),
@@ -230,8 +221,8 @@ pub(crate) const VOLUMES: [Volume; 30] = [
     volume("brain_runtime_state", 10001, 10001, 0o700),
 ];
 
-pub(crate) const VOLUME_NAMES: [&str; 30] = {
-    let mut names = [""; 30];
+pub(crate) const VOLUME_NAMES: [&str; 29] = {
+    let mut names = [""; 29];
     let mut index = 0;
     while index < VOLUMES.len() {
         names[index] = VOLUMES[index].name;
@@ -317,8 +308,8 @@ mod tests {
             assert!(graph.starts_with("name: ${SHIMPZ_PROJECT_NAME"));
             assert!(!graph.contains(VOLUME_TOKEN));
             assert!(!graph.contains(VOLUME_NOCOPY_TOKEN));
-            assert_eq!(graph.matches("container_name:").count(), 9);
-            assert_eq!(graph.matches("    driver: none").count(), 9);
+            assert_eq!(graph.matches("container_name:").count(), 8);
+            assert_eq!(graph.matches("    driver: none").count(), 8);
             for volume in VOLUME_NAMES {
                 assert!(graph.contains(&format!("  {volume}:\n")));
             }
@@ -451,8 +442,8 @@ mod tests {
         );
         assert!(!managed.contains("      o: bind"));
         assert!(!managed.contains("SHIMPZ_SECURE_VOLUME_ROOT"));
-        assert_eq!(linux.matches("        nocopy: true").count(), 36);
-        assert_eq!(managed.matches("        nocopy: false").count(), 36);
+        assert_eq!(linux.matches("        nocopy: true").count(), 35);
+        assert_eq!(managed.matches("        nocopy: false").count(), 35);
         assert!(!linux.contains("        nocopy: false"));
         assert!(!managed.contains("        nocopy: true"));
     }
@@ -484,7 +475,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(mount_count, 36);
+            assert_eq!(mount_count, 35);
             assert_eq!(socket_count, 1);
             assert_eq!(sources, VOLUME_NAMES.into_iter().collect::<BTreeSet<_>>());
         }

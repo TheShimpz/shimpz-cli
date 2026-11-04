@@ -8,6 +8,8 @@ mod confirm;
 #[cfg(unix)]
 pub(crate) mod deploy;
 pub(crate) mod docker;
+#[cfg(unix)]
+pub(crate) mod easi;
 pub(crate) mod graph;
 pub(crate) mod host;
 pub(crate) mod id;

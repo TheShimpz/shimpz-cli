@@ -1020,7 +1020,7 @@ fn require_engine_versions(daemon: &str, compose: &str) -> Result<(), String> {
         fields.next().unwrap_or_default(),
         fields.next().unwrap_or_default(),
     );
-    // Engine 28 creates the Browser network with an isolated gateway (ADR-0117).
+    // Engine 28 creates the Browser network with an isolated gateway (ADR-0126).
     if !version_at_least(server, (28, 0, 0)) || !version_at_least(api, (1, 48, 0)) {
         return Err(format!(
             "Docker Engine 28.0 or newer with API 1.48 is required (Engine {server}, API {api})"
@@ -1368,7 +1368,7 @@ mod tests {
         let paths = Paths::under(temporary.path()).unwrap();
         let calls = temporary.path().join("calls");
         let hash = "e".repeat(64);
-        let services = " --no-deps team shimpz-assistant-egress shimpz-browser-egress shimpz-assistant-release shimpz-account-egress shimpz-brain-egress brain admin";
+        let services = " --no-deps team shimpz-assistant-egress shimpz-assistant-release shimpz-account-egress shimpz-brain-egress brain admin";
         for (records, capability, selected) in [
             (init_records(&hash), "exit 0", true),
             (init_records(&hash), "exit 1", false),

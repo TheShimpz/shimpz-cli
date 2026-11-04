@@ -14,6 +14,7 @@ use crate::private_file::{self, ReadFailure};
 
 use super::deploy;
 use super::docker::{Engine, PendingStatus, ProjectionFailure, ResolvedRelease};
+use super::easi;
 use super::graph;
 use super::host::{self, HostProfile};
 use super::members;
@@ -197,7 +198,6 @@ pub(crate) fn status() -> Result<String, String> {
         stopped,
         &components,
         &snapshot.assistants,
-        &snapshot.browsers,
     )
 }
 
@@ -256,9 +256,7 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
         .into_iter()
         .map(str::to_owned)
         .collect();
-    // A Team Browser is a dynamic container too: it counts toward the stop proof but never as an Assistant
-    // (ADR-0117).
-    let (mut assistants, mut browsers) = (Vec::new(), Vec::new());
+    let mut assistants = Vec::new();
     for record in resources::inspect_containers(
         engine,
         &assistant_ids,
@@ -267,7 +265,6 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
     )? {
         match record.split_once('|') {
             Some(("assistant", state)) => assistants.push(status_report::observe_assistant(state)?),
-            Some(("browser", state)) => browsers.push(status_report::observe_assistant(state)?),
             // A snapshot reader is never started: neither an Assistant nor anything a stop has to end.
             Some(("snapshot-reader", _)) => {}
             _ => return Err(inconsistent()),
@@ -276,7 +273,6 @@ fn runtime_snapshot(engine: &Engine, inventory: &Inventory) -> Result<RuntimeSna
     Ok(RuntimeSnapshot {
         components,
         assistants,
-        browsers,
     })
 }
 
@@ -329,7 +325,6 @@ type ControllerSocket = Result<(PathBuf, u32), String>;
 struct RuntimeSnapshot {
     components: Vec<status_report::Observation>,
     assistants: Vec<status_report::AssistantObservation>,
-    browsers: Vec<status_report::AssistantObservation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -641,11 +636,7 @@ impl Context {
         let stopped_inventory =
             Inventory::inspect(&self.engine, &self.paths, self.profile.storage())?;
         let snapshot = runtime_snapshot(&self.engine, &stopped_inventory)?;
-        if !status_report::fully_stopped(
-            &snapshot.components,
-            &snapshot.assistants,
-            &snapshot.browsers,
-        )? {
+        if !status_report::fully_stopped(&snapshot.components, &snapshot.assistants)? {
             return Err(status_report::incomplete_stop_error(
                 &snapshot.components,
                 &snapshot.assistants,
@@ -657,7 +648,6 @@ impl Context {
             true,
             &snapshot.components,
             &snapshot.assistants,
-            &snapshot.browsers,
         )
     }
 
@@ -754,6 +744,7 @@ impl Context {
             })?;
         remove_backup(previous)?;
         finish_failed_release_memory(&self.paths, preserve_failed_release)?;
+        easi::ensure(&self.engine, &self.paths);
         Ok(ApplyOutcome::Ready { port })
     }
 
@@ -861,6 +852,7 @@ impl Context {
         pending: &mut Option<PendingStatus>,
     ) -> Result<String, Option<String>> {
         let release = candidate.release;
+        easi::ensure_network(&self.engine).map_err(Some)?;
         let (started, timings) = self
             .engine
             .compose_up(&self.paths, init_current)
@@ -2418,7 +2410,7 @@ mod tests {
         crate::fake_tool::write(
             &docker,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space-release-status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"$(printf '%s' \"${{5#shimpz-space-}}\" | tr - _)\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *NetworkSettings.Networks*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|true|shimpz-space-control shimpz-space-egress |{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}}]}}' '{team_id}|/shimpz-team|team|true|shimpz-space-control shimpz-space-brain-runtime shimpz-space-account-egress shimpz-space-assistant-release shimpz-space-assistant-egress |{{}}' '{brain_id}|/shimpz-brain|brain|true|shimpz-space-brain-runtime shimpz-space-brain-egress |{{}}' ;;\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  ps) case \"$*\" in *com.docker.compose.project=shimpz-space*) printf '%s\\n' {admin_id} {team_id} {brain_id} ;; esac ;;\n  volume) case \"$2 $5\" in 'inspect shimpz-space-release-status') {status_volume} ;; inspect*) printf '%s|shimpz-space|%s\\n' \"$5\" \"$(printf '%s' \"${{5#shimpz-space-}}\" | tr - _)\" ;; esac ;;\n  network) ;;\n  inspect) case \"$*\" in\n    *NetworkSettings.Networks*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|true|shimpz-space-control shimpz-space-egress |{{\"4600/tcp\":[{{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"7777\"}}]}}' '{team_id}|/shimpz-team|team|true|shimpz-space-browser shimpz-space-control shimpz-space-brain-runtime shimpz-space-account-egress shimpz-space-assistant-release shimpz-space-assistant-egress |{{}}' '{brain_id}|/shimpz-brain|brain|true|shimpz-space-brain-runtime shimpz-space-brain-egress |{{}}' ;;\n    *com.docker.compose.service*) printf '%s\\n' '{admin_id}|/shimpz-admin|admin|{admin}' '{team_id}|/shimpz-team|team|{team}' '{brain_id}|/shimpz-brain|brain|{brain}' ;;\n    *'{{{{.Name}}}}|{{{{.Config.Image}}}}'*) printf '%s\\n' '{admin_id}|/shimpz-admin|{admin}' '{team_id}|/shimpz-team|{team}' '{brain_id}|/shimpz-brain|{brain}' ;;\n    *) exit 1 ;;\n  esac ;;\n  image) echo 1 ;;\n  stop) exit {stop} ;;\n  rm) exit {remove} ;;\n  compose) exit {compose} ;;\n  run) cat >> '{status}' ;;\n  *) exit 1 ;;\nesac\n",
                 log = log.display(),
                 status = home.join("status.log").display(),
                 status_volume = if status_volume {
@@ -3753,13 +3745,12 @@ mod tests {
             "{:0<64}|/shimpz-admin|admin|running|healthy|0\n\
              {:0<64}|/shimpz-team|team|exited||7\n\
              {:0<64}|/shimpz-account-egress-init|shimpz-account-egress-init|exited||0\n\
-             {:0<64}|assistant|running|0\n{:0<64}|assistant|exited|137\n{:0<64}|browser|running|0\n",
-            "c001", "c002", "c003", "a001", "a002", "b001"
+             {:0<64}|assistant|running|0\n{:0<64}|assistant|exited|137\n",
+            "c001", "c002", "c003", "a001", "a002"
         );
-        // A running Team Browser is a dynamic container that the Assistant count never includes.
         let inventory = Inventory {
             project_containers: vec!["c001".into(), "c002".into(), "c003".into()],
-            dynamic_containers: vec!["c002".into(), "a001".into(), "a002".into(), "b001".into()],
+            dynamic_containers: vec!["c002".into(), "a001".into(), "a002".into()],
             ..Inventory::default()
         };
         let (temporary, engine) = inspecting_docker(&map);
@@ -3785,10 +3776,6 @@ mod tests {
                 status_report::observe_assistant("running|0").unwrap(),
                 status_report::observe_assistant("exited|137").unwrap(),
             ]
-        );
-        assert_eq!(
-            snapshot.browsers,
-            [status_report::observe_assistant("running|0").unwrap()]
         );
 
         let (temporary, engine) = inspecting_docker("");
