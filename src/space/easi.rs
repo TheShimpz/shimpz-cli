@@ -22,10 +22,10 @@ use super::graph;
 use super::paths::Paths;
 
 /// The release of easi.run this CLI installs.
-const RELEASE: &str = "62c74822eeba2d297913da413c728506e2f74c28";
+const RELEASE: &str = "0ac23dd8cfd2921c2732679bd4c72beb80bb7add";
 /// The installer of that release, in the commit of the public repository that names it.
-const INSTALLER_URL: &str = "https://raw.githubusercontent.com/julianosig/easi.run/e635f5b63e921502b28ca6e59b9ca20c23853523/install.sh";
-const INSTALLER_SHA256: &str = "24df65acdc7e51b8466f3051f638e2630c86895f80586568f377e2fea9e94d00";
+const INSTALLER_URL: &str = "https://raw.githubusercontent.com/julianosig/easi.run/a8dc9f4f261ddba622d59a6a9aa34b7a7df800b3/install.sh";
+const INSTALLER_SHA256: &str = "37d2df6ff6a4547ce88fc446d5df402809c17a9ad18f225e9fd939708c0dc991";
 const REPOSITORY: &str = "https://github.com/julianosig/easi.run";
 /// The admin's container, and the working directory Compose labels it with.
 const ADMIN_CONTAINER: &str = "easi-run-admin-1";
